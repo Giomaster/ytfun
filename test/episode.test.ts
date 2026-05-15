@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildEpisodePublishQueue, buildThumbnailConfig, loadEpisodeConfig } from "../src/episode.js";
+import { buildEpisodePublishQueue, buildThumbnailConfig, createEpisodeDraft, loadEpisodeConfig } from "../src/episode.js";
 
 test("loadEpisodeConfig validates the example episode manifest", async () => {
   const config = await loadEpisodeConfig("examples/episode.json");
@@ -40,4 +40,20 @@ test("buildEpisodePublishQueue materializes Shorts upload items", async () => {
   assert.equal(queue.items.length, 1);
   assert.equal(queue.items[0]?.title, "The hook everyone replayed #Shorts");
   assert.equal(queue.items[0]?.approvedBy, "human-editor-name");
+});
+
+test("createEpisodeDraft proposes a production-ready episode manifest", () => {
+  const draft = createEpisodeDraft({
+    sourcePath: "data/cases/real-cassetadas/sources/skateboarder-falling-4759036.mp4",
+    id: "draft-smoke",
+    title: "Draft Smoke",
+    shortsCount: 2,
+    shortDurationSeconds: 10,
+  });
+
+  assert.equal(draft.id, "draft-smoke");
+  assert.equal(draft.shorts.length, 2);
+  assert.equal(draft.shorts[0]?.start, "00:00:00");
+  assert.equal(draft.thumbnails?.defaults?.autoFrame, true);
+  assert.equal(draft.publish?.defaultPrivacyStatus, "private");
 });

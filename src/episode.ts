@@ -1,6 +1,8 @@
-import { resolve } from "node:path";
+import { spawnSync } from "node:child_process";
+import { basename, extname, resolve } from "node:path";
 import { createFirstPartyShorts } from "./firstPartyShorts.js";
-import { readJsonFile, writeJsonFile } from "./io.js";
+import { assertFfmpegAvailable } from "./ffmpeg.js";
+import { readJsonFile, writeJsonFile, writeTextFile } from "./io.js";
 import { renderThumbnails, type ThumbnailConfig } from "./thumbnails.js";
 import type {
   FirstPartyShortCut,
@@ -51,6 +53,7 @@ export interface EpisodeOutput {
   thumbnailOutputPath: string;
   publishQueuePath: string;
   reportPath: string;
+  reviewReportPath: string;
   publishReady: boolean;
   shorts: FirstPartyShortsOutput["shorts"];
   thumbnails: Array<{
@@ -64,6 +67,18 @@ export interface EpisodeOutput {
     videoPath: string;
     title: string;
   }>;
+}
+
+export interface EpisodeDraftOptions {
+  sourcePath: string;
+  id?: string;
+  title?: string;
+  channelName?: string;
+  context?: string;
+  outputDir?: string;
+  shortsCount?: number;
+  shortDurationSeconds?: number;
+  visualMode?: ShortsVisualMode;
 }
 
 export async function loadEpisodeConfig(path: string): Promise<EpisodeConfig> {
@@ -105,6 +120,7 @@ export async function runEpisode(config: EpisodeConfig, outDirOverride?: string)
     thumbnailOutputPath: relativeToCwd(resolve(thumbnailsDir, "thumbnails-output.json")),
     publishQueuePath: relativeToCwd(publishQueuePath),
     reportPath: relativeToCwd(resolve(outputDir, "episode-output.json")),
+    reviewReportPath: relativeToCwd(resolve(outputDir, "episode-review.md")),
     publishReady: publishQueue.items.every((item) => Boolean(item.approvedBy)),
     shorts: shortsResult.output.shorts,
     thumbnails: thumbnailOutput.files.map((file) => ({
@@ -121,7 +137,58 @@ export async function runEpisode(config: EpisodeConfig, outDirOverride?: string)
   };
 
   await writeJsonFile(resolve(outputDir, "episode-output.json"), report);
+  await writeTextFile(resolve(outputDir, "episode-review.md"), buildEpisodeReviewMarkdown(report));
   return report;
+}
+
+export function createEpisodeDraft(options: EpisodeDraftOptions): EpisodeConfig {
+  if (!options.sourcePath) {
+    throw new Error("--source is required");
+  }
+
+  const durationSeconds = inspectVideoDurationSeconds(options.sourcePath);
+  const id = options.id ?? safeName(basename(options.sourcePath, extname(options.sourcePath)));
+  const title = options.title ?? titleFromId(id);
+  const shortsCount = clampInteger(options.shortsCount ?? 3, 1, 8);
+  const shortDurationSeconds = clampInteger(options.shortDurationSeconds ?? 30, 8, 60);
+  const shorts = draftShortCuts(durationSeconds, shortsCount, shortDurationSeconds);
+  const candidateTimestamps = candidateTimestampsForDuration(durationSeconds);
+
+  return {
+    id,
+    title,
+    sourcePath: options.sourcePath,
+    channelName: options.channelName ?? "Radar de Agora",
+    visualMode: options.visualMode ?? "none",
+    outputDir: options.outputDir ?? `data/episodes/${id}`,
+    context: options.context ?? title,
+    shorts,
+    thumbnails: {
+      format: "png",
+      width: 1280,
+      height: 720,
+      defaults: {
+        autoFrame: true,
+        autoAccent: true,
+        autoEmojis: true,
+        candidateTimestamps,
+      },
+      variants: [
+        { id: "auto-emojis" },
+        { id: "clean-glow", autoEmojis: false },
+      ],
+    },
+    publish: {
+      approvedBy: "",
+      includeShorts: true,
+      defaultPrivacyStatus: "private",
+      defaults: {
+        descriptionSuffix: `Cut from an original ${options.channelName ?? "Radar de Agora"} episode.`,
+        tags: ["shorts", "original"],
+        madeForKids: false,
+      },
+    },
+  };
 }
 
 export function buildShortsConfig(config: EpisodeConfig): FirstPartyShortsConfig {
@@ -219,6 +286,60 @@ export function buildEpisodePublishQueue(
   };
 }
 
+function buildEpisodeReviewMarkdown(output: EpisodeOutput): string {
+  const lines = [
+    `# ${output.title}`,
+    "",
+    `Generated: ${output.generatedAt}`,
+    `Episode ID: ${output.id}`,
+    `Source: ${output.sourcePath}`,
+    "",
+    "## Review Checklist",
+    "",
+    "- [ ] Watch every Short end-to-end.",
+    "- [ ] Confirm no clipped heads, broken framing, or dead air.",
+    "- [ ] Pick one thumbnail variant.",
+    "- [ ] Review titles, descriptions, tags, and privacy.",
+    "- [ ] Confirm rights manifest is acceptable.",
+    "- [ ] Set final approval before upload.",
+    "",
+    "## Shorts",
+    "",
+    ...output.shorts.flatMap((short) => [
+      `- ${short.title}`,
+      `  - File: ${short.outputPath}`,
+      `  - Source cut: ${short.start} for ${short.duration}`,
+    ]),
+    "",
+    "## Thumbnails",
+    "",
+    ...output.thumbnails.flatMap((thumbnail) => [
+      `### ${thumbnail.id}`,
+      "",
+      `![${thumbnail.id}](${thumbnail.path})`,
+      "",
+      `Timestamp: ${thumbnail.timestamp}`,
+      `Accent: ${thumbnail.accent}`,
+      "",
+    ]),
+    "## Publish Queue",
+    "",
+    `Publish ready: ${output.publishReady ? "yes" : "no"}`,
+    `Queue: ${output.publishQueuePath}`,
+    "",
+    ...output.publishItems.map((item) => `- ${item.title}: ${item.videoPath}`),
+    "",
+    "## Manifests",
+    "",
+    `- Shorts output: ${output.shortsOutputPath}`,
+    `- Rights manifest: ${output.rightsManifestPath}`,
+    `- Thumbnail output: ${output.thumbnailOutputPath}`,
+    `- JSON report: ${output.reportPath}`,
+    "",
+  ];
+  return `${lines.join("\n")}\n`;
+}
+
 function validateEpisodeConfig(config: EpisodeConfig): void {
   const errors: string[] = [];
   if (!config.id) errors.push("id is required");
@@ -239,6 +360,58 @@ function validateEpisodeConfig(config: EpisodeConfig): void {
   if (errors.length > 0) {
     throw new Error(`Invalid episode config:\n- ${errors.join("\n- ")}`);
   }
+}
+
+function inspectVideoDurationSeconds(sourcePath: string): number {
+  const ffmpegPath = assertFfmpegAvailable();
+  const result = spawnSync(ffmpegPath, ["-hide_banner", "-i", resolve(process.cwd(), sourcePath)], { encoding: "utf8" });
+  const details = `${result.stderr}\n${result.stdout}`;
+  const match = details.match(/Duration:\s+(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)/);
+  if (!match) {
+    throw new Error(`Could not inspect duration for ${sourcePath}`);
+  }
+  return Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
+}
+
+function draftShortCuts(durationSeconds: number, count: number, requestedDurationSeconds: number): FirstPartyShortCut[] {
+  const shortDuration = Math.min(requestedDurationSeconds, Math.max(8, Math.floor(durationSeconds)));
+  const maxStart = Math.max(0, durationSeconds - shortDuration);
+  const spacing = count === 1 ? 0 : maxStart / (count - 1);
+  return Array.from({ length: count }, (_, index) => {
+    const start = Math.round(spacing * index);
+    return {
+      id: `short-${String(index + 1).padStart(2, "0")}`,
+      title: `Short ${index + 1}`,
+      start: secondsToClock(start),
+      duration: secondsToClock(shortDuration),
+    };
+  });
+}
+
+function candidateTimestampsForDuration(durationSeconds: number): string[] {
+  const safeDuration = Math.max(1, durationSeconds - 1);
+  const ratios = [0.12, 0.24, 0.38, 0.52, 0.68, 0.84];
+  return Array.from(new Set(ratios.map((ratio) => secondsToClock(Math.max(1, Math.round(safeDuration * ratio))))));
+}
+
+function secondsToClock(seconds: number): string {
+  const safeSeconds = Math.max(0, Math.floor(seconds));
+  const hours = Math.floor(safeSeconds / 3600);
+  const minutes = Math.floor((safeSeconds % 3600) / 60);
+  const secs = safeSeconds % 60;
+  return [hours, minutes, secs].map((value) => String(value).padStart(2, "0")).join(":");
+}
+
+function titleFromId(id: string): string {
+  return id.split(/[-_]+/g).filter(Boolean).map(capitalize).join(" ") || "Untitled Episode";
+}
+
+function capitalize(value: string): string {
+  return `${value.slice(0, 1).toUpperCase()}${value.slice(1)}`;
+}
+
+function clampInteger(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, Math.round(value)));
 }
 
 function safeName(value: string): string {

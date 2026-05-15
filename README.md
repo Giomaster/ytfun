@@ -47,10 +47,11 @@ This is the preferred MVP path. The source video is ours, `sourceOrigin` is effe
 End-to-end episode production:
 
 ```bash
+npm start -- episode-init --source data/originals/trend-001.mp4 --out data/episodes/trend-001.json --title "Trend 001" --shorts 3
 npm start -- episode --config examples/episode.json --out-dir data/episodes/example
 ```
 
-An episode manifest is the production unit for one original video. It combines the source video, Shorts cuts, thumbnail variants, upload metadata, and approval state. The command renders Shorts, generates automatic thumbnails, writes a rights manifest, creates a YouTube publish queue, and saves an `episode-output.json` report.
+An episode manifest is the production unit for one original video. It combines the source video, Shorts cuts, thumbnail variants, upload metadata, and approval state. `episode-init` drafts a manifest from a source video by inspecting its duration and proposing evenly spaced Shorts plus automatic thumbnail settings. `episode` renders Shorts, generates automatic thumbnails, writes a rights manifest, creates a YouTube publish queue, and saves both `episode-output.json` and `episode-review.md`.
 
 Publish queue for YouTube:
 

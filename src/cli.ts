@@ -9,7 +9,7 @@ import { createViralFailsDemo } from "./viralFailsDemo.js";
 import { discoverFromYouTube } from "./youtube.js";
 import { createRealCaseDemo } from "./realCaseDemo.js";
 import { createFirstPartyShorts, loadFirstPartyShortsConfig } from "./firstPartyShorts.js";
-import { loadEpisodeConfig, runEpisode } from "./episode.js";
+import { createEpisodeDraft, loadEpisodeConfig, runEpisode } from "./episode.js";
 import { authenticateYouTubeUpload, publishYouTubeQueue } from "./youtubePublish.js";
 import { loadThumbnailConfig, renderThumbnails } from "./thumbnails.js";
 import type { DiscoveryOutput, RightsManifest, ShortlistOutput } from "./types.js";
@@ -54,6 +54,9 @@ async function main(): Promise<void> {
         break;
       case "episode":
         await episode(args);
+        break;
+      case "episode-init":
+        await episodeInit(args);
         break;
       case "youtube-auth":
         await youtubeAuth(args);
@@ -189,6 +192,32 @@ async function episode(args: Args): Promise<void> {
   console.log(`Shorts: ${output.shorts.length}`);
   console.log(`Thumbnails: ${output.thumbnails.length}`);
   console.log(`Publish queue: ${output.publishQueuePath}`);
+  console.log(`Review report: ${output.reviewReportPath}`);
+}
+
+async function episodeInit(args: Args): Promise<void> {
+  const sourcePath = stringArg(args, "source");
+  const id = typeof args.id === "string" ? args.id : undefined;
+  const title = typeof args.title === "string" ? args.title : undefined;
+  const context = typeof args.context === "string" ? args.context : undefined;
+  const channelName = typeof args["channel-name"] === "string" ? args["channel-name"] : undefined;
+  const outputDir = typeof args["episode-dir"] === "string" ? args["episode-dir"] : undefined;
+  const shortsCount = typeof args.shorts === "string" ? Number(args.shorts) : undefined;
+  const shortDurationSeconds = typeof args["short-duration"] === "string" ? Number(args["short-duration"]) : undefined;
+  const outPath = stringArg(args, "out", "data/episode-draft.json");
+  const draftConfig = createEpisodeDraft({
+    sourcePath,
+    id,
+    title,
+    context,
+    channelName,
+    outputDir,
+    shortsCount,
+    shortDurationSeconds,
+  });
+  await writeJsonFile(outPath, draftConfig);
+  console.log(`Wrote episode draft to ${outPath}`);
+  console.log(`Shorts drafted: ${draftConfig.shorts.length}`);
 }
 
 async function youtubeAuth(args: Args): Promise<void> {
@@ -277,6 +306,7 @@ Commands:
   viral-fails-demo --out data/cases/cassetadas-viral/cassetadas-viral-demo.mp4
   real-case-demo --out data/cases/real-cassetadas/real-cassetadas-demo.mp4 [--visuals none|minimal]
   shorts-from-original --config examples/first-party-cuts.json --out-dir data/shorts/example
+  episode-init --source data/originals/video.mp4 --out data/episodes/draft.json [--title "Episode title"] [--shorts 3]
   episode --config examples/episode.json --out-dir data/episodes/example
   youtube-auth --client-secret config/youtube-oauth-client.json --token data/youtube-token.json
   publish-queue --queue examples/youtube-publish-queue.json --out data/youtube-publish-results.json [--execute]
