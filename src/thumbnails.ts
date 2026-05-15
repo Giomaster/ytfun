@@ -1,8 +1,8 @@
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import sharp from "sharp";
+import sharp, { type OverlayOptions } from "sharp";
 import { assertFfmpegAvailable } from "./ffmpeg.js";
 import { readJsonFile, writeJsonFile } from "./io.js";
 
@@ -18,6 +18,7 @@ export interface ThumbnailStyle {
   videoPath?: string;
   timestamp?: string;
   effectText?: string;
+  effectEmojis?: string[];
   accent?: string;
   textColor?: string;
   gradientOpacity?: number;
@@ -40,6 +41,7 @@ export interface ThumbnailOutput {
     sourcePath: string;
     timestamp: string;
     effectText?: string;
+    effectEmojis?: string[];
   }>;
 }
 
@@ -47,6 +49,7 @@ interface ResolvedThumbnailStyle {
   videoPath: string;
   timestamp: string;
   effectText?: string;
+  effectEmojis: string[];
   accent: string;
   textColor: string;
   gradientOpacity: number;
@@ -54,6 +57,9 @@ interface ResolvedThumbnailStyle {
   gradientCenterYPercent: number;
   gradientRadiusPercent: number;
 }
+
+const emojiSvgCache = new Map<string, string>();
+const NOTO_EMOJI_REF = "8998f5dd683424a73e2314a8c1f1e359c19e8742";
 
 export async function loadThumbnailConfig(path: string): Promise<ThumbnailConfig> {
   const config = await readJsonFile<ThumbnailConfig>(path);
@@ -88,6 +94,7 @@ export async function renderThumbnails(config: ThumbnailConfig, outDir: string):
       sourcePath: style.videoPath,
       timestamp: style.timestamp,
       effectText: style.effectText,
+      effectEmojis: style.effectEmojis.length > 0 ? style.effectEmojis : undefined,
     });
   }
 
@@ -115,12 +122,13 @@ async function renderFrameThumbnail(options: {
   try {
     extractFrame(options.ffmpegPath, options.sourcePath, options.style.timestamp, framePath);
     const overlay = buildForegroundOverlay(options.style, options.width, options.height);
+    const emojiComposites = await buildEmojiComposites(options.style.effectEmojis, options.width, options.height);
     const image = sharp(framePath)
       .resize(options.width, options.height, {
         fit: "cover",
         position: sharp.strategy.attention,
       })
-      .composite([{ input: Buffer.from(overlay), blend: "over" }]);
+      .composite([{ input: Buffer.from(overlay), blend: "over" }, ...emojiComposites]);
 
     if (options.format === "jpeg") {
       await image.jpeg({ quality: 92, mozjpeg: true }).toFile(options.outputPath);
@@ -194,6 +202,111 @@ function buildEffectText(effectText: string, textColor: string, width: number, h
   return `<text x="${x}" y="${y}" text-anchor="end" fill="${textColor}" stroke="#000000" stroke-opacity="0.36" stroke-width="${strokeWidth}" paint-order="stroke fill" font-size="${fontSize}" font-family="Arial, Helvetica, sans-serif" font-weight="900" filter="url(#effectShadow)">${xml(effectText)}</text>`;
 }
 
+async function buildEmojiComposites(effectEmojis: string[], width: number, height: number): Promise<OverlayOptions[]> {
+  const layout = emojiLayout(effectEmojis.length);
+  const baseSize = Math.round(width * 0.095);
+  const composites: OverlayOptions[] = [];
+  for (const [index, emoji] of effectEmojis.slice(0, layout.length).entries()) {
+    const item = layout[index];
+    const input = await buildEmojiStickerBuffer(emoji, Math.round(baseSize * item.scale), item.rotation);
+    const metadata = await sharp(input).metadata();
+    const stickerWidth = metadata.width ?? baseSize;
+    const stickerHeight = metadata.height ?? baseSize;
+    composites.push({
+      input,
+      left: Math.round(width * item.x - stickerWidth / 2),
+      top: Math.round(height * item.y - stickerHeight / 2),
+      blend: "over",
+    });
+  }
+  return composites;
+}
+
+function emojiLayout(count: number): Array<{ x: number; y: number; rotation: number; scale: number }> {
+  const layouts = [
+    [{ x: 0.86, y: 0.78, rotation: -8, scale: 1.12 }],
+    [
+      { x: 0.82, y: 0.74, rotation: -10, scale: 1.0 },
+      { x: 0.91, y: 0.83, rotation: 8, scale: 1.08 },
+    ],
+    [
+      { x: 0.79, y: 0.74, rotation: -11, scale: 0.96 },
+      { x: 0.89, y: 0.78, rotation: 7, scale: 1.1 },
+      { x: 0.82, y: 0.88, rotation: 12, scale: 0.92 },
+    ],
+    [
+      { x: 0.78, y: 0.73, rotation: -12, scale: 0.9 },
+      { x: 0.88, y: 0.74, rotation: 8, scale: 1.02 },
+      { x: 0.93, y: 0.86, rotation: -5, scale: 0.9 },
+      { x: 0.81, y: 0.89, rotation: 13, scale: 0.84 },
+    ],
+  ];
+  return layouts[Math.min(Math.max(count, 1), layouts.length) - 1];
+}
+
+async function buildEmojiStickerBuffer(emoji: string, size: number, rotation: number): Promise<Buffer> {
+  const svg = await loadNotoEmojiSvg(emoji);
+  const padding = Math.round(size * 0.28);
+  const canvas = size + padding * 2;
+  const dataUri = `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`;
+  const stickerSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="${canvas}" height="${canvas}" viewBox="0 0 ${canvas} ${canvas}">
+  <defs>
+    <filter id="emojiShadow" x="-45%" y="-45%" width="190%" height="190%">
+      <feDropShadow dx="0" dy="${Math.max(5, Math.round(size * 0.08))}" stdDeviation="${Math.max(5, Math.round(size * 0.08))}" flood-color="#000000" flood-opacity="0.48"/>
+    </filter>
+  </defs>
+  <image href="${dataUri}" x="${padding}" y="${padding}" width="${size}" height="${size}" filter="url(#emojiShadow)"/>
+</svg>`;
+  const sticker = await sharp(Buffer.from(stickerSvg)).png().toBuffer();
+  return sharp(sticker)
+    .rotate(rotation, { background: { r: 0, g: 0, b: 0, alpha: 0 } })
+    .png({ compressionLevel: 8 })
+    .toBuffer();
+}
+
+async function loadNotoEmojiSvg(emoji: string): Promise<string> {
+  for (const assetName of emojiAssetNameCandidates(emoji)) {
+    const cached = emojiSvgCache.get(assetName);
+    if (cached) return cached;
+
+    const cachePath = resolve(process.cwd(), "data/cache/noto-emoji", `${assetName}.svg`);
+    try {
+      const svg = await readFile(cachePath, "utf8");
+      emojiSvgCache.set(assetName, svg);
+      return svg;
+    } catch {
+      const svg = await fetchNotoEmojiSvg(assetName);
+      if (svg) {
+        await mkdir(resolve(process.cwd(), "data/cache/noto-emoji"), { recursive: true });
+        await writeFile(cachePath, svg, "utf8");
+        emojiSvgCache.set(assetName, svg);
+        return svg;
+      }
+    }
+  }
+
+  throw new Error(`Could not load a Noto color emoji asset for ${emoji}`);
+}
+
+async function fetchNotoEmojiSvg(assetName: string): Promise<string | undefined> {
+  const url = `https://raw.githubusercontent.com/googlefonts/noto-emoji/${NOTO_EMOJI_REF}/svg/${assetName}.svg`;
+  const response = await fetch(url);
+  if (response.status === 404) return undefined;
+  if (!response.ok) {
+    throw new Error(`Failed to fetch Noto emoji asset ${assetName}: HTTP ${response.status}`);
+  }
+  return response.text();
+}
+
+function emojiAssetNameCandidates(emoji: string): string[] {
+  const codePoints = Array.from(emoji.trim()).map((char) => char.codePointAt(0)?.toString(16)).filter(Boolean);
+  const withoutVariation = codePoints.filter((codePoint) => codePoint !== "fe0f" && codePoint !== "fe0e");
+  const candidates = [withoutVariation, codePoints]
+    .filter((parts) => parts.length > 0)
+    .map((parts) => `emoji_u${parts.join("_")}`);
+  return Array.from(new Set(candidates));
+}
+
 function validateThumbnailConfig(config: ThumbnailConfig): void {
   const errors: string[] = [];
   if (!Array.isArray(config.variants) || config.variants.length === 0) {
@@ -233,6 +346,19 @@ function validateStyle(label: string, style: ThumbnailStyle | undefined, errors:
   if (style.gradientOpacity !== undefined && !isUnit(style.gradientOpacity)) {
     errors.push(`${label}.gradientOpacity must be between 0 and 1`);
   }
+  if (style.effectEmojis !== undefined) {
+    if (!Array.isArray(style.effectEmojis)) {
+      errors.push(`${label}.effectEmojis must be an array`);
+    } else if (style.effectEmojis.length > 4) {
+      errors.push(`${label}.effectEmojis supports up to 4 emojis`);
+    } else {
+      style.effectEmojis.forEach((emoji, index) => {
+        if (typeof emoji !== "string" || emoji.trim().length === 0) {
+          errors.push(`${label}.effectEmojis[${index}] must be a non-empty string`);
+        }
+      });
+    }
+  }
   for (const key of ["gradientCenterXPercent", "gradientCenterYPercent", "gradientRadiusPercent"] as const) {
     const value = style[key];
     if (value !== undefined && (!Number.isFinite(value) || value <= 0)) {
@@ -247,10 +373,12 @@ function resolveStyle(defaults: ThumbnailStyle | undefined, variant: ThumbnailVa
     throw new Error(`Thumbnail variant ${variant.id} has no videoPath`);
   }
   const effectText = variant.effectText ?? defaults?.effectText;
+  const effectEmojis = variant.effectEmojis ?? defaults?.effectEmojis ?? [];
   return {
     videoPath,
     timestamp: variant.timestamp ?? defaults?.timestamp ?? "00:00:01",
     effectText: effectText?.trim() ? effectText.trim() : undefined,
+    effectEmojis: effectEmojis.map((emoji) => emoji.trim()).filter(Boolean).slice(0, 4),
     accent: variant.accent ?? defaults?.accent ?? "#22d3ee",
     textColor: variant.textColor ?? defaults?.textColor ?? "#ffffff",
     gradientOpacity: variant.gradientOpacity ?? defaults?.gradientOpacity ?? 0.58,

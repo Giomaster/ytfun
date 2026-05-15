@@ -59,7 +59,9 @@ Long-form thumbnail generation:
 npm start -- thumbnail --config examples/thumbnail.json --out-dir data/thumbnails/example
 ```
 
-The thumbnail generator extracts a real frame from the source video, crops it to 16:9, and adds only a translucent circular foreground glow centered near the lower-right corner. A short curiosity marker such as `???` or `WOW?` is optional. This keeps the thumb closer to the video itself and avoids poster clutter.
+The thumbnail generator extracts a real frame from the source video, crops it to 16:9, and adds only a translucent circular foreground glow centered near the lower-right corner. A short curiosity marker such as `???`/`WOW?` or a small set of casual emoji stickers via `effectEmojis` is optional. This keeps the thumb closer to the video itself and avoids poster clutter.
+
+When `effectEmojis` is used, the CLI downloads the matching Google Noto Emoji SVG assets on demand and caches them under `data/cache/noto-emoji/`, which is ignored by git with the rest of `data/`.
 
 YouTube currently recommends 16:9 custom thumbnails for regular videos and notes that Shorts do not accept uploaded custom thumbnails like regular videos; Shorts use a selected frame instead. This generator is for the original long-form videos that produce our Shorts.
 

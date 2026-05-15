@@ -14,11 +14,11 @@
   },
   "variants": [
     {
-      "id": "curiosity-question",
-      "effectText": "???"
+      "id": "curiosity-emojis",
+      "effectEmojis": ["👀", "🔥", "⚡"]
     },
     {
-      "id": "curiosity-wow",
+      "id": "curiosity-word",
       "timestamp": "00:01:24",
       "effectText": "WOW?",
       "accent": "#f97316",

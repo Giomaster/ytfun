@@ -41,7 +41,7 @@ Long-form thumbnails should be bold but clean:
 - 16:9 custom thumbnail generated from a real frame of the video.
 - Translucent circular/radial foreground glow with the center near the lower-right corner.
 - Transparent edges, vivid but controlled color.
-- Optional curiosity marker only: `???`, one short word, or one visual emoji.
+- Optional curiosity marker only: `???`, one short word, or 1-4 visual emojis placed like loose stickers.
 - Avoid poster layouts, channel badges, tiny UI, meme-wall chaos, and heavy text.
 
 Shorts thumbnails:
