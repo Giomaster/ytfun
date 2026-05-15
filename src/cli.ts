@@ -9,6 +9,7 @@ import { createViralFailsDemo } from "./viralFailsDemo.js";
 import { discoverFromYouTube } from "./youtube.js";
 import { createRealCaseDemo } from "./realCaseDemo.js";
 import { createFirstPartyShorts, loadFirstPartyShortsConfig } from "./firstPartyShorts.js";
+import { loadEpisodeConfig, runEpisode } from "./episode.js";
 import { authenticateYouTubeUpload, publishYouTubeQueue } from "./youtubePublish.js";
 import { loadThumbnailConfig, renderThumbnails } from "./thumbnails.js";
 import type { DiscoveryOutput, RightsManifest, ShortlistOutput } from "./types.js";
@@ -50,6 +51,9 @@ async function main(): Promise<void> {
         break;
       case "shorts-from-original":
         await shortsFromOriginal(args);
+        break;
+      case "episode":
+        await episode(args);
         break;
       case "youtube-auth":
         await youtubeAuth(args);
@@ -176,6 +180,17 @@ async function shortsFromOriginal(args: Args): Promise<void> {
   console.log(`Created ${result.output.shorts.length} first-party Shorts in ${outDir}`);
 }
 
+async function episode(args: Args): Promise<void> {
+  const configPath = stringArg(args, "config");
+  const outDir = typeof args["out-dir"] === "string" ? args["out-dir"] : undefined;
+  const config = await loadEpisodeConfig(configPath);
+  const output = await runEpisode(config, outDir);
+  console.log(`Created episode ${output.id} in ${output.outputDir}`);
+  console.log(`Shorts: ${output.shorts.length}`);
+  console.log(`Thumbnails: ${output.thumbnails.length}`);
+  console.log(`Publish queue: ${output.publishQueuePath}`);
+}
+
 async function youtubeAuth(args: Args): Promise<void> {
   const clientSecretPath = stringArg(args, "client-secret", "config/youtube-oauth-client.json");
   const tokenPath = stringArg(args, "token", "data/youtube-token.json");
@@ -262,6 +277,7 @@ Commands:
   viral-fails-demo --out data/cases/cassetadas-viral/cassetadas-viral-demo.mp4
   real-case-demo --out data/cases/real-cassetadas/real-cassetadas-demo.mp4 [--visuals none|minimal]
   shorts-from-original --config examples/first-party-cuts.json --out-dir data/shorts/example
+  episode --config examples/episode.json --out-dir data/episodes/example
   youtube-auth --client-secret config/youtube-oauth-client.json --token data/youtube-token.json
   publish-queue --queue examples/youtube-publish-queue.json --out data/youtube-publish-results.json [--execute]
   thumbnail --config examples/thumbnail.json --out-dir data/thumbnails/example

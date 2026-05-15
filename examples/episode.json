@@ -1,0 +1,59 @@
+{
+  "id": "trend-001",
+  "title": "Trend 001 - Why everyone is watching this",
+  "sourcePath": "data/originals/trend-001.mp4",
+  "sourceUrl": "https://www.youtube.com/watch?v=OUR_VIDEO_ID",
+  "originalVideoId": "OUR_VIDEO_ID",
+  "channelName": "Radar de Agora",
+  "visualMode": "none",
+  "outputDir": "data/episodes/trend-001",
+  "context": "internet trend creator economy viral moment",
+  "shorts": [
+    {
+      "id": "hook-001",
+      "title": "The hook everyone replayed",
+      "start": "00:00:08",
+      "duration": "00:00:32",
+      "caption": "The hook"
+    },
+    {
+      "id": "payoff-001",
+      "title": "The payoff moment",
+      "start": "00:03:14",
+      "duration": "00:00:41",
+      "caption": "The payoff"
+    }
+  ],
+  "thumbnails": {
+    "format": "png",
+    "width": 1280,
+    "height": 720,
+    "defaults": {
+      "autoFrame": true,
+      "autoAccent": true,
+      "autoEmojis": true,
+      "candidateTimestamps": ["00:00:08", "00:00:21", "00:00:43", "00:01:12", "00:02:20"]
+    },
+    "variants": [
+      {
+        "id": "auto-curiosity"
+      },
+      {
+        "id": "clean-glow",
+        "autoEmojis": false
+      }
+    ]
+  },
+  "publish": {
+    "approvedBy": "human-editor-name",
+    "includeSourceVideo": false,
+    "includeShorts": true,
+    "defaultPrivacyStatus": "private",
+    "defaultCategoryId": "24",
+    "defaults": {
+      "descriptionSuffix": "Cut from an original Radar de Agora episode.",
+      "tags": ["shorts", "trends", "original"],
+      "madeForKids": false
+    }
+  }
+}

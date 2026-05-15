@@ -44,6 +44,14 @@ npm start -- shorts-from-original --config examples/first-party-cuts.json --out-
 
 This is the preferred MVP path. The source video is ours, `sourceOrigin` is effectively `likely_original_channel`, the default visual mode is `none`, and each Short is rendered as 9:16 with the original frame preserved over a blurred background.
 
+End-to-end episode production:
+
+```bash
+npm start -- episode --config examples/episode.json --out-dir data/episodes/example
+```
+
+An episode manifest is the production unit for one original video. It combines the source video, Shorts cuts, thumbnail variants, upload metadata, and approval state. The command renders Shorts, generates automatic thumbnails, writes a rights manifest, creates a YouTube publish queue, and saves an `episode-output.json` report.
+
 Publish queue for YouTube:
 
 ```bash
