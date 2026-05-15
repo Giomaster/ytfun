@@ -57,10 +57,11 @@ Publish queue for YouTube:
 
 ```bash
 npm start -- youtube-auth --client-secret config/youtube-oauth-client.json --token data/youtube-token.json
+npm start -- approve-queue --queue data/episodes/example/publish-queue.json --approved-by editor-name --privacy private
 npm start -- publish-queue --queue examples/youtube-publish-queue.json --out data/youtube-publish-results.json
 ```
 
-`publish-queue` is a dry run unless you pass `--execute`. Uploads default to `private`, require `approvedBy`, and public uploads require the extra `--allow-public` flag.
+`approve-queue` fills the approval gate after review. `publish-queue` is a dry run unless you pass `--execute`. Uploads default to `private`, require `approvedBy`, and public uploads require the extra `--allow-public` flag.
 
 Long-form thumbnail generation:
 

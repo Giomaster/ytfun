@@ -34,6 +34,38 @@ export async function loadYouTubePublishQueue(path: string): Promise<YouTubePubl
   return queue;
 }
 
+export async function approveYouTubePublishQueue(options: {
+  queuePath: string;
+  outPath: string;
+  approvedBy: string;
+  privacyStatus?: YouTubePrivacyStatus;
+  allowPublic: boolean;
+}): Promise<YouTubePublishQueue> {
+  const queue = await loadYouTubePublishQueue(options.queuePath);
+  if (!options.approvedBy.trim()) {
+    throw new Error("--approved-by is required");
+  }
+  if (options.privacyStatus && !isPrivacyStatus(options.privacyStatus)) {
+    throw new Error("--privacy must be private, unlisted, or public");
+  }
+  if (options.privacyStatus === "public" && !options.allowPublic) {
+    throw new Error("public approval requires --allow-public");
+  }
+
+  const approvedQueue: YouTubePublishQueue = {
+    ...queue,
+    defaultPrivacyStatus: options.privacyStatus ?? queue.defaultPrivacyStatus ?? "private",
+    items: queue.items.map((item) => ({
+      ...item,
+      privacyStatus: options.privacyStatus ?? item.privacyStatus,
+      approvedBy: options.approvedBy,
+    })),
+  };
+
+  await writeJsonFile(options.outPath, approvedQueue);
+  return approvedQueue;
+}
+
 export async function authenticateYouTubeUpload(options: {
   clientSecretPath: string;
   tokenPath: string;
@@ -171,6 +203,10 @@ function validatePublishQueue(queue: YouTubePublishQueue): void {
   if (errors.length > 0) {
     throw new Error(`Invalid YouTube publish queue:\n- ${errors.join("\n- ")}`);
   }
+}
+
+function isPrivacyStatus(value: string): value is YouTubePrivacyStatus {
+  return value === "private" || value === "unlisted" || value === "public";
 }
 
 async function createAuthenticatedClient(

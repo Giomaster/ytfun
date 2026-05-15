@@ -10,7 +10,7 @@ import { discoverFromYouTube } from "./youtube.js";
 import { createRealCaseDemo } from "./realCaseDemo.js";
 import { createFirstPartyShorts, loadFirstPartyShortsConfig } from "./firstPartyShorts.js";
 import { createEpisodeDraft, loadEpisodeConfig, runEpisode } from "./episode.js";
-import { authenticateYouTubeUpload, publishYouTubeQueue } from "./youtubePublish.js";
+import { approveYouTubePublishQueue, authenticateYouTubeUpload, publishYouTubeQueue } from "./youtubePublish.js";
 import { loadThumbnailConfig, renderThumbnails } from "./thumbnails.js";
 import type { DiscoveryOutput, RightsManifest, ShortlistOutput } from "./types.js";
 
@@ -63,6 +63,9 @@ async function main(): Promise<void> {
         break;
       case "publish-queue":
         await publishQueue(args);
+        break;
+      case "approve-queue":
+        await approveQueue(args);
         break;
       case "thumbnail":
         await thumbnail(args);
@@ -250,6 +253,24 @@ async function publishQueue(args: Args): Promise<void> {
   console.log(`${mode} ${results.length} YouTube publish result(s) to ${outPath}`);
 }
 
+async function approveQueue(args: Args): Promise<void> {
+  const queuePath = stringArg(args, "queue");
+  const approvedBy = stringArg(args, "approved-by");
+  const outPath = stringArg(args, "out", queuePath);
+  const privacy = typeof args.privacy === "string" ? args.privacy : undefined;
+  if (privacy !== undefined && privacy !== "private" && privacy !== "unlisted" && privacy !== "public") {
+    throw new Error("--privacy must be private, unlisted, or public");
+  }
+  const queue = await approveYouTubePublishQueue({
+    queuePath,
+    outPath,
+    approvedBy,
+    privacyStatus: privacy,
+    allowPublic: Boolean(args["allow-public"]),
+  });
+  console.log(`Approved ${queue.items.length} publish item(s) in ${outPath}`);
+}
+
 async function thumbnail(args: Args): Promise<void> {
   const configPath = stringArg(args, "config", "examples/thumbnail.json");
   const outDir = stringArg(args, "out-dir", "data/thumbnails");
@@ -309,6 +330,7 @@ Commands:
   episode-init --source data/originals/video.mp4 --out data/episodes/draft.json [--title "Episode title"] [--shorts 3]
   episode --config examples/episode.json --out-dir data/episodes/example
   youtube-auth --client-secret config/youtube-oauth-client.json --token data/youtube-token.json
+  approve-queue --queue data/episodes/example/publish-queue.json --approved-by editor-name [--privacy private|unlisted|public]
   publish-queue --queue examples/youtube-publish-queue.json --out data/youtube-publish-results.json [--execute]
   thumbnail --config examples/thumbnail.json --out-dir data/thumbnails/example
 `);
