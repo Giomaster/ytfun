@@ -1,0 +1,13 @@
+node_modules/
+dist/
+data/
+tmp/
+.env
+config/youtube-oauth-client.json
+data/youtube-token.json
+*.mp4
+*.mov
+*.m4v
+*.webm
+*.mp3
+*.wav

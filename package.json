@@ -1,0 +1,28 @@
+{
+  "name": "ytfun",
+  "version": "0.1.0",
+  "description": "Legal-first YouTube trend research and rights-gated compilation studio.",
+  "type": "module",
+  "bin": {
+    "ytfun": "./dist/src/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test \"dist/test/**/*.test.js\"",
+    "start": "node dist/src/cli.js",
+    "dev": "tsx src/cli.ts"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  },
+  "dependencies": {
+    "ffmpeg-static": "^5.3.0",
+    "googleapis": "^171.4.0",
+    "sharp": "^0.34.5"
+  }
+}

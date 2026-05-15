@@ -1,0 +1,120 @@
+{
+  "projectName": "global-trend-commentary-mvp",
+  "regionCode": "US",
+  "language": "en",
+  "publishedAfterHours": 168,
+  "maxResultsPerQuery": 10,
+  "scoring": {
+    "weights": {
+      "trend": 0.45,
+      "revenue": 0.35,
+      "productionEase": 0.2
+    },
+    "verdictThresholds": {
+      "greenlight": 75,
+      "review": 55
+    },
+    "production": {
+      "simpleMaxDurationSeconds": 90,
+      "complexMinDurationSeconds": 600,
+      "highComplexityKeywords": [
+        "original animation",
+        "3d animation",
+        "motion capture",
+        "character animation",
+        "vfx breakdown",
+        "rendered in blender"
+      ],
+      "complexityKeywords": ["documentary", "investigation", "animation", "animated", "vfx", "3d", "blender", "experiment"],
+      "easyFormatKeywords": [
+        "reaction",
+        "commentary",
+        "ranking",
+        "top",
+        "shorts",
+        "clip",
+        "clips",
+        "recap",
+        "voiceover",
+        "podcast clip",
+        "interview clip",
+        "screen recording"
+      ],
+      "lowLiftKeywords": [
+        "raw clip",
+        "uncut",
+        "caught on camera",
+        "cctv",
+        "dashcam",
+        "highlight",
+        "highlights",
+        "clip",
+        "clips",
+        "shorts",
+        "recap",
+        "compilation",
+        "reaction",
+        "commentary",
+        "voiceover",
+        "podcast clip",
+        "interview clip",
+        "screen recording",
+        "submitted by",
+        "used with permission"
+      ],
+      "highLiftKeywords": [
+        "from scratch",
+        "original animation",
+        "animated series",
+        "3d animation",
+        "cinematic",
+        "documentary",
+        "deep dive",
+        "investigation",
+        "scripted",
+        "short film",
+        "vfx",
+        "motion capture",
+        "experiment",
+        "challenge",
+        "tutorial"
+      ]
+    },
+    "revenue": {
+      "highValueTerms": ["ai", "software", "business", "creator", "productivity", "tech", "gadget"],
+      "lowValueTerms": ["meme", "prank", "gossip", "drama", "fail"],
+      "demonetizationRiskTerms": ["adult", "drug", "fight", "hate", "leak", "pirated", "violence", "weapon"],
+      "sponsorFitTerms": ["app", "tool", "course", "workflow", "review", "setup"]
+    }
+  },
+  "compliance": {
+    "maxClipSeconds": 12,
+    "requireHumanApproval": true,
+    "preferCreativeCommons": true
+  },
+  "topics": [
+    {
+      "id": "creator-economy",
+      "name": "Creator economy trends",
+      "queries": ["youtube shorts creator economy trend", "viral shorts editing trend"],
+      "requiredTerms": ["trend"],
+      "excludedTerms": ["full movie", "music video"],
+      "minViews": 10000,
+      "minViewVelocityPerHour": 50,
+      "license": "any",
+      "revenueTier": "high",
+      "productionComplexity": "standard"
+    },
+    {
+      "id": "tech-culture",
+      "name": "Tech culture moments",
+      "queries": ["ai product launch reaction", "new gadget viral demo"],
+      "excludedTerms": ["leak", "pirated"],
+      "minViews": 25000,
+      "minViewVelocityPerHour": 100,
+      "license": "any",
+      "revenueTier": "premium",
+      "productionComplexity": "simple"
+    }
+  ]
+}

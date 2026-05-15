@@ -1,0 +1,23 @@
+{
+  "channelName": "Our Channel",
+  "defaultPrivacyStatus": "private",
+  "defaultCategoryId": "24",
+  "defaults": {
+    "descriptionSuffix": "Generated from our original long-form video.",
+    "tags": ["shorts", "original"],
+    "madeForKids": false
+  },
+  "items": [
+    {
+      "id": "hook-001",
+      "videoPath": "data/shorts/example/hook-001.mp4",
+      "title": "The strongest opening moment #Shorts",
+      "description": "A short cut from our original video.",
+      "tags": ["ytfun"],
+      "privacyStatus": "private",
+      "madeForKids": false,
+      "containsSyntheticMedia": false,
+      "approvedBy": "human-editor-name"
+    }
+  ]
+}

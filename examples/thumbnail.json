@@ -1,0 +1,28 @@
+{
+  "format": "png",
+  "width": 1280,
+  "height": 720,
+  "defaults": {
+    "videoPath": "data/originals/example-original-video.mp4",
+    "timestamp": "00:00:08",
+    "accent": "#22d3ee",
+    "textColor": "#ffffff",
+    "gradientOpacity": 0.58,
+    "gradientCenterXPercent": 88,
+    "gradientCenterYPercent": 88,
+    "gradientRadiusPercent": 74
+  },
+  "variants": [
+    {
+      "id": "curiosity-question",
+      "effectText": "???"
+    },
+    {
+      "id": "curiosity-wow",
+      "timestamp": "00:01:24",
+      "effectText": "WOW?",
+      "accent": "#f97316",
+      "gradientOpacity": 0.52
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "projectTitle": "Example original video shorts",
+  "sourcePath": "data/originals/example-original-video.mp4",
+  "sourceUrl": "https://www.youtube.com/watch?v=OUR_VIDEO_ID",
+  "originalVideoId": "OUR_VIDEO_ID",
+  "channelName": "Our Channel",
+  "visualMode": "none",
+  "shorts": [
+    {
+      "id": "hook-001",
+      "title": "The strongest opening moment",
+      "start": "00:00:08",
+      "duration": "00:00:32",
+      "caption": "The moment that hooks the topic"
+    },
+    {
+      "id": "payoff-001",
+      "title": "Best payoff moment",
+      "start": "00:03:14",
+      "duration": "00:00:41",
+      "caption": "The payoff cut"
+    }
+  ]
+}

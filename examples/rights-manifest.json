@@ -1,0 +1,27 @@
+{
+  "projectTitle": "Example commentary compilation",
+  "editor": "human-editor-name",
+  "assets": [
+    {
+      "id": "owned-intro",
+      "localPath": "assets/owned-intro.mp4",
+      "sourceUrl": "https://example.com/original-shoot",
+      "licenseBasis": "owned",
+      "start": "00:00:00",
+      "duration": "00:00:06",
+      "editorialPurpose": "Introduces the original commentary angle before any third-party reference appears.",
+      "approvedBy": "human-editor-name"
+    },
+    {
+      "id": "permission-example",
+      "localPath": "assets/permission-example.mp4",
+      "sourceUrl": "https://www.youtube.com/watch?v=VIDEO_ID",
+      "licenseBasis": "permission",
+      "permissionEvidence": "contracts/creator-permission-email.pdf",
+      "start": "00:00:03",
+      "duration": "00:00:08",
+      "editorialPurpose": "Illustrates the editing pattern discussed in section two of the script.",
+      "approvedBy": "human-editor-name"
+    }
+  ]
+}
