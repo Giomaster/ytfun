@@ -17,6 +17,11 @@ export interface ThumbnailConfig {
 export interface ThumbnailStyle {
   videoPath?: string;
   timestamp?: string;
+  autoFrame?: boolean;
+  candidateTimestamps?: string[];
+  autoAccent?: boolean;
+  autoEmojis?: boolean;
+  context?: string;
   effectText?: string;
   effectEmojis?: string[];
   accent?: string;
@@ -42,12 +47,19 @@ export interface ThumbnailOutput {
     timestamp: string;
     effectText?: string;
     effectEmojis?: string[];
+    accent: string;
+    autoFrameScore?: number;
   }>;
 }
 
 interface ResolvedThumbnailStyle {
   videoPath: string;
   timestamp: string;
+  autoFrame: boolean;
+  candidateTimestamps: string[];
+  autoAccent: boolean;
+  autoEmojis: boolean;
+  context?: string;
   effectText?: string;
   effectEmojis: string[];
   accent: string;
@@ -60,6 +72,7 @@ interface ResolvedThumbnailStyle {
 
 const emojiSvgCache = new Map<string, string>();
 const NOTO_EMOJI_REF = "8998f5dd683424a73e2314a8c1f1e359c19e8742";
+const DEFAULT_CANDIDATE_TIMESTAMPS = ["00:00:01", "00:00:03", "00:00:05", "00:00:08", "00:00:12", "00:00:18"];
 
 export async function loadThumbnailConfig(path: string): Promise<ThumbnailConfig> {
   const config = await readJsonFile<ThumbnailConfig>(path);
@@ -79,7 +92,7 @@ export async function renderThumbnails(config: ThumbnailConfig, outDir: string):
     const style = resolveStyle(config.defaults, variant);
     const extension = format === "jpeg" ? "jpg" : "png";
     const outputPath = resolve(outDir, `${safeName(variant.id)}.${extension}`);
-    await renderFrameThumbnail({
+    const result = await renderFrameThumbnail({
       ffmpegPath,
       sourcePath: resolve(process.cwd(), style.videoPath),
       outputPath,
@@ -92,9 +105,11 @@ export async function renderThumbnails(config: ThumbnailConfig, outDir: string):
       id: variant.id,
       path: relativeToCwd(outputPath),
       sourcePath: style.videoPath,
-      timestamp: style.timestamp,
-      effectText: style.effectText,
-      effectEmojis: style.effectEmojis.length > 0 ? style.effectEmojis : undefined,
+      timestamp: result.style.timestamp,
+      effectText: result.style.effectText,
+      effectEmojis: result.style.effectEmojis.length > 0 ? result.style.effectEmojis : undefined,
+      accent: result.style.accent,
+      autoFrameScore: result.frameScore,
     });
   }
 
@@ -116,14 +131,16 @@ async function renderFrameThumbnail(options: {
   width: number;
   height: number;
   format: "png" | "jpeg";
-}): Promise<void> {
+}): Promise<{ style: ResolvedThumbnailStyle; frameScore?: number }> {
   const tempDir = await mkdtemp(join(tmpdir(), "ytfun-thumbnail-"));
   const framePath = join(tempDir, "frame.png");
   try {
-    extractFrame(options.ffmpegPath, options.sourcePath, options.style.timestamp, framePath);
-    const overlay = buildForegroundOverlay(options.style, options.width, options.height);
-    const emojiComposites = await buildEmojiComposites(options.style.effectEmojis, options.width, options.height);
-    const image = sharp(framePath)
+    const frameSelection = await prepareFrame(options.ffmpegPath, options.sourcePath, framePath, options.style, tempDir);
+    const selectedStyle = { ...options.style, timestamp: frameSelection.timestamp };
+    const finalStyle = await resolveAutomaticStyle(selectedStyle, frameSelection.framePath);
+    const overlay = buildForegroundOverlay(finalStyle, options.width, options.height);
+    const emojiComposites = await buildEmojiComposites(finalStyle.effectEmojis, options.width, options.height);
+    const image = sharp(frameSelection.framePath)
       .resize(options.width, options.height, {
         fit: "cover",
         position: sharp.strategy.attention,
@@ -135,9 +152,55 @@ async function renderFrameThumbnail(options: {
     } else {
       await image.png({ compressionLevel: 8 }).toFile(options.outputPath);
     }
+    return { style: finalStyle, frameScore: frameSelection.score };
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
+}
+
+async function prepareFrame(
+  ffmpegPath: string,
+  sourcePath: string,
+  framePath: string,
+  style: ResolvedThumbnailStyle,
+  tempDir: string,
+): Promise<{ framePath: string; timestamp: string; score?: number }> {
+  if (!style.autoFrame) {
+    extractFrame(ffmpegPath, sourcePath, style.timestamp, framePath);
+    return { framePath, timestamp: style.timestamp };
+  }
+
+  const candidates = [];
+  for (const [index, timestamp] of style.candidateTimestamps.entries()) {
+    const candidatePath = join(tempDir, `candidate-${index}.png`);
+    try {
+      extractFrame(ffmpegPath, sourcePath, timestamp, candidatePath);
+      const score = await scoreThumbnailFrame(candidatePath);
+      candidates.push({ framePath: candidatePath, timestamp, score });
+    } catch {
+      // Keep trying later timestamps; short videos may not have every configured sample.
+    }
+  }
+
+  const selected = candidates.sort((a, b) => b.score - a.score)[0];
+  if (!selected) {
+    extractFrame(ffmpegPath, sourcePath, style.timestamp, framePath);
+    return { framePath, timestamp: style.timestamp };
+  }
+  return selected;
+}
+
+async function resolveAutomaticStyle(
+  style: ResolvedThumbnailStyle,
+  framePath: string,
+): Promise<ResolvedThumbnailStyle> {
+  const autoEmojis = style.autoEmojis && style.effectEmojis.length === 0 ? chooseContextEmojis(style.context) : [];
+  const accent = style.autoAccent ? await chooseAccentFromFrame(framePath) : style.accent;
+  return {
+    ...style,
+    accent,
+    effectEmojis: autoEmojis.length > 0 ? autoEmojis : style.effectEmojis,
+  };
 }
 
 function extractFrame(ffmpegPath: string, sourcePath: string, timestamp: string, framePath: string): void {
@@ -164,6 +227,82 @@ function extractFrame(ffmpegPath: string, sourcePath: string, timestamp: string,
     const reason = result.stderr || result.stdout || result.error?.message || "unknown ffmpeg error";
     throw new Error(`Failed to extract thumbnail frame from ${relativeToCwd(sourcePath)} at ${timestamp}:\n${reason}`);
   }
+}
+
+async function scoreThumbnailFrame(framePath: string): Promise<number> {
+  const { data, info } = await sharp(framePath)
+    .resize(180, 100, { fit: "cover", position: sharp.strategy.attention })
+    .removeAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const luminance: number[] = [];
+  let saturationTotal = 0;
+
+  for (let index = 0; index < data.length; index += info.channels) {
+    const r = data[index] ?? 0;
+    const g = data[index + 1] ?? 0;
+    const b = data[index + 2] ?? 0;
+    const luma = lumaOf(r, g, b);
+    luminance.push(luma);
+    saturationTotal += saturationOf(r, g, b);
+  }
+
+  const mean = average(luminance);
+  const contrast = Math.sqrt(average(luminance.map((value) => (value - mean) ** 2)));
+  const brightnessBalance = clamp(100 - Math.abs(mean - 128) * 0.85);
+  const saturation = (saturationTotal / luminance.length) * 100;
+  const edgeEnergy = scoreEdgeEnergy(luminance, info.width, info.height);
+
+  return roundScore(contrast * 0.72 + brightnessBalance * 0.32 + saturation * 0.3 + edgeEnergy * 0.45);
+}
+
+async function chooseAccentFromFrame(framePath: string): Promise<string> {
+  const { data, info } = await sharp(framePath)
+    .resize(96, 54, { fit: "cover", position: sharp.strategy.attention })
+    .removeAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const bins = Array.from({ length: 18 }, () => ({ weight: 0, r: 0, g: 0, b: 0 }));
+
+  for (let index = 0; index < data.length; index += info.channels) {
+    const r = data[index] ?? 0;
+    const g = data[index + 1] ?? 0;
+    const b = data[index + 2] ?? 0;
+    const [hue, saturation, lightness] = rgbToHsl(r, g, b);
+    if (saturation < 0.18 || lightness < 0.18 || lightness > 0.88) continue;
+
+    const bin = bins[Math.min(bins.length - 1, Math.floor(hue / (360 / bins.length)))];
+    const weight = saturation * (1 - Math.abs(lightness - 0.54));
+    bin.weight += weight;
+    bin.r += r * weight;
+    bin.g += g * weight;
+    bin.b += b * weight;
+  }
+
+  const selected = bins.sort((a, b) => b.weight - a.weight)[0];
+  if (!selected || selected.weight <= 0) return "#22d3ee";
+
+  const r = selected.r / selected.weight;
+  const g = selected.g / selected.weight;
+  const b = selected.b / selected.weight;
+  const [hue] = rgbToHsl(r, g, b);
+  const accentHue = (hue + 150) % 360;
+  const [accentR, accentG, accentB] = hslToRgb(accentHue, 0.82, 0.56);
+  return rgbToHex(accentR, accentG, accentB);
+}
+
+function chooseContextEmojis(context: string | undefined): string[] {
+  const text = (context ?? "").toLowerCase();
+  const packs: Array<{ terms: string[]; emojis: string[] }> = [
+    { terms: ["skate", "skateboard", "fall", "fail", "cassetada", "cassetadas"], emojis: ["😳", "🛹", "💥"] },
+    { terms: ["ai", "artificial intelligence", "tech", "software", "app", "gadget"], emojis: ["🤖", "👀", "⚡"] },
+    { terms: ["money", "business", "finance", "revenue", "startup", "creator economy"], emojis: ["💸", "📈", "👀"] },
+    { terms: ["food", "recipe", "restaurant", "cook", "kitchen"], emojis: ["😋", "🔥", "👀"] },
+    { terms: ["game", "gaming", "stream", "roblox", "minecraft"], emojis: ["🎮", "🔥", "👀"] },
+    { terms: ["music", "song", "concert", "artist"], emojis: ["🎵", "🔥", "👀"] },
+  ];
+
+  return packs.find((pack) => pack.terms.some((term) => text.includes(term)))?.emojis ?? ["👀", "🔥", "⚡"];
 }
 
 function buildForegroundOverlay(style: ResolvedThumbnailStyle, width: number, height: number): string {
@@ -337,6 +476,23 @@ function validateThumbnailConfig(config: ThumbnailConfig): void {
 
 function validateStyle(label: string, style: ThumbnailStyle | undefined, errors: string[]): void {
   if (!style) return;
+  for (const key of ["autoFrame", "autoAccent", "autoEmojis"] as const) {
+    const value = style[key];
+    if (value !== undefined && typeof value !== "boolean") {
+      errors.push(`${label}.${key} must be a boolean`);
+    }
+  }
+  if (style.candidateTimestamps !== undefined) {
+    if (!Array.isArray(style.candidateTimestamps) || style.candidateTimestamps.length === 0) {
+      errors.push(`${label}.candidateTimestamps must contain at least one timestamp`);
+    } else {
+      style.candidateTimestamps.forEach((timestamp, index) => {
+        if (typeof timestamp !== "string" || timestamp.trim().length === 0) {
+          errors.push(`${label}.candidateTimestamps[${index}] must be a non-empty string`);
+        }
+      });
+    }
+  }
   if (style.accent !== undefined && !isHexColor(style.accent)) {
     errors.push(`${label}.accent must be a hex color`);
   }
@@ -374,9 +530,16 @@ function resolveStyle(defaults: ThumbnailStyle | undefined, variant: ThumbnailVa
   }
   const effectText = variant.effectText ?? defaults?.effectText;
   const effectEmojis = variant.effectEmojis ?? defaults?.effectEmojis ?? [];
+  const candidateTimestamps = variant.candidateTimestamps ?? defaults?.candidateTimestamps ?? DEFAULT_CANDIDATE_TIMESTAMPS;
+  const context = [defaults?.context, variant.context, variant.id, videoPath].filter(Boolean).join(" ");
   return {
     videoPath,
-    timestamp: variant.timestamp ?? defaults?.timestamp ?? "00:00:01",
+    timestamp: variant.timestamp ?? defaults?.timestamp ?? candidateTimestamps[0] ?? "00:00:01",
+    autoFrame: variant.autoFrame ?? defaults?.autoFrame ?? false,
+    candidateTimestamps: candidateTimestamps.map((timestamp) => timestamp.trim()).filter(Boolean),
+    autoAccent: variant.autoAccent ?? defaults?.autoAccent ?? false,
+    autoEmojis: variant.autoEmojis ?? defaults?.autoEmojis ?? false,
+    context: context.length > 0 ? context : undefined,
     effectText: effectText?.trim() ? effectText.trim() : undefined,
     effectEmojis: effectEmojis.map((emoji) => emoji.trim()).filter(Boolean).slice(0, 4),
     accent: variant.accent ?? defaults?.accent ?? "#22d3ee",
@@ -400,6 +563,82 @@ function xml(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
 }
 
+function average(values: number[]): number {
+  if (values.length === 0) return 0;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function lumaOf(r: number, g: number, b: number): number {
+  return r * 0.2126 + g * 0.7152 + b * 0.0722;
+}
+
+function saturationOf(r: number, g: number, b: number): number {
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  return max === 0 ? 0 : (max - min) / max;
+}
+
+function scoreEdgeEnergy(luminance: number[], width: number, height: number): number {
+  let total = 0;
+  let count = 0;
+  for (let y = 0; y < height - 1; y += 1) {
+    for (let x = 0; x < width - 1; x += 1) {
+      const current = luminance[y * width + x] ?? 0;
+      const right = luminance[y * width + x + 1] ?? current;
+      const down = luminance[(y + 1) * width + x] ?? current;
+      total += Math.abs(current - right) + Math.abs(current - down);
+      count += 2;
+    }
+  }
+  return clamp((total / Math.max(1, count)) * 3.4);
+}
+
+function rgbToHsl(r: number, g: number, b: number): [number, number, number] {
+  const red = r / 255;
+  const green = g / 255;
+  const blue = b / 255;
+  const max = Math.max(red, green, blue);
+  const min = Math.min(red, green, blue);
+  const lightness = (max + min) / 2;
+  if (max === min) return [0, 0, lightness];
+
+  const delta = max - min;
+  const saturation = lightness > 0.5 ? delta / (2 - max - min) : delta / (max + min);
+  let hue = 0;
+  if (max === red) hue = (green - blue) / delta + (green < blue ? 6 : 0);
+  if (max === green) hue = (blue - red) / delta + 2;
+  if (max === blue) hue = (red - green) / delta + 4;
+  return [hue * 60, saturation, lightness];
+}
+
+function hslToRgb(h: number, s: number, l: number): [number, number, number] {
+  const chroma = (1 - Math.abs(2 * l - 1)) * s;
+  const segment = h / 60;
+  const x = chroma * (1 - Math.abs((segment % 2) - 1));
+  const [r1, g1, b1] =
+    segment < 1
+      ? [chroma, x, 0]
+      : segment < 2
+        ? [x, chroma, 0]
+        : segment < 3
+          ? [0, chroma, x]
+          : segment < 4
+            ? [0, x, chroma]
+            : segment < 5
+              ? [x, 0, chroma]
+              : [chroma, 0, x];
+  const m = l - chroma / 2;
+  return [Math.round((r1 + m) * 255), Math.round((g1 + m) * 255), Math.round((b1 + m) * 255)];
+}
+
+function rgbToHex(r: number, g: number, b: number): string {
+  return `#${[r, g, b].map((value) => Math.max(0, Math.min(255, value)).toString(16).padStart(2, "0")).join("")}`;
+}
+
+function roundScore(value: number): number {
+  return Math.round(value * 10) / 10;
+}
+
 function isHexColor(value: string): boolean {
   return /^#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?([0-9a-fA-F]{2})?$/.test(value);
 }
@@ -408,6 +647,6 @@ function isUnit(value: number): boolean {
   return Number.isFinite(value) && value >= 0 && value <= 1;
 }
 
-function clamp(value: number, min: number, max: number): number {
+function clamp(value: number, min = 0, max = 100): number {
   return Math.min(max, Math.max(min, value));
 }

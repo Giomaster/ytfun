@@ -42,6 +42,7 @@ Long-form thumbnails should be bold but clean:
 - Translucent circular/radial foreground glow with the center near the lower-right corner.
 - Transparent edges, vivid but controlled color.
 - Optional curiosity marker only: `???`, one short word, or 1-4 visual emojis placed like loose stickers.
+- Prefer auto-selected frames and frame-derived accent colors, then override manually only when the result misses the editorial hook.
 - Avoid poster layouts, channel badges, tiny UI, meme-wall chaos, and heavy text.
 
 Shorts thumbnails:

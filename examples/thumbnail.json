@@ -5,6 +5,11 @@
   "defaults": {
     "videoPath": "data/originals/example-original-video.mp4",
     "timestamp": "00:00:08",
+    "autoFrame": true,
+    "autoAccent": true,
+    "autoEmojis": true,
+    "context": "AI tech culture viral demo",
+    "candidateTimestamps": ["00:00:03", "00:00:08", "00:00:14", "00:00:21", "00:00:34"],
     "accent": "#22d3ee",
     "textColor": "#ffffff",
     "gradientOpacity": 0.58,
@@ -14,12 +19,13 @@
   },
   "variants": [
     {
-      "id": "curiosity-emojis",
-      "effectEmojis": ["👀", "🔥", "⚡"]
+      "id": "auto-curiosity"
     },
     {
       "id": "curiosity-word",
       "timestamp": "00:01:24",
+      "autoFrame": false,
+      "autoEmojis": false,
       "effectText": "WOW?",
       "accent": "#f97316",
       "gradientOpacity": 0.52

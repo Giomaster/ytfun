@@ -63,6 +63,8 @@ The thumbnail generator extracts a real frame from the source video, crops it to
 
 When `effectEmojis` is used, the CLI downloads the matching Google Noto Emoji SVG assets on demand and caches them under `data/cache/noto-emoji/`, which is ignored by git with the rest of `data/`.
 
+For lower-lift thumbnail production, set `autoFrame`, `autoAccent`, and/or `autoEmojis` in the thumbnail config. `autoFrame` samples `candidateTimestamps` and picks the frame with the best blend of contrast, brightness, saturation, and visual energy. `autoAccent` derives the glow color from the selected frame. `autoEmojis` chooses a small emoji pack from the variant `context`.
+
 YouTube currently recommends 16:9 custom thumbnails for regular videos and notes that Shorts do not accept uploaded custom thumbnails like regular videos; Shorts use a selected frame instead. This generator is for the original long-form videos that produce our Shorts.
 
 1. Discover candidates:
