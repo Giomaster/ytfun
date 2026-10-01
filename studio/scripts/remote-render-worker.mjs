@@ -73,7 +73,8 @@ export async function ownedAudioArtifact(packet, { env, artifact, fetchImpl = fe
   const name = `ai-meow-audio-${input.batchId}`;
   if (metadata.id !== input.artifactId || metadata.name !== name || metadata.expired !== false || !Number.isSafeInteger(metadata.size_in_bytes) || metadata.size_in_bytes < 1 || metadata.size_in_bytes > AUDIO_MAX_BYTES || metadata.workflow_run?.id !== input.runId || metadata.workflow_run?.head_sha !== input.commitSha || run.id !== input.runId || run.repository?.full_name !== input.repository || run.head_repository?.full_name !== input.repository || run.head_sha !== input.commitSha || run.head_branch !== 'codex/ai-original-studio' || run.path !== '.github/workflows/ai-meow-audio.yml' || run.event !== 'push' || run.status !== 'completed' || run.conclusion !== 'success') throw new Error('Audio artifact/run ownership or identity changed');
   const [repositoryOwner, repositoryName] = input.repository.split('/');
-  const expectedHash = /^sha256:[a-f0-9]{64}$/.test(metadata.digest ?? '') ? metadata.digest.slice(7) : undefined;
+  // Pinned artifact SDK 2.3.2 compares the complete "sha256:<hex>" value.
+  const expectedHash = /^sha256:[a-f0-9]{64}$/.test(metadata.digest ?? '') ? metadata.digest : undefined;
   const downloaded = await artifact.downloadArtifact(input.artifactId, { path: directory, findBy: { token: env.GITHUB_TOKEN, workflowRunId: input.runId, repositoryOwner, repositoryName }, ...(expectedHash ? { expectedHash } : {}) });
   if (downloaded.digestMismatch) throw new Error('Audio archive digest mismatch');
   if (!downloaded.downloadPath) throw new Error('Audio archive destination missing');

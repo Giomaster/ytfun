@@ -113,6 +113,7 @@ test('remote assembly uses 96 exact original videos/WAVs and publishes only veri
   const artifact = {
     downloadArtifact: async (id, options) => {
       assert.equal(id, 21); assert.deepEqual(options.findBy, { token: 'fixture-actions-token', workflowRunId: 11, repositoryOwner: 'Giomaster', repositoryName: 'ytfun' });
+      assert.equal(options.expectedHash, `sha256:${sha('original-audio-archive')}`);
       await mkdir(join(options.path, 'audio')); await writeFile(join(options.path, 'audio-manifest.json'), JSON.stringify(receipt));
       for (let index = 1; index <= 96; index++) await writeFile(join(options.path, audioReceiptPath(index)), wav);
       return { downloadPath: options.path, digestMismatch: false };
@@ -134,7 +135,7 @@ test('remote assembly uses 96 exact original videos/WAVs and publishes only veri
     if (filename.includes('/sources/')) return { stdout: JSON.stringify({ format: { duration: '7.5625' }, streams: [{ codec_type: 'video', duration: '7.5625' }] }) };
     return { stdout: JSON.stringify(finalProbe(filename.includes('/shorts/') ? 7.5 : filename.includes('/compilations/') ? 90 : 720)) };
   };
-  const result = await runRenderWorker({ env: c.env, artifact, fetchImpl: ownedFetch(packet), recover: async request => { recoveries++; return { remoteStatus: 'COMPLETED', blob: new Blob([mp4(Number(request.requestId.split('-').at(-1)))], { type: 'video/mp4' }) }; }, runner });
+  const result = await runRenderWorker({ env: c.env, artifact, fetchImpl: ownedFetch(packet, value => { if (value.workflow_run) value.digest = `sha256:${sha('original-audio-archive')}`; }), recover: async request => { recoveries++; return { remoteStatus: 'COMPLETED', blob: new Blob([mp4(Number(request.requestId.split('-').at(-1)))], { type: 'video/mp4' }) }; }, runner });
   assert.equal(result.status, 'completed'); assert.equal(recoveries, 96); assert.equal(encodes, 105); assert.equal(uploaded, 1);
   for (const outcome of ['pending', 'wrong-hash']) {
     const changed = { ...packet, id: randomUUID() };

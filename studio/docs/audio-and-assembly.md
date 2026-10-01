@@ -109,7 +109,9 @@ O controller instala o secret e faz push de `studio/batches/render-launch.json`.
 `AI Meow Remote Assembly` verifica a identidade do artifact/run de áudio: mesmo
 repositório, commit/ID/nome, branch, workflow correto e execução concluída com
 sucesso. O download usa `@actions/artifact` fixado em 2.3.2 com `findBy` e token
-`actions:read`. Confere o recibo autorizado e o WAV/SHA de cada cena contra o
+`actions:read`. O `expectedHash` conserva o formato `sha256:<hex>` que essa
+versão do SDK devolve e compara; remover o prefixo causava uma falsa divergência.
+Confere o recibo autorizado e o WAV/SHA de cada cena contra o
 asset de áudio importado no manifesto. [API oficial de artifacts](https://github.com/actions/toolkit/tree/main/packages/artifact).
 
 Cada vídeo é recuperado por `recoverFalVideo`, somente GET, usando o recibo
