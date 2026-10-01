@@ -24,6 +24,11 @@ attempts; model ranking and price per call do not establish value. Keep a firm
 editorial floor for coherent action, fluid motion, consistent characters and sets,
 readable payoff and complete endings. Generate one representative transition first,
 and repeat a paid attempt only with a concrete correction to its failure cause.
+The user delegates scripts within the agreed series: favor simple scenes with few
+relevant components, one action and a strong complete payoff. Use the economical
+validated route instead of chasing rankings; change models when a demonstrated
+defect justifies the expected cost per approved release. Account, spending and
+publication authorization still apply.
 Prefer external generation through the MCP. AI Meow videos use
 visual storytelling and optional original nonverbal sound, without speech or
 on-screen text unless the user requests a different direction. This media rule
@@ -75,11 +80,12 @@ Review the actual sequence and record defects versus hypotheses before paying
 again; check references, integration and conditioning as well as direction.
 Fluid motion alone does not establish coherent physics or prompt obedience.
 
-## Long-form first, with complete shorts
+## Reusable stories and complete shorts
 
 Follow [Long-form videos and standalone shorts](AGENTS.md#long-form-videos-and-standalone-shorts).
-Prioritize a coherent long video and plan several self-contained short segments
-from the outline. Each short needs its own hook, context, development and complete
+Plan reusable complete units for standalone shorts and a coherent long video.
+During initial audience-building, produce and release independent shorts first;
+do not wait for the master. Each short needs its own hook, context, development and complete
 visual ending or intentional seamless loop. Choose narrative boundaries and
 re-edit/reframe as needed so the ending lands naturally; never mechanically split
 the master into time chunks that stop mid-action. Validate both formats in the
@@ -90,6 +96,14 @@ shared channel cadence. Produce as many worthwhile shorts as the story supports.
 ## Audience first and gradual releases
 
 Follow [Audience first and gradual releases](AGENTS.md#audience-first-and-gradual-releases).
+For the current pre-monetization launch, prioritize the number of distinct complete
+contents over total duration. Use the shortest supported duration that preserves a
+proper hook, payoff and ending; do not require a completed long master to start
+releasing independently reviewed shorts. The collection remains planned source
+material/future packaging. Rebalance length and quantity from observed growth.
+Always research current primary guidance about each network's recommendation
+system, formats and durations, and combine it with actual account analytics.
+Record dated evidence and strategy hypotheses; review them after each launch cycle.
 Initial AI Meow releases prioritize engagement and audience growth: publish the
 strongest complete standalone shorts before the master and compilations while
 retaining long-form production. Maximize distinct worthwhile stories, never
@@ -102,8 +116,9 @@ and cadence; this editorial limit is not a platform guarantee or revenue promise
 
 Follow [YouTube regular videos: monetization from the outline](AGENTS.md#youtube-regular-videos-monetization-from-the-outline).
 Every regular YouTube video is planned for monetization from the first release;
-Shorts keep their audience-growth priority. Preserve the useful 12-minute master,
-cohesive chapter progression, materially distinct reveals and natural completed
+Shorts keep their audience-growth priority. Retain the 12-minute collection as
+future packaging, without blocking the first releases. Plan cohesive chapter
+progression, materially distinct reveals and natural completed
 boundaries for possible ads. Prefer eight useful minutes when the story supports
 it, without padding. Verify YPP and actual ad settings separately. Vertical
 90-second compilations are Shorts on YouTube, not regular mid-roll videos.

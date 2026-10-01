@@ -109,6 +109,12 @@ Quality, required checks and authorization are constraints, not token-saving opt
   reference images, generation, finishing and hosting. Price per call and model
   rankings alone do not establish good value. Choose the least expensive suitable
   route that meets the editorial criteria; do not lower those criteria to save money.
+- The user delegates scripts within the agreed series to the agent. Prefer concepts
+  with few relevant components, one readable action and a strong complete payoff
+  that the selected model has demonstrated it can deliver. Reuse the economical
+  validated route; do not chase model rankings or expensive upgrades without a
+  concrete production defect and expected reduction in cost per approved release.
+  Script autonomy does not expand account, spending or publication authorization.
 - Define the visible acceptance criteria before generation: coherent action and
   object interactions, fluid motion, stable character/set identity, readable payoff
   and a complete ending. Validate one representative transition before financing
@@ -220,12 +226,11 @@ Quality, required checks and authorization are constraints, not token-saving opt
 
 ## Long-form videos and standalone shorts
 
-- Plan an original long-form video as the main production, with multiple distinct
-  complete shorts from the outline. During a channel's initial audience-building
-  stage, prioritize the strongest standalone shorts in the release queue before
-  the master and compilations. Production order and release order are separate.
-  Length must serve
-  the story rather than padding an idea to reach a duration or clip count.
+- Plan reusable complete narrative units that can support both standalone shorts
+  and a coherent long-form work. During the initial audience-building stage,
+  produce and release strong independent shorts first; a completed master is not
+  a prerequisite. Outside that stage, balance long-form and shorts using measured
+  audience results. Length serves the story, not a duration or clip-count target.
 - Design several reusable narrative units before generating expensive assets.
   Each potential short needs its own visual hook, enough context to understand
   it, a clear development and an intentional ending. The long-form story must
@@ -251,6 +256,13 @@ Quality, required checks and authorization are constraints, not token-saving opt
 
 ## Audience first and gradual releases
 
+- In the current pre-monetization launch phase, prioritize the number of distinct
+  worthwhile complete releases over total video duration. Use the shortest
+  platform-supported duration that still delivers the hook, development and a
+  satisfying ending. Do not pad a short to a revenue threshold or wait for a long
+  master before releasing independently reviewed shorts. Preserve the long-form
+  collection as planned source material/future packaging, not a launch prerequisite.
+  Rebalance quantity and duration later using audience growth and measured results.
 - The first AI Meow releases aim to earn attention, engagement and returning
   viewers. Use audience evidence to improve later formats. YouTube regular videos
   must already be planned for monetization from the first release; Shorts retain
@@ -267,6 +279,18 @@ Quality, required checks and authorization are constraints, not token-saving opt
   Review available retention, completion, shares, follows and returning-viewer
   signals before changing the mix or cadence. Report missing analytics honestly;
   never invent results or promise viral distribution.
+- Before selecting a platform's production format and whenever strategy changes,
+  research its current recommendation system, supported durations/formats and
+  creator guidance. Use primary platform sources and the account's actual analytics
+  when available. Record dated evidence, the hypothesis being tried, the production
+  decision and a review point. Revisit after each initial launch cycle or material
+  platform change. Focus on relevant viewers, opening clarity, completion, viewer
+  satisfaction, shares and return visits; do not invent algorithm formulas or treat
+  posting frequency as a guaranteed distribution trick.
+- Maximum content means distinct engaging deliverables, not a faster sending rate.
+  Apply the shared daily/24-hour release limit even when production has a large
+  backlog. Reuse source production efficiently, with complete endings and meaningful
+  variation; algorithm research never replaces actual quality review.
 
 ## YouTube regular videos: monetization from the outline
 
@@ -275,8 +299,9 @@ Quality, required checks and authorization are constraints, not token-saving opt
   exception to this revenue-first format requirement. Never confuse planning a
   monetizable work with an approved YPP channel, enabled ads or confirmed revenue.
 - Prefer a useful duration of at least eight minutes when the story supports it,
-  so an eligible monetized video can support mid-rolls. Keep the authorized
-  12-minute master; never add repeated footage, static padding or unfinished
+  so an eligible monetized video can support mid-rolls. The planned 12-minute
+  collection remains future packaging, not a launch prerequisite. Never add
+  repeated footage, static padding or unfinished
   scenes to reach an ad threshold. Eight minutes is a mid-roll condition, not a
   minimum for all monetization or an approval guarantee.
 - Plan cohesive chapters, materially different reveals and a clear progression.
