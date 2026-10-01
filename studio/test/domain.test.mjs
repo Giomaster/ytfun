@@ -46,6 +46,30 @@ async function rendered(fixture, episode) {
 
 const review = { originalityChecked: true, factsChecked: true, renderWatched: true, reviewedBy: 'Human editor', notes: 'Watched the complete render, compared scripts and verified the source and license evidence.' };
 
+test('cadence updates preserve publication records, audit the change and reject stale policy writes', async (t) => {
+  const f = await fixture(t);
+  await f.store.transaction(state => state.publications.push({ id: randomUUID(), projectId: f.project.id, platform: 'facebook', status: 'reserved', accountId: 'owned-page', reservedAt: new Date().toISOString() }));
+  const before = await f.store.read();
+  const input = { projectId: f.project.id, expectedCadence: f.project.cadence, cadence: { minHoursBetweenPosts: 18, maxPostsPerRollingDay: 2 }, reason: 'Authorized initial audience-growth experiment, reviewed after ten releases.' };
+  const changed = await f.studio.updateProjectCadence(input);
+  assert.deepEqual(changed.cadence, input.cadence);
+  assert.deepEqual(changed.cadenceHistory[0].previous, f.project.cadence);
+  assert.equal(changed.cadenceHistory[0].reason, input.reason);
+  assert.deepEqual((await f.store.read()).publications, before.publications);
+  await assert.rejects(f.studio.updateProjectCadence(input), /cadence changed/);
+  const unchanged = await f.studio.updateProjectCadence({ ...input, expectedCadence: changed.cadence });
+  assert.equal(unchanged.cadenceHistory.length, 1);
+});
+
+test('cadence updates cannot bypass the runtime frequency floor or rolling-day cap', async (t) => {
+  const f = await fixture(t);
+  const input = { projectId: f.project.id, expectedCadence: f.project.cadence, reason: 'Frequency experiment' };
+  for (const cadence of [{ minHoursBetweenPosts: 11, maxPostsPerRollingDay: 2 }, { minHoursBetweenPosts: 18, maxPostsPerRollingDay: 4 }, { minHoursBetweenPosts: 18, maxPostsPerRollingDay: 1.5 }]) {
+    await assert.rejects(f.studio.updateProjectCadence({ ...input, cadence }));
+  }
+  assert.deepEqual((await f.studio.listProjects())[0].cadence, f.project.cadence);
+});
+
 test('asset review hashing retains the legacy wire format without a quality review and binds an added rejection', () => {
   const episode = { render: { sceneAssets: [{ visualAssetId: 'visual' }] } };
   const asset = { id: 'visual', episodeId: 'episode', sceneId: 'scene', kind: 'video', path: 'assets/current.mp4', sha256: 'a'.repeat(64), synthetic: true, provenance: {} };

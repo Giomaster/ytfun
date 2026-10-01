@@ -19,7 +19,7 @@ test('stdio MCP negotiates, lists tools and persists a series across restarts', 
   const client = await connect();
   t.after(() => client.close());
   const tools = await client.listTools();
-  assert.equal(tools.tools.length, 37);
+  assert.equal(tools.tools.length, 38);
   assert.ok(tools.tools.some(tool => tool.name === 'ytfun_tiktok_export'));
   assert.ok(!tools.tools.some(tool => tool.name === 'ytfun_tiktok_publish'));
   assert.ok(tools.tools.some(tool => tool.name === 'ytfun_facebook_publish'));
@@ -77,6 +77,13 @@ test('stdio MCP negotiates, lists tools and persists a series across restarts', 
   assert.ok(!created.isError, JSON.stringify(created));
   const project = JSON.parse(created.content[0].text);
   assert.equal(project.budgetMonthlyUsd, null);
+  const cadenceArguments = { projectId: project.id, expectedCadence: project.cadence, cadence: { minHoursBetweenPosts: 18, maxPostsPerRollingDay: 2 }, reason: 'Authorized launch experiment' };
+  const cadenceResult = await client.callTool({ name: 'ytfun_project_cadence_update', arguments: cadenceArguments });
+  assert.ok(!cadenceResult.isError, JSON.stringify(cadenceResult));
+  assert.deepEqual(JSON.parse(cadenceResult.content[0].text).cadence, cadenceArguments.cadence);
+  const staleCadence = await client.callTool({ name: 'ytfun_project_cadence_update', arguments: cadenceArguments });
+  assert.equal(staleCadence.isError, true);
+  assert.match(staleCadence.content[0].text, /cadence changed/);
   const silent = await client.callTool({ name: 'ytfun_episode_plan', arguments: { projectId: project.id, audioMode: 'silent', title: 'The kitten and the obsidian portal', hook: 'A violet light travels beneath a black stone.', synopsis: 'A cybernetic kitten discovers an impossible interior.', continuityNote: 'First original visual reveal.', originalAngle: 'A complete comic portal reveal without speech or text.', scenes: [{ durationSeconds: 5, visualPrompt: 'An original silver cartoon kitten beside an obsidian sphere on a violet sofa.' }], metadata: { description: 'Original AI fiction.', hashtags: ['#AIMeow'] } } });
   assert.ok(!silent.isError, JSON.stringify(silent));
   assert.equal(JSON.parse(silent.content[0].text).audioMode, 'silent');

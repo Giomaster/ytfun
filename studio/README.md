@@ -327,3 +327,22 @@ Os adapters e a fila exigem credenciais e um processo MCP persistente em um
 worker adequado. Configurar perfis no navegador é separado de conectar APIs.
 Este código não criou app OAuth, concedeu permissões, habilitou worker ou
 enviou vídeos reais. A validação dos novos adapters e da fila ocorre no CI.
+
+## Operação recorrente do AI Meow
+
+Uma thread por rede pesquisa, roteiriza, produz/reutiliza material original, revisa
+e publica quando a conta estiver elegível. A operação continua após os dez vídeos
+iniciais. Giovanni dispensou a validação humana de cada vídeo e aceita pequenas
+imperfeições nesta fase; revisão real do agente, proveniência, conta correta e
+recibos continuam obrigatórios. Limitações de audição são registradas sem atribuir
+aprovação sonora ao usuário. Threads compartilham mídia e coordenam o navegador.
+
+A hipótese inicial é intervalo mínimo de 18 horas e até dois envios em qualquer
+janela de 24 horas por canal, contando todos os formatos/reservas. O tool
+`ytfun_project_cadence_update` altera a política pelo domínio, preserva histórico e
+exige a política anterior esperada para impedir escrita baseada em estado antigo.
+Uploads e reservas anteriores não são apagados. A execução revalida a cadência;
+backlog não justifica rajadas. Rever o experimento após dez lançamentos por rede.
+Heartbeats locais dependem do Mac e Codex disponíveis; seus horários não equivalem
+a agendamento confirmado pelo provider. Exportação TikTok/Kwai permanece distinta
+de publicação, e auditoria pública do YouTube continua exigindo evidência.

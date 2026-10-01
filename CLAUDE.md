@@ -107,10 +107,23 @@ Record dated evidence and strategy hypotheses; review them after each launch cyc
 Initial AI Meow releases prioritize engagement and audience growth: publish the
 strongest complete standalone shorts before the master and compilations while
 retaining long-form production. Maximize distinct worthwhile stories, never
-duplicate uploads or arbitrary cuts. Keep at most one new publication per channel
-per day with at least 24 hours between sends, counting every format and reservation.
-Do not catch up with bursts. Use observed audience response to guide later formats
+duplicate uploads or arbitrary cuts. Test at least 18 hours between sends and at
+most two publications in any rolling 24 hours per channel, counting every format
+and reservation. Review after ten releases per channel; do not catch up with bursts. Use observed audience response to guide later formats
 and cadence; this editorial limit is not a platform guarantee or revenue promise.
+
+## Autonomous recurring production and release
+
+Follow [Autonomous recurring production and release](AGENTS.md#autonomous-recurring-production-and-release).
+Each platform has its own persistent thread and recurring due checks. When due,
+create the script, produce or reuse original shared media, review as an agent and
+publish automatically within the existing account authorization. Continue after
+the initial ten releases. Giovanni intervenes through the MCP for maintenance or
+exceptions; do not request human review of every video. Small launch imperfections
+are accepted, while originality, correct account, truthful review and actual receipts
+remain required. Record an unavailable audio audition honestly instead of inventing
+human acceptance. Share production/browsers safely; no duplicate cost or catch-up
+bursts. Local thread automation depends on the Mac/Codex being available.
 
 ## YouTube regular videos: monetization from the outline
 

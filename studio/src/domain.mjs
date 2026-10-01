@@ -360,6 +360,29 @@ export class Studio {
 
   async listProjects() { return (await this.store.read()).projects; }
 
+  async updateProjectCadence(input) {
+    const projectId = text(input.projectId, 'projectId', 100);
+    const cadence = {
+      minHoursBetweenPosts: number(input.cadence?.minHoursBetweenPosts, 'minHoursBetweenPosts', 12),
+      maxPostsPerRollingDay: number(input.cadence?.maxPostsPerRollingDay, 'maxPostsPerRollingDay', 1, 3),
+    };
+    if (!Number.isInteger(cadence.maxPostsPerRollingDay)) throw new Error('maxPostsPerRollingDay must be an integer');
+    const expectedCadence = {
+      minHoursBetweenPosts: number(input.expectedCadence?.minHoursBetweenPosts, 'expectedCadence.minHoursBetweenPosts', 12),
+      maxPostsPerRollingDay: number(input.expectedCadence?.maxPostsPerRollingDay, 'expectedCadence.maxPostsPerRollingDay', 1, 3),
+    };
+    const reason = text(input.reason, 'reason');
+    return this.store.transaction((state) => {
+      const project = requireProject(state, projectId);
+      if (project.cadence.minHoursBetweenPosts !== expectedCadence.minHoursBetweenPosts || project.cadence.maxPostsPerRollingDay !== expectedCadence.maxPostsPerRollingDay) throw new Error('Project cadence changed; read the current policy before updating');
+      if (project.cadence.minHoursBetweenPosts === cadence.minHoursBetweenPosts && project.cadence.maxPostsPerRollingDay === cadence.maxPostsPerRollingDay) return project;
+      project.cadenceHistory ??= [];
+      project.cadenceHistory.push({ previous: { ...project.cadence }, next: { ...cadence }, reason, changedAt: new Date().toISOString() });
+      project.cadence = cadence;
+      return project;
+    });
+  }
+
   async addTrend(input) {
     rejectClientId(input);
     const trend = { id: randomUUID(), topic: text(input.topic, 'topic', 500), sourceUrl: httpUrl(input.sourceUrl, 'sourceUrl'), observedAt: observedTime(input.observedAt), evidence: text(input.evidence, 'evidence'), ...(input.projectId === undefined ? {} : { projectId: text(input.projectId, 'projectId', 100) }) };

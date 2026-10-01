@@ -270,10 +270,11 @@ Quality, required checks and authorization are constraints, not token-saving opt
 - Extract the maximum number of worthwhile, distinct, complete stories from the
   approved collection. Do not multiply near-identical uploads, arbitrary cuts,
   reordered duplicates or unfinished endings to inflate the queue.
-- For this launch, allow at most one new publication per channel per day and at
-  least 24 hours between publications. Count shorts, compilations, the master
-  and reserved sends together. Never compensate for missed days with a burst.
-  This is an internal editorial limit, not a guarantee against platform flags.
+- For this launch, test at least 18 hours between publications and at most two
+  new publications in any rolling 24-hour window per channel. Count shorts,
+  compilations, the master and reserved sends together. Never compensate for
+  missed slots with a burst. Reassess after the first ten releases per channel.
+  This is an editorial experiment, not a platform optimum or protection guarantee.
 - Lead with the best reviewed standalone reveals, vary the material and payoff,
   and keep a dated queue with exact asset hashes, destinations and receipts.
   Review available retention, completion, shares, follows and returning-viewer
@@ -288,9 +289,39 @@ Quality, required checks and authorization are constraints, not token-saving opt
   satisfaction, shares and return visits; do not invent algorithm formulas or treat
   posting frequency as a guaranteed distribution trick.
 - Maximum content means distinct engaging deliverables, not a faster sending rate.
-  Apply the shared daily/24-hour release limit even when production has a large
+  Apply the shared 18-hour/rolling-two-post limit even when production has a large
   backlog. Reuse source production efficiently, with complete endings and meaningful
   variation; algorithm research never replaces actual quality review.
+
+## Autonomous recurring production and release
+
+- Giovanni delegates recurring scripts, production, editorial decisions and release
+  on AI Meow accounts to one persistent thread per platform. A due release starts
+  the script/production/publication cycle; maintain this after the initial ten
+  releases, rather than stopping after a finite export queue. Use existing original
+  media efficiently where appropriate and share production between platforms.
+- Do not ask for human review or blanket publication consent on every episode.
+  During launch, accept small visual/sonic imperfections; prioritize completing
+  readable original entertainment over repeated perfection retakes. The agent still
+  reviews the actual output, verifies provenance/account and records exact hashes.
+  No human validation does not authorize invented review evidence or facts. If audio
+  cannot be heard, state that limitation and the user's accepted early-stage risk;
+  do not attribute an audition to Giovanni or claim actual synchronization review.
+- Automations check the actual last publication/reservation and current cadence
+  before sending. One network's thread never posts to another network. Coordinate
+  shared production and browser access so work/costs/uploads are not duplicated.
+  A due check that runs late sends at most one item, without catch-up bursts.
+- Use current primary platform guidance and real analytics to select scripts,
+  formats and release hypotheses. No universal best cadence, distribution or income
+  is guaranteed. Keep YouTube audit requirements and TikTok/Kwai export limitations
+  distinct from actual publication. Never post to a personal account.
+- The user intervenes through the MCP for maintenance or exceptional situations.
+  Ask only for genuinely missing login/2FA or other required user actions, once;
+  do not create an approval loop. Persist receipts and next eligible time, stay
+  silent when unchanged, and report confirmed publications or new actionable faults.
+- These local thread automations require the Mac/Codex to be available. Label
+  operation times as local plans until a provider confirms a scheduled publication.
+  Record missing runs and resume safely, without claiming continuous remote service.
 
 ## YouTube regular videos: monetization from the outline
 
