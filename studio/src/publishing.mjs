@@ -1,0 +1,417 @@
+import { createHash, randomUUID } from 'node:crypto';
+import { createReadStream } from 'node:fs';
+import { mkdir, realpath, rename, stat, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
+import { episodeAssetHash, episodeReviewHash } from './domain.mjs';
+
+const DAY_MS = 86_400_000;
+const DEFAULT_MAX_BYTES = 250 * 1024 * 1024;
+const GOOGLE_API = 'https://www.googleapis.com';
+const RESERVED_STATUSES = new Set(['reserved', 'uploading', 'sending', 'unknown', 'uploaded', 'scheduled', 'published']);
+
+function nonempty(value) {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function publicEnabled(env) {
+  return env.YTFUN_YOUTUBE_PUBLIC_ENABLED === 'true' && env.YTFUN_YOUTUBE_AUDIT_CONFIRMED === 'true';
+}
+
+function maxFileBytes(env) {
+  const configured = Number(env.YTFUN_MAX_UPLOAD_BYTES ?? DEFAULT_MAX_BYTES);
+  if (!Number.isSafeInteger(configured) || configured <= 0 || configured > DEFAULT_MAX_BYTES) {
+    throw new Error('YTFUN_MAX_UPLOAD_BYTES must be a positive integer no greater than 250 MiB.');
+  }
+  return configured;
+}
+
+async function verifiedFile(directory, relativePath, expectedHash, maxBytes) {
+  if (!nonempty(relativePath) || path.isAbsolute(relativePath) || !/^[a-f0-9]{64}$/i.test(expectedHash ?? '')) {
+    throw new Error('Media requires a relative path and a SHA-256 fingerprint.');
+  }
+  const root = await realpath(directory);
+  const file = await realpath(path.resolve(root, relativePath));
+  const relative = path.relative(root, file);
+  if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error('Media must remain inside the studio directory.');
+  }
+  const info = await stat(file);
+  if (!info.isFile() || info.size < 1 || info.size > maxBytes) {
+    throw new Error('Media must be a nonempty regular file within the upload size limit.');
+  }
+  const hash = createHash('sha256');
+  let bytesRead = 0;
+  for await (const chunk of createReadStream(file)) {
+    bytesRead += chunk.length;
+    if (bytesRead > maxBytes) throw new Error('Media exceeded the upload size limit while reading.');
+    hash.update(chunk);
+  }
+  if (hash.digest('hex') !== expectedHash.toLowerCase()) throw new Error('Media fingerprint changed after review.');
+  return { absolutePath: file, relativePath: relative, sizeBytes: info.size };
+}
+
+async function boundedMediaBody(filename, maxBytes) {
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of createReadStream(filename)) {
+    total += chunk.length;
+    if (total > maxBytes) throw new Error('Media exceeded the upload size limit while reading.');
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks, total);
+}
+
+function metadataFor(episode) {
+  const hashtags = episode.metadata?.hashtags ?? [];
+  const tags = episode.metadata?.tags ?? hashtags.map((tag) => typeof tag === 'string' ? tag.replace(/^#/, '') : tag);
+  if (!Array.isArray(hashtags) || !hashtags.every(nonempty) || !Array.isArray(tags) || !tags.every(nonempty)) {
+    throw new Error('Metadata hashtags and tags must be arrays of nonempty strings.');
+  }
+  const description = episode.metadata?.description ?? '';
+  if (!nonempty(episode.title) || episode.title.length > 100 || /[<>]/.test(episode.title)) {
+    throw new Error('YouTube title must contain 1 to 100 characters without angle brackets.');
+  }
+  if (typeof description !== 'string') throw new Error('Description must be a string.');
+  const hashtagText = hashtags.map((tag) => tag.startsWith('#') ? tag : `#${tag}`).join(' ');
+  const fullDescription = [description, hashtagText].filter(nonempty).join('\n\n');
+  if (fullDescription.length > 5000 || Buffer.byteLength(fullDescription, 'utf8') > 5000 || /[<>]/.test(fullDescription)) {
+    throw new Error('YouTube description, including hashtags, exceeds its limit or contains angle brackets.');
+  }
+  const tagCost = tags.reduce((total, tag) => total + tag.length + (/\s/.test(tag) ? 2 : 0), Math.max(0, tags.length - 1));
+  if (tagCost > 500) throw new Error('YouTube tags exceed the 500-character limit.');
+  return { title: episode.title, description: fullDescription, tags, hashtags };
+}
+
+function cadenceIssues(state, project, platform, accountId, effectiveAt) {
+  const minHours = project.cadence?.minHoursBetweenPosts ?? 24;
+  const maxPosts = project.cadence?.maxPostsPerRollingDay ?? 1;
+  if (!Number.isFinite(minHours) || minHours < 12 || !Number.isInteger(maxPosts) || maxPosts < 1 || maxPosts > 3) {
+    return ['Project cadence must have at least 12 hours between posts and at most three posts per rolling day.'];
+  }
+  const candidate = Date.parse(effectiveAt);
+  const peers = state.publications.filter((entry) => entry.platform === platform && entry.accountId === accountId && RESERVED_STATUSES.has(entry.status));
+  if (peers.some((entry) => !Number.isFinite(Date.parse(entry.effectiveAt ?? entry.createdAt)))) {
+    return ['A channel publication has an invalid reservation time and requires reconciliation.'];
+  }
+  // Enforce the stricter policy of each involved project across their shared channel.
+  const limits = peers.map((entry) => state.projects.find((item) => item.id === entry.projectId)?.cadence ?? {});
+  if (limits.some((limit) => !Number.isFinite(limit.minHoursBetweenPosts ?? 24) || (limit.minHoursBetweenPosts ?? 24) < 12 ||
+      !Number.isInteger(limit.maxPostsPerRollingDay ?? 1) || (limit.maxPostsPerRollingDay ?? 1) < 1 || (limit.maxPostsPerRollingDay ?? 1) > 3)) {
+    return ['A shared-channel project has an invalid cadence policy and requires reconciliation.'];
+  }
+  const channelMinHours = Math.max(minHours, ...limits.map((limit) => limit.minHoursBetweenPosts ?? 24));
+  const channelMaxPosts = Math.min(maxPosts, ...limits.map((limit) => limit.maxPostsPerRollingDay ?? 1));
+  const times = peers.map((entry) => Date.parse(entry.effectiveAt ?? entry.createdAt));
+  const reasons = [];
+  if (times.some((time) => Math.abs(time - candidate) < channelMinHours * 3_600_000)) {
+    reasons.push(`Channel cadence requires at least ${channelMinHours} hours between reserved or completed uploads.`);
+  }
+  const nearby = times.filter((time) => Math.abs(time - candidate) < DAY_MS);
+  const windowEnds = [candidate, ...nearby.filter((time) => time >= candidate)];
+  if (windowEnds.some((end) => nearby.filter((time) => time <= end && time > end - DAY_MS).length + 1 > channelMaxPosts)) {
+    reasons.push(`Channel cadence permits at most ${channelMaxPosts} upload(s) in any rolling 24 hours.`);
+  }
+  return reasons;
+}
+
+function safeSessionUrl(raw) {
+  let url;
+  try { url = new URL(raw); } catch { throw new Error('YouTube returned an invalid upload session.'); }
+  if (url.protocol !== 'https:' || !['www.googleapis.com', 'youtube.googleapis.com'].includes(url.hostname) ||
+      url.username || url.password || (url.port && url.port !== '443') || url.pathname !== '/upload/youtube/v3/videos' || url.hash) {
+    throw new Error('YouTube returned an upload session outside the Google allowlist.');
+  }
+  return url.href;
+}
+
+async function responseJson(response) {
+  try { return await response.json(); } catch { return null; }
+}
+
+export class Publisher {
+  constructor(store, { env = process.env, fetchImpl = fetch } = {}) {
+    this.store = store;
+    this.env = env;
+    this.fetch = fetchImpl;
+  }
+
+  async plan(state, { episodeId, platform, privacy = 'private', publishAt }, now = Date.now()) {
+    if (!['youtube', 'tiktok'].includes(platform)) throw new Error('Platform must be youtube or tiktok.');
+    if (!['private', 'unlisted', 'public'].includes(privacy)) throw new Error('Privacy must be private, unlisted, or public.');
+    const episode = state.episodes.find((item) => item.id === episodeId);
+    if (!episode) throw new Error('Episode not found.');
+    const project = state.projects.find((item) => item.id === episode.projectId);
+    if (!project) throw new Error('Episode project not found.');
+    const reasons = [];
+    if (project.status !== 'active') reasons.push('The episode project must be active before publishing or exporting.');
+    if (project.mode === 'factual' && (!Array.isArray(episode.factualSources) || episode.factualSources.length === 0)) {
+      reasons.push('Factual content requires claim-specific sources before publishing.');
+    }
+    const reviewHash = episodeReviewHash(episode);
+    const review = episode.approval?.review;
+    if (episode.approval?.reviewHash !== reviewHash || !episode.approval?.approvedAt ||
+        review?.originalityChecked !== true || review?.factsChecked !== true || review?.renderWatched !== true || !nonempty(review?.reviewedBy)) {
+      reasons.push('Episode requires a current editorial approval of originality, facts, and the finished render.');
+    }
+    if (episode.approval?.assetReviewHash !== episodeAssetHash(episode, state.assets)) {
+      reasons.push('Generated asset fingerprints or license evidence changed after editorial review.');
+    }
+    if (!nonempty(episode.originalAngle)) reasons.push('Episode requires its own original creative angle.');
+    if (episode.render?.synthetic !== true || !Number.isFinite(episode.render?.durationSeconds) || episode.render.durationSeconds <= 0) {
+      reasons.push('Episode requires a completed synthetic render with a valid duration.');
+    }
+    let render;
+    try {
+      render = await verifiedFile(this.store.directory, episode.render?.path, episode.render?.sha256, maxFileBytes(this.env));
+      if (path.extname(render.absolutePath).toLowerCase() !== '.mp4') reasons.push('Publishing requires an MP4 render.');
+    } catch {
+      reasons.push('Render is missing, changed, outside studio storage, or exceeds the upload limit.');
+    }
+    const mappings = episode.render?.sceneAssets;
+    const scenes = episode.scenes ?? [];
+    if (!Array.isArray(mappings) || !Array.isArray(scenes) || scenes.length === 0 || mappings.length !== scenes.length ||
+        new Set(mappings?.map((mapping) => mapping.sceneId)).size !== scenes.length) {
+      reasons.push('Render must map every scene to its generated visual and audio assets.');
+    } else {
+      for (const scene of scenes) {
+        const mapping = mappings.find((item) => item.sceneId === scene.id);
+        for (const [assetId, allowedKinds] of [[mapping?.visualAssetId, ['image', 'video']], [mapping?.audioAssetId, ['audio']]]) {
+          const asset = state.assets.find((item) => item.id === assetId);
+          const license = asset?.provenance?.commercialLicense;
+          let validLicense = false;
+          try { validLicense = ['https:', 'http:'].includes(new URL(license?.url).protocol); } catch { /* Invalid evidence URL. */ }
+          if (!asset || asset.episodeId !== episode.id || asset.sceneId !== scene.id || !allowedKinds.includes(asset.kind) ||
+              asset.synthetic !== true || !nonempty(asset.provenance?.provider) || !nonempty(asset.provenance?.model) ||
+              !validLicense || !nonempty(license?.notes ?? license?.evidence)) {
+            reasons.push('Every scene requires original generated assets with provider, model, and commercial-license evidence.');
+            continue;
+          }
+          try { await verifiedFile(this.store.directory, asset.path, asset.sha256, maxFileBytes(this.env)); }
+          catch { reasons.push('A scene asset is missing, changed, or outside studio storage.'); }
+        }
+      }
+    }
+    let metadata;
+    try { metadata = metadataFor(episode); } catch (error) { reasons.push(error.message); }
+    let effectiveAt = new Date(now).toISOString();
+    if (publishAt !== undefined) {
+      const scheduled = Date.parse(publishAt);
+      if (platform !== 'youtube' || privacy === 'unlisted' || !Number.isFinite(scheduled) || scheduled <= now) {
+        reasons.push('publishAt requires a future YouTube public-release schedule and cannot use unlisted privacy.');
+      } else effectiveAt = new Date(scheduled).toISOString();
+    }
+    const accountId = platform === 'youtube' ? this.env.YOUTUBE_CHANNEL_ID : (this.env.TIKTOK_ACCOUNT_ID ?? null);
+    const existing = state.publications.find((item) => item.episodeId === episode.id && item.platform === platform && RESERVED_STATUSES.has(item.status));
+    if (existing) reasons.push('This reviewed episode already has an upload or reservation; reconcile its existing publication.');
+    const cadence = cadenceIssues(state, project, platform, accountId, effectiveAt);
+    if (platform === 'youtube') {
+      if (!nonempty(accountId)) reasons.push('YOUTUBE_CHANNEL_ID must identify the intended channel.');
+      if (!nonempty(this.env.YOUTUBE_ACCESS_TOKEN)) reasons.push('YouTube requires an OAuth access token with youtube.upload and youtube.readonly scopes.');
+      if ((privacy !== 'private' || publishAt !== undefined) && !publicEnabled(this.env)) {
+        reasons.push('External visibility requires confirmed YouTube API audit and explicit public publishing enablement.');
+      }
+      reasons.push(...cadence);
+    }
+    const caption = metadata ? [metadata.title, metadata.description].filter(nonempty).join('\n\n') : '';
+    if (platform === 'tiktok' && caption.length > 2200) reasons.push('TikTok caption exceeds 2200 UTF-16 code units.');
+    return {
+      episodeId: episode.id, projectId: project.id, platform, accountId, reviewHash, privacy,
+      uploadPrivacy: publishAt === undefined ? privacy : 'private', effectiveAt,
+      ...(publishAt !== undefined ? { publishAt: effectiveAt } : {}),
+      ready: reasons.length === 0 && platform === 'youtube', readyToExport: reasons.length === 0 && platform === 'tiktok',
+      reasons: [...new Set(reasons)], cadence: { warnings: cadence }, disclosure: { synthetic: true },
+      capabilities: { directPost: platform === 'youtube', requiresCreatorPublishing: platform === 'tiktok' },
+      ...(render ? { render: { path: render.relativePath, sha256: episode.render.sha256, sizeBytes: render.sizeBytes, durationSeconds: episode.render.durationSeconds } } : {}),
+      ...(metadata ? { metadata, caption } : {}), ...(existing ? { publication: existing } : {}),
+    };
+  }
+
+  async preflight(args) {
+    return this.plan(await this.store.read(), args);
+  }
+
+  async updatePublication(id, changes) {
+    // Only retry a contended local commit; never repeat a remote upload request.
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await this.store.transaction((state) => {
+          const record = state.publications.find((item) => item.id === id);
+          if (!record) throw new Error('Publication reservation not found.');
+          Object.assign(record, changes, { updatedAt: new Date().toISOString() });
+          const episode = state.episodes.find((item) => item.id === record.episodeId);
+          if (episode && record.platform === 'youtube') {
+            episode.status = record.status === 'unknown' ? 'publishing' : record.status === 'failed' ? 'approved' : record.status;
+          }
+          return record;
+        });
+      } catch (error) {
+        if (error.code !== 'STUDIO_BUSY' || attempt >= 19) throw error;
+        await delay(50);
+      }
+    }
+  }
+
+  async publishYouTube({ episodeId, privacy = 'private', publishAt, expectedReviewHash, madeForKids, execute = false }) {
+    if (typeof madeForKids !== 'boolean') throw new Error('madeForKids must be explicitly selected as a boolean.');
+    if (typeof execute !== 'boolean') throw new Error('execute must be a boolean.');
+    const initial = await this.preflight({ episodeId, platform: 'youtube', privacy, publishAt });
+    if (!nonempty(expectedReviewHash) || expectedReviewHash !== initial.reviewHash) throw new Error('Expected review fingerprint does not match the current episode.');
+    if (!execute) return { ...initial, execute: false, madeForKids };
+    if (initial.publication) return { duplicate: true, publication: initial.publication };
+    if (!initial.ready) throw new Error(initial.reasons.join(' '));
+    let channelResponse;
+    try {
+      channelResponse = await this.fetch(`${GOOGLE_API}/youtube/v3/channels?part=id&mine=true`, {
+        headers: { Authorization: `Bearer ${this.env.YOUTUBE_ACCESS_TOKEN}` }, redirect: 'error', signal: AbortSignal.timeout(30_000),
+      });
+    } catch { throw new Error('Could not verify the authorized YouTube channel.'); }
+    const channels = await responseJson(channelResponse);
+    if (!channelResponse.ok || !Array.isArray(channels?.items) || !channels.items.some((item) => item.id === this.env.YOUTUBE_CHANNEL_ID)) {
+      throw new Error('YouTube channel verification failed; check the intended channel and OAuth youtube.readonly scope.');
+    }
+    let uploadBody;
+    const reserved = await this.store.transaction(async (state) => {
+      const plan = await this.plan(state, { episodeId, platform: 'youtube', privacy, publishAt });
+      if (plan.reviewHash !== expectedReviewHash) throw new Error('Episode changed after publication was requested.');
+      if (plan.publication) return { duplicate: true, publication: plan.publication };
+      if (!plan.ready) throw new Error(plan.reasons.join(' '));
+      const file = await verifiedFile(this.store.directory, plan.render.path, plan.render.sha256, maxFileBytes(this.env));
+      const body = await boundedMediaBody(file.absolutePath, maxFileBytes(this.env));
+      if (body.length > maxFileBytes(this.env) || createHash('sha256').update(body).digest('hex') !== plan.render.sha256.toLowerCase()) {
+        throw new Error('Render changed while preparing the upload.');
+      }
+      const publication = {
+        id: randomUUID(), episodeId, projectId: plan.projectId, platform: 'youtube', accountId: plan.accountId,
+        reviewHash: plan.reviewHash, renderSha256: plan.render.sha256, status: 'uploading',
+        effectiveAt: plan.effectiveAt, createdAt: new Date().toISOString(), privacy, madeForKids,
+        ...(publishAt !== undefined ? { publishAt: plan.effectiveAt } : {}),
+      };
+      state.publications.push(publication);
+      state.episodes.find((item) => item.id === episodeId).status = 'publishing';
+      // StudioStore results are JSON-cloned, so media bytes stay outside its result.
+      uploadBody = body;
+      return { publication, plan };
+    });
+    if (reserved.duplicate) return reserved;
+    const { publication, plan } = reserved;
+    const body = uploadBody;
+    const authHeaders = { Authorization: `Bearer ${this.env.YOUTUBE_ACCESS_TOKEN}` };
+    try {
+      const init = await this.fetch(`${GOOGLE_API}/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status`, {
+        method: 'POST', redirect: 'error', signal: AbortSignal.timeout(30_000),
+        headers: { ...authHeaders, 'Content-Type': 'application/json', 'X-Upload-Content-Type': 'video/mp4', 'X-Upload-Content-Length': String(body.length) },
+        body: JSON.stringify({
+          snippet: { title: plan.metadata.title, description: plan.metadata.description, tags: plan.metadata.tags, categoryId: '24' },
+          status: { privacyStatus: plan.uploadPrivacy, selfDeclaredMadeForKids: madeForKids, containsSyntheticMedia: true,
+            ...(publishAt !== undefined ? { publishAt: plan.publishAt } : {}) },
+        }),
+      });
+      if (!init.ok) {
+        const status = init.status >= 400 && init.status < 500 && init.status !== 429 ? 'failed' : 'unknown';
+        return { publication: await this.updatePublication(publication.id, { status, error: 'YouTube rejected or could not confirm upload initialization.' }) };
+      }
+      const session = safeSessionUrl(init.headers.get('location'));
+      const uploaded = await this.fetch(session, {
+        method: 'PUT', redirect: 'error', signal: AbortSignal.timeout(180_000), headers: { ...authHeaders, 'Content-Type': 'video/mp4', 'Content-Length': String(body.length) }, body,
+      });
+      const resource = await responseJson(uploaded);
+      if (!uploaded.ok || !nonempty(resource?.id)) {
+        return { publication: await this.updatePublication(publication.id, { status: 'unknown', error: 'YouTube did not confirm a completed upload; manual reconciliation is required.' }) };
+      }
+      const returnedStatus = resource.status ?? {};
+      let status = 'uploaded';
+      if (['failed', 'rejected'].includes(returnedStatus.uploadStatus)) status = 'failed';
+      else if (returnedStatus.privacyStatus === 'public' && returnedStatus.uploadStatus === 'processed') status = 'published';
+      else if (publishAt !== undefined && returnedStatus.privacyStatus === 'private' &&
+               Date.parse(returnedStatus.publishAt) === Date.parse(plan.publishAt) && Date.parse(plan.publishAt) > Date.now()) status = 'scheduled';
+      return { publication: await this.updatePublication(publication.id, {
+        status, videoId: resource.id, providerPrivacyStatus: returnedStatus.privacyStatus ?? null,
+        providerUploadStatus: returnedStatus.uploadStatus ?? null,
+        ...(status === 'published' ? { publishedAt: new Date().toISOString(), url: `https://www.youtube.com/watch?v=${encodeURIComponent(resource.id)}` } : {}),
+        ...(status === 'scheduled' ? { scheduledAt: plan.publishAt } : {}),
+      }) };
+    } catch {
+      return { publication: await this.updatePublication(publication.id, {
+        status: 'unknown', error: 'Upload outcome is unknown; reconcile the channel before any retry.',
+      }) };
+    }
+  }
+
+  async syncPublication({ publicationId }) {
+    const state = await this.store.read();
+    const publication = state.publications.find(item => item.id === publicationId && item.platform === 'youtube');
+    if (!publication?.videoId) throw new Error('A confirmed YouTube video ID is required; unknown uploads without receipts require operator reconciliation.');
+    if (!this.env.YOUTUBE_ACCESS_TOKEN || publication.accountId !== this.env.YOUTUBE_CHANNEL_ID) throw new Error('Use the original channel and valid OAuth token to verify this publication.');
+    const url = new URL(`${GOOGLE_API}/youtube/v3/videos`);
+    url.search = new URLSearchParams({ part: 'snippet,status', id: publication.videoId }).toString();
+    let response;
+    try { response = await this.fetch(url, { headers: { Authorization: `Bearer ${this.env.YOUTUBE_ACCESS_TOKEN}` }, redirect: 'error', signal: AbortSignal.timeout(30_000) }); }
+    catch { throw new Error('Could not verify the YouTube publication; existing state is preserved.'); }
+    const resource = (await responseJson(response))?.items?.find(item => item.id === publication.videoId);
+    if (!response.ok || !resource || resource.snippet?.channelId !== publication.accountId) throw new Error('YouTube did not confirm an owned video; existing state is preserved.');
+    const status = resource.status ?? {};
+    let confirmed = 'uploaded';
+    if (['failed', 'rejected'].includes(status.uploadStatus)) confirmed = 'failed';
+    else if (status.uploadStatus === 'processed' && status.privacyStatus === 'public') confirmed = 'published';
+    else if (status.privacyStatus === 'private' && Date.parse(status.publishAt) > Date.now()) confirmed = 'scheduled';
+    return this.updatePublication(publication.id, {
+      status: confirmed, providerPrivacyStatus: status.privacyStatus ?? null, providerUploadStatus: status.uploadStatus ?? null, verifiedAt: new Date().toISOString(),
+      ...(confirmed === 'published' ? { publishedAt: publication.publishedAt ?? new Date().toISOString(), url: `https://www.youtube.com/watch?v=${encodeURIComponent(publication.videoId)}` } : {}),
+      ...(confirmed === 'scheduled' ? { scheduledAt: status.publishAt } : {}),
+    });
+  }
+
+  async exportTikTok({ episodeId, expectedReviewHash }) {
+    return this.store.transaction(async (state) => {
+      const plan = await this.plan(state, { episodeId, platform: 'tiktok', privacy: 'private' });
+      if (!nonempty(expectedReviewHash) || expectedReviewHash !== plan.reviewHash) throw new Error('Expected review fingerprint does not match the current episode.');
+      if (!plan.readyToExport) throw new Error(plan.reasons.join(' '));
+      const existing = state.publications.find((item) => item.episodeId === episodeId && item.platform === 'tiktok' &&
+        item.reviewHash === plan.reviewHash && item.status === 'exported');
+      if (existing) return { duplicate: true, publication: existing };
+      const episode = state.episodes.find((item) => item.id === episodeId);
+      const id = randomUUID();
+      const exportDirectory = path.join(this.store.directory, 'exports');
+      await mkdir(exportDirectory, { recursive: true });
+      const root = await realpath(this.store.directory);
+      const exportRoot = await realpath(exportDirectory);
+      if (path.relative(root, exportRoot) !== 'exports') throw new Error('Export directory must remain inside studio storage.');
+      const exportPath = path.join('exports', `tiktok-${id}.json`);
+      const destination = path.join(root, exportPath);
+      const packageData = {
+        schemaVersion: 1, platform: 'tiktok', episodeId, projectId: plan.projectId, reviewHash: plan.reviewHash,
+        createdAt: new Date().toISOString(), status: 'exported',
+        video: { path: plan.render.path, sha256: plan.render.sha256, durationSeconds: plan.render.durationSeconds },
+        caption: plan.caption, hashtags: plan.metadata.hashtags, disclosure: { isAigc: true, synthetic: true },
+        creatorActions: ['Review the video and editable caption.', 'Select privacy and interaction settings.', 'Disclose generated AI content.', 'Publish through TikTok or an approved compatible integration.'],
+        monetization: { creatorRewardsDurationCandidate: plan.render.durationSeconds > 60, eligibilityConfirmed: false },
+        cadenceWarnings: plan.cadence.warnings,
+      };
+      if (episode.render.captionsPath) {
+        const captionsPath = episode.render.captionsPath;
+        if (typeof captionsPath !== 'string' || path.isAbsolute(captionsPath)) throw new Error('Subtitles require a path within studio storage.');
+        const filename = await realpath(path.resolve(root, captionsPath));
+        const relative = path.relative(root, filename);
+        if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative) || path.extname(filename) !== '.srt') {
+          throw new Error('Subtitles require an SRT file within studio storage.');
+        }
+        const subtitles = await boundedMediaBody(filename, 1024 * 1024);
+        const subtitleHash = createHash('sha256').update(subtitles).digest('hex');
+        if (subtitleHash !== episode.render.captionsSha256) throw new Error('Subtitles changed after the reviewed render.');
+        packageData.captions = { path: relative, sha256: subtitleHash };
+        packageData.captionsPath = relative;
+      }
+      const temporary = `${destination}.tmp`;
+      await writeFile(temporary, `${JSON.stringify(packageData, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
+      await rename(temporary, destination);
+      const publication = {
+        id, episodeId, projectId: plan.projectId, platform: 'tiktok', accountId: plan.accountId,
+        reviewHash: plan.reviewHash, renderSha256: plan.render.sha256, status: 'exported', exportPath,
+        createdAt: packageData.createdAt,
+      };
+      state.publications.push(publication);
+      return { publication, package: packageData };
+    });
+  }
+}

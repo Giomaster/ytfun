@@ -1,0 +1,19 @@
+{
+  "name": "ytfun-ai-studio",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "MCP studio for original AI series, production and verified publishing.",
+  "engines": { "node": ">=22" },
+  "bin": { "ytfun-mcp": "src/mcp.mjs" },
+  "scripts": {
+    "start": "node src/mcp.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@huggingface/inference": "4.13.30",
+    "@modelcontextprotocol/sdk": "1.31.0",
+    "zod": "4.6.5"
+  },
+  "packageManager": "pnpm@10.33.0"
+}
