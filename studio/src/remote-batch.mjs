@@ -67,7 +67,7 @@ export class RemoteBatch {
         return { index: index + 1, sceneId, reservationId: randomUUID(), prompt, durationSeconds: scene.durationSeconds, seed: 20261026 + index + (previous ? 1000 : 0), ...(previous ? { replacesRejectedAssetId: previous.id } : {}) };
       });
       const authorizedAt = new Date().toISOString();
-      const packet = validatePacket({ version: 1, id: randomUUID(), episodeId, editorialSha256: episodeReviewHash({ ...episode, render: null }), authorizedAt, authorizationExpiresAt: new Date(Date.now() + 12 * 3600000).toISOString(), model: BATCH_MODEL, provider: 'fal-ai', estimatedCostPerSceneUsd: BATCH_ESTIMATE, costCeilingUsd, source: { assetId: source.id, sha256: source.sha256, url: sourceUrl(referenceUrl) }, scenes });
+      const packet = validatePacket({ version: 1, id: randomUUID(), episodeId, editorialSha256: episodeReviewHash({ ...episode, render: null }), authorizedAt, authorizationExpiresAt: new Date(Date.parse(authorizedAt) + 12 * 3600000).toISOString(), model: BATCH_MODEL, provider: 'fal-ai', estimatedCostPerSceneUsd: BATCH_ESTIMATE, costCeilingUsd, source: { assetId: source.id, sha256: source.sha256, url: sourceUrl(referenceUrl) }, scenes });
       const estimate = scenes.length * BATCH_ESTIMATE;
       if (project.budgetMonthlyUsd !== undefined && project.budgetMonthlyUsd !== null) {
         if (!Number.isFinite(project.budgetMonthlyUsd) || project.budgetMonthlyUsd < 0) throw new Error('Project generation budget is invalid');
