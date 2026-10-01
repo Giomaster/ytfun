@@ -93,6 +93,33 @@ Quality, required checks and authorization are constraints, not token-saving opt
 - Keep a compact handoff for unfinished work. Memory changes require a direct
   user request. Do not write transient status into durable project rules.
 
+## Pilot-first media production
+
+- For each new video concept, produce a low-cost pilot before investing in the
+  final version. Prefer a cheaper, faster or lower-fidelity model; use short
+  clips and lower resolution when they still let us assess the idea.
+- Use the pilot to review the visual story, pacing, composition, character
+  consistency and technical feasibility. Resolve problems in that pilot before
+  spending more on higher-quality generation. A pilot is a production draft,
+  not evidence that the final video has passed review or is ready to publish.
+- After the pilot validates the direction, choose a stronger model when the
+  expected improvement justifies its cost. A successful inexpensive result may
+  be retained; a more expensive model is not a mandatory finishing step.
+- The user has a paid Hugging Face subscription and allows more expensive
+  models with good value. Verify actual provider prices and subscription/credit
+  coverage for the selected model; membership alone does not establish that an
+  inference call is included. There is no fixed monthly budget by default.
+- Record provider, model, prompts, available seeds/reference assets, commercial
+  terms and estimated/actual costs for pilot and final versions. Preserve the
+  validated direction when upgrading; model changes still require output review.
+- Prefer external generation through the MCP and suitable remote providers or
+  workers. Keep the conversation focused on direction and coordination. These
+  rules govern media production; agent model selection follows the AI Execution
+  Policy above, and the machine owner's prohibition on local tests still applies.
+- AI Meow videos should communicate through images, motion and optional original
+  nonverbal sound, without spoken language or on-screen text. Do not generate
+  narration or subtitles for these videos unless the user changes this direction.
+
 ## Studio contracts
 
 - `studio/` is an independent Node ESM MCP package; legacy CLI remains intact.
@@ -101,9 +128,11 @@ Quality, required checks and authorization are constraints, not token-saving opt
   research metadata, never a permission to download or reuse source footage.
 - Model/provider commercial terms and inputs must have recorded evidence.
   "AI-generated" or a Hugging Face listing alone does not prove reuse rights.
-- Free-first experimentation has no fixed monthly budget by default. Reserve
-  each generation and record its estimate/source before an external call;
-  acknowledge paid costs per call, and never assert a zero estimate is a bill.
+- Apply the pilot-first rule to generation costs. Prefer free usage or included
+  credits when suitable; paid generation is allowed when its value is justified
+  within the user's authorization. Reserve each generation and record its
+  estimate/source before an external call; acknowledge paid costs per call and
+  honor runtime/provider gates. Never assert a zero estimate is a bill.
 - Approval is bound to content hashes and an actual review. Never fabricate
   watching a render, checking facts, or human consent.
 - Cadence is calculated over channel-wide publication events and reservations,

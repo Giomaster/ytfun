@@ -9,3 +9,17 @@ Read `studio/README.md` for the original AI studio, MCP tools and provider gates
 The existing root CLI is the historical rights-gated compilation path; its
 `PROJECT_BRIEF.md` and `CHANNEL_BRIEF.md` describe that historical product.
 Read `.ai/playbooks/context-hygiene.md` before commits. All tests run in CI.
+
+## Media production: pilot before final
+
+Follow [Pilot-first media production](AGENTS.md#pilot-first-media-production).
+For each new video concept, make a cheap, lower-fidelity pilot to validate the
+visual story, pacing and composition before paying for a higher-quality version.
+Upgrade the model only when the expected quality gain justifies its cost. The
+user pays for Hugging Face and accepts paid models with good value; verify the
+selected provider's price and actual credit/subscription coverage, record costs
+and honor the applicable authorization/runtime gates. No fixed monthly budget
+is assumed. Prefer external generation through the MCP. AI Meow videos use
+visual storytelling and optional original nonverbal sound, without speech or
+on-screen text unless the user requests a different direction. This media rule
+does not impose cheaper coding-agent models or permit local validation tests.
