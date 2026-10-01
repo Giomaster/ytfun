@@ -52,8 +52,9 @@ série precisa ser combinado antes de entrar em produção.
    episódio, arquivo final e proveniência. As verificações estruturais não
    substituem assistir ao vídeo ou confirmar fontes.
 7. YouTube recebe upload oficial, declaração de conteúdo sintético, privacidade
-   escolhida explicitamente e agendamento opcional. Facebook recebe Page Reels
-   pela API oficial, com declaração de IA e confirmação de processamento.
+   escolhida explicitamente e agendamento opcional. Facebook recebe cortes como
+   Page Reels e episódios `long` pela Page Video API, com declaração de IA e
+   confirmação de propriedade/processamento; o master exige permalink oficial.
    TikTok e Kwai recebem pacotes com MP4, legenda, hashtags, disclosure e SRT
    para publicação pelo criador em um fluxo permitido.
 8. Métricas observadas e estimativas de custo orientam o próximo experimento.
@@ -270,9 +271,12 @@ versão Graph fixada e confirmação dos requisitos de permissão/acesso da Meta
 As flags `YTFUN_FACEBOOK_PUBLISH_ENABLED=true` e
 `YTFUN_FACEBOOK_APP_REVIEW_CONFIRMED=true` habilitam envio público depois da
 configuração real. A identidade da Página é verificada antes do envio. O perfil
-conservador do adapter é MP4 vertical de 4–60 segundos; episódios maiores
-precisam de outro corte revisado. Esse é o limite verificado adotado pelo
-adapter, não uma alegação sobre o máximo atual de todas as interfaces Facebook.
+conservador de Reels é MP4 vertical de 4–60 segundos. Episódios explicitamente
+`long` usam outra rota, Page Video API, com limite operacional de 4–900 segundos,
+250 MiB e trechos de até 8 MiB. Esse limite longo pertence ao studio; a duração
+máxima atual da API Meta não foi confirmada nas páginas técnicas que retornaram
+429. A aceitação do servidor segue necessária. O recibo guarda a rota para
+reconciliação sem reenvio; ambas as rotas compartilham a cadência da Página.
 O renderer guarda resolução, fps e formato na revisão. Receber `success:true`
 ao enviar não equivale a confirmar publicação; processamento e propriedade do
 vídeo são consultados no provider. A fila respeita esses mesmos gates.

@@ -133,6 +133,102 @@ test('Facebook verifies account before reserving; ambiguous upload never repeats
   assert.equal(JSON.stringify(await f.store.read()).includes(TOKEN), false);
 });
 
+test('Facebook only routes an explicitly long episode to Page Video and retains short Reel limits', async t => {
+  const f = await facebookFixture(t);
+  const publisher = new Publisher(f.store, { env: f.env, fetchImpl: () => { throw new Error('No network during preview'); } });
+  await f.store.transaction(state => { state.episodes[0].render.durationSeconds = 720; approve(state.episodes[0], f.assets); });
+  const short = await publisher.preflight({ episodeId: f.episode.id, platform: 'facebook', privacy: 'public' });
+  assert.equal(short.facebookVideoKind, 'reel');
+  assert.equal(short.ready, false);
+  assert.ok(short.reasons.some(reason => reason.includes('60 seconds')));
+  await f.store.transaction(state => { state.episodes[0].format = 'long'; approve(state.episodes[0], f.assets); });
+  const long = await publisher.preflight({ episodeId: f.episode.id, platform: 'facebook', privacy: 'public' });
+  assert.equal(long.facebookVideoKind, 'page_video');
+  assert.equal(long.ready, true);
+  assert.deepEqual((await f.store.read()).publications, []);
+});
+
+test('Facebook long upload reserves its route, retains unknown receipt, blocks a retry and reconciles with the same adapter', async t => {
+  const f = await facebookFixture(t);
+  f.episode.format = 'long';
+  f.episode.render.durationSeconds = 720;
+  approve(f.episode, f.assets);
+  await f.store.transaction(state => { state.episodes[0] = structuredClone(f.episode); });
+  let calls = 0;
+  let syncs = 0;
+  const url = 'https://www.facebook.com/123456/videos/987654/';
+  const facebookPageVideo = {
+    readiness: () => ({ ready: true, reasons: [], accountId: '123456' }), verifyAccount: async () => ({ accountId: '123456', verified: true }),
+    upload: async ({ onReceipt, synthetic, media, title }) => {
+      calls++; assert.equal(synthetic, true); assert.deepEqual(media, f.bytes); assert.equal(title, f.episode.title);
+      assert.equal((await f.store.read()).publications[0].facebookVideoKind, 'page_video');
+      await onReceipt({ videoId: '987654', status: 'unknown', phase: 'start' });
+      assert.equal((await f.store.read()).publications[0].videoId, '987654');
+      return { videoId: '987654', status: 'unknown', phase: 'transfer', confirmed: false };
+    },
+    status: async () => { syncs++; return { videoId: '987654', status: 'published', confirmed: true, url }; },
+  };
+  const facebook = { readiness: () => ({ ready: true, reasons: [] }), verifyAccount: async () => { throw new Error('Reels must not run'); }, upload: async () => { throw new Error('Reels must not run'); }, status: async () => { throw new Error('Reels must not run'); } };
+  const publisher = new Publisher(f.store, { env: f.env, facebook, facebookPageVideo });
+  const input = { episodeId: f.episode.id, expectedReviewHash: f.episode.approval.reviewHash, privacy: 'public', execute: true };
+  const first = await publisher.publishFacebook(input);
+  assert.equal(first.publication.status, 'unknown');
+  assert.equal(first.publication.facebookVideoKind, 'page_video');
+  assert.equal((await publisher.publishFacebook(input)).duplicate, true);
+  assert.equal(calls, 1);
+  const result = await publisher.syncFacebook({ publicationId: first.publication.id });
+  assert.equal(result.verified, true);
+  assert.equal(result.publication.status, 'published');
+  assert.equal(result.publication.url, url);
+  assert.equal(syncs, 1);
+});
+
+test('Facebook long reconcile preserves state without a confirmed safe permalink', async t => {
+  const f = await facebookFixture(t);
+  await f.store.transaction(state => { state.publications.push({ id: 'long-publication', episodeId: f.episode.id, projectId: f.project.id, platform: 'facebook', facebookVideoKind: 'page_video', accountId: '123456', videoId: '987654', status: 'processing' }); });
+  for (const receipt of [{ status: 'published', confirmed: true, url: 'https://attacker.invalid/' }, { status: 'published', confirmed: false, url: 'https://www.facebook.com/123456/videos/987654/' }, { status: 'unknown', confirmed: false }]) {
+    const publisher = new Publisher(f.store, { env: f.env, facebookPageVideo: { status: async () => receipt } });
+    const result = await publisher.syncFacebook({ publicationId: 'long-publication' });
+    assert.equal(result.verified, false);
+    assert.equal(result.publication.status, 'processing');
+    assert.equal(result.publication.url, undefined);
+  }
+});
+
+test('Facebook rejects an in-storage render symlink before reservation or upload', async t => {
+  const f = await facebookFixture(t);
+  await writeFile(path.join(f.directory, 'assets/actual.mp4'), f.bytes);
+  await rm(path.join(f.directory, 'assets/render.mp4'));
+  await symlink('actual.mp4', path.join(f.directory, 'assets/render.mp4'));
+  let calls = 0;
+  const publisher = new Publisher(f.store, { env: f.env, fetchImpl: async () => { calls++; throw new Error('No upload allowed'); } });
+  const plan = await publisher.preflight({ episodeId: f.episode.id, platform: 'facebook', privacy: 'public' });
+  assert.equal(plan.ready, false);
+  await assert.rejects(publisher.publishFacebook({ episodeId: f.episode.id, privacy: 'public', expectedReviewHash: f.episode.approval.reviewHash, execute: true }));
+  assert.deepEqual((await f.store.read()).publications, []);
+  assert.equal(calls, 0);
+});
+
+test('Facebook changed reviewed render bytes stop before any account check or reservation', async t => {
+  const f = await facebookFixture(t);
+  await writeFile(path.join(f.directory, 'assets/render.mp4'), Buffer.from('changed-after-review'));
+  let calls = 0;
+  const publisher = new Publisher(f.store, { env: f.env, fetchImpl: async () => { calls++; throw new Error('Network must not run'); } });
+  await assert.rejects(publisher.publishFacebook({ episodeId: f.episode.id, privacy: 'public', expectedReviewHash: f.episode.approval.reviewHash, execute: true }));
+  assert.equal(calls, 0);
+  assert.deepEqual((await f.store.read()).publications, []);
+});
+
+test('Facebook cadence includes Page Video and Reel reservations on the same Page', async t => {
+  const f = await facebookFixture(t);
+  await f.store.transaction(state => { state.publications.push({ id: 'another-master', episodeId: 'other-episode', projectId: 'other-project', platform: 'facebook', facebookVideoKind: 'page_video', accountId: '123456', status: 'unknown', effectiveAt: new Date().toISOString() }); });
+  const publisher = new Publisher(f.store, { env: f.env });
+  const plan = await publisher.preflight({ episodeId: f.episode.id, platform: 'facebook', privacy: 'public' });
+  assert.equal(plan.facebookVideoKind, 'reel');
+  assert.equal(plan.ready, false);
+  assert.ok(plan.cadence.warnings.length > 0);
+});
+
 test('Kwai exports exact reviewed media and subtitles without invoking an unsupported API', async t => {
   const f = await fixture(t);
   const publisher = new Publisher(f.store, { env: { KWAI_ACCOUNT_ID: 'ai._.meow' }, fetchImpl: () => { throw new Error('Unexpected API call'); } });

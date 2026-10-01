@@ -1,11 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { createReadStream } from 'node:fs';
-import { mkdir, realpath, rename, stat, writeFile } from 'node:fs/promises';
+import { constants, createReadStream } from 'node:fs';
+import { lstat, mkdir, open, realpath, rename, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { episodeAssetHash, episodeReviewHash, validateEpisodeDerivation } from './domain.mjs';
 import { YouTubeAuth, YOUTUBE_UPLOAD_SCOPE, YOUTUBE_READONLY_SCOPE } from './oauth.mjs';
-import { FacebookReels, validateFacebookReel } from './facebook.mjs';
+import { FacebookPageVideo, FacebookReels, safeFacebookVideoPermalink, validateFacebookPageVideo, validateFacebookReel } from './facebook.mjs';
 import { distributionCapabilities, publicationPackage } from './distribution.mjs';
 import { assertYouTubeConnected, youtubeApiData, youtubeBlocked } from './youtube-data-policy.mjs';
 
@@ -43,11 +43,23 @@ function maxFileBytes(env) {
   return configured;
 }
 
-async function verifiedFile(directory, relativePath, expectedHash, maxBytes) {
+async function rejectMediaSymlinks(root, relativePath) {
+  let current = root;
+  const parts = relativePath.split(path.sep);
+  for (let i = 0; i < parts.length; i += 1) {
+    if (!parts[i] || parts[i] === '.' || parts[i] === '..') throw new Error('Media requires a canonical path within studio storage.');
+    current = path.join(current, parts[i]);
+    const info = await lstat(current);
+    if (info.isSymbolicLink() || (i < parts.length - 1 && !info.isDirectory())) throw new Error('Facebook media paths must not contain symbolic links.');
+  }
+}
+
+async function verifiedFile(directory, relativePath, expectedHash, maxBytes, { noSymlinks = false } = {}) {
   if (!nonempty(relativePath) || path.isAbsolute(relativePath) || !/^[a-f0-9]{64}$/i.test(expectedHash ?? '')) {
     throw new Error('Media requires a relative path and a SHA-256 fingerprint.');
   }
   const root = await realpath(directory);
+  if (noSymlinks) await rejectMediaSymlinks(root, relativePath);
   const file = await realpath(path.resolve(root, relativePath));
   const relative = path.relative(root, file);
   if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
@@ -65,7 +77,34 @@ async function verifiedFile(directory, relativePath, expectedHash, maxBytes) {
     hash.update(chunk);
   }
   if (hash.digest('hex') !== expectedHash.toLowerCase()) throw new Error('Media fingerprint changed after review.');
-  return { absolutePath: file, relativePath: relative, sizeBytes: info.size };
+  return { absolutePath: file, relativePath: relative, sizeBytes: info.size, device: info.dev, inode: info.ino };
+}
+
+async function facebookMediaBody(directory, file, expectedHash, maxBytes) {
+  const root = await realpath(directory);
+  await rejectMediaSymlinks(root, file.relativePath);
+  const handle = await open(file.absolutePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const info = await handle.stat();
+    if (!info.isFile() || info.dev !== file.device || info.ino !== file.inode || info.size !== file.sizeBytes || info.size > maxBytes) {
+      throw new Error('Facebook render changed while preparing the upload.');
+    }
+    // Recheck directory components after acquiring the descriptor; all bytes
+    // subsequently come from that exact open regular file, never another path.
+    await rejectMediaSymlinks(root, file.relativePath);
+    if (await realpath(file.absolutePath) !== file.absolutePath) throw new Error('Facebook media path changed while preparing the upload.');
+    const chunks = [];
+    let length = 0;
+    const hash = createHash('sha256');
+    for await (const chunk of handle.createReadStream({ autoClose: false })) {
+      length += chunk.length;
+      if (length > maxBytes) throw new Error('Facebook media exceeded its upload size limit.');
+      hash.update(chunk);
+      chunks.push(chunk);
+    }
+    if (length !== file.sizeBytes || hash.digest('hex') !== expectedHash.toLowerCase()) throw new Error('Facebook render changed after review.');
+    return Buffer.concat(chunks, length);
+  } finally { await handle.close(); }
 }
 
 async function boundedMediaBody(filename, maxBytes) {
@@ -147,17 +186,18 @@ async function responseJson(response) {
 }
 
 export class Publisher {
-  constructor(store, { env = process.env, fetchImpl = fetch, youtubeAuth, facebook } = {}) {
+  constructor(store, { env = process.env, fetchImpl = fetch, youtubeAuth, facebook, facebookPageVideo } = {}) {
     this.store = store;
     this.env = env;
     this.youtubeGrantId = env.YTFUN_YOUTUBE_GRANT_ID || 'legacy';
     this.fetch = fetchImpl;
     this.youtubeAuth = youtubeAuth ?? new YouTubeAuth({ env, fetchImpl });
     this.facebook = facebook ?? new FacebookReels({ env, fetchImpl });
+    this.facebookPageVideo = facebookPageVideo ?? new FacebookPageVideo({ env, fetchImpl });
   }
 
   capabilities() {
-    return { platforms: distributionCapabilities(this.env), youtubeAuth: this.youtubeAuth.readiness(), facebook: this.facebook.readiness() };
+    return { platforms: distributionCapabilities(this.env), youtubeAuth: this.youtubeAuth.readiness(), facebook: this.facebook.readiness(), facebookPageVideo: this.facebookPageVideo.readiness() };
   }
 
   async plan(state, { episodeId, platform, privacy = 'private', publishAt }, now = Date.now()) {
@@ -190,7 +230,7 @@ export class Publisher {
     }
     let render;
     try {
-      render = await verifiedFile(this.store.directory, episode.render?.path, episode.render?.sha256, maxFileBytes(this.env));
+      render = await verifiedFile(this.store.directory, episode.render?.path, episode.render?.sha256, maxFileBytes(this.env), { noSymlinks: platform === 'facebook' });
       if (path.extname(render.absolutePath).toLowerCase() !== '.mp4') reasons.push('Publishing requires an MP4 render.');
     } catch {
       reasons.push('Render is missing, changed, outside studio storage, or exceeds the upload limit.');
@@ -222,7 +262,7 @@ export class Publisher {
             reasons.push('Every scene requires original generated assets with provider, model, and commercial-license evidence.');
             continue;
           }
-          try { await verifiedFile(this.store.directory, asset.path, asset.sha256, maxFileBytes(this.env)); }
+          try { await verifiedFile(this.store.directory, asset.path, asset.sha256, maxFileBytes(this.env), { noSymlinks: platform === 'facebook' }); }
           catch { reasons.push('A scene asset is missing, changed, or outside studio storage.'); }
         }
       }
@@ -248,10 +288,15 @@ export class Publisher {
       }
       reasons.push(...cadence);
     }
+    const facebookVideoKind = episode.format === 'long' ? 'page_video' : 'reel';
     if (platform === 'facebook') {
-      if (privacy !== 'public') reasons.push('Facebook Page Reels requires explicitly selected public visibility.');
-      reasons.push(...this.facebook.readiness().reasons, ...cadence);
-      reasons.push(...validateFacebookReel(episode.render ?? {}).reasons);
+      if (episode.format !== undefined && !['long', 'short'].includes(episode.format)) reasons.push('Facebook requires an explicit valid long or short episode format.');
+      if (privacy !== 'public') reasons.push('Facebook Page publishing requires explicitly selected public visibility.');
+      const adapter = facebookVideoKind === 'page_video' ? this.facebookPageVideo : this.facebook;
+      const validate = facebookVideoKind === 'page_video' ? validateFacebookPageVideo : validateFacebookReel;
+      const readiness = adapter.readiness();
+      if (readiness.accountId !== undefined && readiness.accountId !== accountId) reasons.push('Facebook configuration changed; restart the publisher with the intended Page authorization.');
+      reasons.push(...readiness.reasons, ...cadence, ...validate(episode.render ?? {}).reasons);
     }
     const caption = metadata ? [metadata.title, metadata.description].filter(nonempty).join('\n\n') : '';
     if (platform === 'facebook' && caption.length > 5000) reasons.push('Facebook caption exceeds the studio 5000-character limit.');
@@ -259,6 +304,7 @@ export class Publisher {
     return {
       episodeId: episode.id, projectId: project.id, platform, accountId, reviewHash, privacy,
       ...(platform === 'youtube' ? { youtubeGrantId: this.youtubeGrantId } : {}),
+      ...(platform === 'facebook' ? { facebookVideoKind } : {}),
       uploadPrivacy: publishAt === undefined ? privacy : 'private', effectiveAt,
       ...(publishAt !== undefined ? { publishAt: effectiveAt } : {}),
       ready: reasons.length === 0 && ['youtube', 'facebook'].includes(platform), readyToExport: reasons.length === 0 && ['tiktok', 'kwai'].includes(platform),
@@ -422,25 +468,27 @@ export class Publisher {
   }
 
   async publishFacebook({ episodeId, expectedReviewHash, privacy, execute = false, deliveryId }) {
-    if (privacy !== 'public') throw new Error('Facebook Page Reels requires explicit public visibility.');
+    if (privacy !== 'public') throw new Error('Facebook Page publishing requires explicit public visibility.');
     if (typeof execute !== 'boolean') throw new Error('execute must be a boolean.');
     const initial = await this.preflight({ episodeId, platform: 'facebook', privacy });
     if (!nonempty(expectedReviewHash) || expectedReviewHash !== initial.reviewHash) throw new Error('Expected review fingerprint does not match the current episode.');
     if (!execute) return { ...initial, execute: false };
     if (initial.publication) return { duplicate: true, publication: initial.publication };
     if (!initial.ready) throw new Error(initial.reasons.join(' '));
-    await this.facebook.verifyAccount();
+    const adapter = initial.facebookVideoKind === 'page_video' ? this.facebookPageVideo : this.facebook;
+    await adapter.verifyAccount();
     let media;
     const reservation = await this.store.transaction(async state => {
       const plan = await this.plan(state, { episodeId, platform: 'facebook', privacy });
       if (plan.reviewHash !== expectedReviewHash) throw new Error('Episode changed after publication was requested.');
+      if (plan.facebookVideoKind !== initial.facebookVideoKind) throw new Error('Facebook upload route changed after publication was requested.');
       if (plan.publication) return { duplicate: true, publication: plan.publication };
       if (!plan.ready) throw new Error(plan.reasons.join(' '));
       verifyDeliveryClaim(state, deliveryId, plan, { privacy });
-      const file = await verifiedFile(this.store.directory, plan.render.path, plan.render.sha256, maxFileBytes(this.env));
-      media = await boundedMediaBody(file.absolutePath, maxFileBytes(this.env));
+      const file = await verifiedFile(this.store.directory, plan.render.path, plan.render.sha256, maxFileBytes(this.env), { noSymlinks: true });
+      media = await facebookMediaBody(this.store.directory, file, plan.render.sha256, maxFileBytes(this.env));
       if (createHash('sha256').update(media).digest('hex') !== plan.render.sha256.toLowerCase()) throw new Error('Render changed while preparing the upload.');
-      const publication = { id: randomUUID(), episodeId, projectId: plan.projectId, platform: 'facebook', accountId: plan.accountId, reviewHash: plan.reviewHash, renderSha256: plan.render.sha256, status: 'uploading', privacy, effectiveAt: plan.effectiveAt, createdAt: new Date().toISOString(), ...(deliveryId ? { deliveryId } : {}) };
+      const publication = { id: randomUUID(), episodeId, projectId: plan.projectId, platform: 'facebook', facebookVideoKind: plan.facebookVideoKind, accountId: plan.accountId, reviewHash: plan.reviewHash, renderSha256: plan.render.sha256, status: 'uploading', privacy, effectiveAt: plan.effectiveAt, createdAt: new Date().toISOString(), ...(deliveryId ? { deliveryId } : {}) };
       state.publications.push(publication);
       state.episodes.find(item => item.id === episodeId).status = 'publishing';
       return { publication, plan };
@@ -448,7 +496,7 @@ export class Publisher {
     if (reservation.duplicate) return reservation;
     const { publication, plan } = reservation;
     try {
-      const receipt = await this.facebook.upload({ media, caption: plan.caption, synthetic: true, onReceipt: async ({ videoId, status, phase }) => {
+      const receipt = await adapter.upload({ media, caption: plan.caption, title: plan.metadata.title, synthetic: true, onReceipt: async ({ videoId, status, phase }) => {
         if (!/^\d+$/.test(videoId ?? '')) throw new Error('Facebook returned an invalid receipt.');
         if (!['unknown', 'uploaded', 'processing'].includes(status) || !['start', 'transfer', 'finish'].includes(phase)) throw new Error('Facebook returned an invalid upload phase.');
         await this.updatePublication(publication.id, { videoId, status, providerPhase: phase });
@@ -456,11 +504,14 @@ export class Publisher {
       let status = ['uploaded', 'processing', 'published', 'unknown', 'failed'].includes(receipt?.status) ? receipt.status : 'unknown';
       const videoId = /^\d+$/.test(receipt?.videoId ?? '') ? receipt.videoId : undefined;
       if (status === 'published' && (!videoId || receipt.confirmed !== true)) status = 'unknown';
+      const url = plan.facebookVideoKind === 'page_video' ? safeFacebookVideoPermalink(receipt?.url, videoId) :
+        videoId ? `https://www.facebook.com/reel/${videoId}` : null;
+      if (status === 'published' && !url) status = 'unknown';
       if (status === 'unknown' && receipt?.phase === 'status') {
         const stored = (await this.store.read()).publications.find(item => item.id === publication.id);
         if (['uploaded', 'processing'].includes(stored?.status)) status = stored.status;
       }
-      return { publication: await this.updatePublication(publication.id, { status, ...(videoId ? { videoId } : {}), ...(status === 'published' && videoId ? { publishedAt: new Date().toISOString(), url: `https://www.facebook.com/reel/${videoId}` } : {}), ...(status === 'unknown' ? { error: 'Facebook upload outcome requires reconciliation; do not repeat it.' } : {}) }) };
+      return { publication: await this.updatePublication(publication.id, { status, ...(videoId ? { videoId } : {}), ...(status === 'published' && videoId ? { publishedAt: new Date().toISOString(), url } : {}), ...(status === 'unknown' ? { error: 'Facebook upload outcome requires reconciliation; do not repeat it.' } : {}) }) };
     } catch {
       return { publication: await this.updatePublication(publication.id, { status: 'unknown', error: 'Facebook upload outcome is unknown; reconcile before any retry.' }) };
     }
@@ -470,9 +521,14 @@ export class Publisher {
     const state = await this.store.read();
     const publication = state.publications.find(item => item.id === publicationId && item.platform === 'facebook');
     if (!publication?.videoId || publication.accountId !== this.env.FACEBOOK_PAGE_ID) throw new Error('A receipt and the original Facebook Page are required for reconciliation.');
-    const receipt = await this.facebook.status({ videoId: publication.videoId });
+    const kind = publication.facebookVideoKind ?? 'reel';
+    if (!['reel', 'page_video'].includes(kind)) throw new Error('Facebook publication has an unrecognized upload route; preserve its receipt.');
+    const adapter = kind === 'page_video' ? this.facebookPageVideo : this.facebook;
+    const receipt = await adapter.status({ videoId: publication.videoId });
+    const url = kind === 'page_video' ? safeFacebookVideoPermalink(receipt?.url, publication.videoId) : `https://www.facebook.com/reel/${publication.videoId}`;
+    if (receipt?.status === 'published' && (receipt.confirmed !== true || !url)) return { publication, verified: false, reason: 'Facebook has not confirmed public visibility and a safe permalink; existing state is preserved.' };
     if (!['uploaded', 'processing', 'published', 'failed'].includes(receipt?.status)) return { publication, verified: false, reason: 'Facebook has not confirmed the owned publication; existing state is preserved.' };
-    return { verified: true, publication: await this.updatePublication(publication.id, { status: receipt.status, verifiedAt: new Date().toISOString(), ...(receipt.status === 'published' ? { publishedAt: publication.publishedAt ?? new Date().toISOString(), url: `https://www.facebook.com/reel/${publication.videoId}` } : {}) }) };
+    return { verified: true, publication: await this.updatePublication(publication.id, { status: receipt.status, verifiedAt: new Date().toISOString(), ...(receipt.status === 'published' ? { publishedAt: publication.publishedAt ?? new Date().toISOString(), url } : {}) }) };
   }
 
   async exportPackage({ episodeId, expectedReviewHash, platform, deliveryId }) {

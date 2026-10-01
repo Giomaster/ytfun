@@ -9,6 +9,8 @@ const SOURCES = {
   facebook: [
     ['Facebook Reels publishing', 'https://developers.facebook.com/docs/video-api/guides/reels-publishing/'],
     ['Meta SDK Reels AI-disclosure field', 'https://github.com/facebook/facebook-python-business-sdk/blob/788f363d15b1269ab5efb7cd00fb5e3b133cd99b/facebook_business/adobjects/page.py#L4842-L4866'],
+    ['Meta SDK general Page Video upload and AI-disclosure fields', 'https://github.com/facebook/facebook-python-business-sdk/blob/788f363d15b1269ab5efb7cd00fb5e3b133cd99b/facebook_business/adobjects/page.py#L4961-L5078'],
+    ['Meta Video ownership, processing and permalink fields', 'https://github.com/facebook/facebook-python-business-sdk/blob/788f363d15b1269ab5efb7cd00fb5e3b133cd99b/facebook_business/adobjects/advideo.py'],
   ],
   tiktok: [
     ['App review requirements', 'https://developers.tiktok.com/doc/app-review-guidelines'],
@@ -37,7 +39,7 @@ function deepFreeze(value) {
 }
 
 function sources(platform) {
-  return SOURCES[platform].map(([title, url]) => ({ title, url, checkedAt: CHECKED_AT }));
+  return SOURCES[platform].map(([title, url]) => ({ title, url, checkedAt: platform === 'facebook' ? '2026-10-01' : CHECKED_AT }));
 }
 
 function missingVariables(env, names) {
@@ -84,7 +86,11 @@ export function distributionCapabilities(env = {}) {
         'The publisher must verify Page identity, current token permissions and publishing eligibility.',
         ...(!facebookPublic ? ['Facebook publishing requires YTFUN_FACEBOOK_PUBLISH_ENABLED=true and YTFUN_FACEBOOK_APP_REVIEW_CONFIRMED=true.'] : []),
       ],
-      restrictions: ['The adapter publishes Page Reels; personal-profile publishing is not supported.'],
+      restrictions: [
+        'Short/default episodes use Page Reels with the conservative 4–60 second profile; explicit long episodes use the separate Page Video API with a studio limit of 4–900 seconds.',
+        'The provider duration limit for the general Page Video API is unverified; server acceptance is required, and the Facebook UI announcement does not establish Reels API limits.',
+        'Uploads are limited to 250 MiB; Page Video chunks are limited to 8 MiB. Personal-profile publishing is not supported.',
+      ],
       sources: sources('facebook'),
     },
     {
