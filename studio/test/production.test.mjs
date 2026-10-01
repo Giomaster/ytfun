@@ -1411,6 +1411,44 @@ async function remoteRenderContext(t, { format = 'long', sceneCount = 15, sceneD
     input: { episodeId: context.episode.id, localPath, manifest, provenance } };
 }
 
+test('rejected current visual/audio selection blocks rendering and manifest export without falling back', async t => {
+  for (const kind of ['video', 'audio', 'image']) {
+    const context = await setup(t);
+    let runnerCalls = 0;
+    const production = new Production(context.store, { env, runner: async () => { runnerCalls++; assert.fail('Rejected sources must not reach the media process'); } });
+    const [sources] = await addSourceAssets(context, production, { alsoVideo: kind === 'video' });
+    // A newer rejected video must not fall back to the older video or image.
+    const target = kind === 'video' ? await production.registerAsset({ episodeId: context.episode.id, sceneId: context.episode.scenes[0].id, kind: 'video', localPath: join(context.directory, 'source.mp4'), provenance }) : sources[kind];
+    await context.store.transaction(state => { state.assets.find(asset => asset.id === target.id).qualityReview = { decision: 'rejected', sha256: target.sha256, findings: 'Observed impossible geometry and broken material contact.' }; });
+    const before = await context.store.read();
+    await assert.rejects(production.exportRenderManifest({ episodeId: context.episode.id }), /rejected by quality review/);
+    await assert.rejects(production.renderEpisode({ episodeId: context.episode.id }), /rejected by quality review/);
+    assert.equal(runnerCalls, 0);
+    assert.deepEqual(await context.store.read(), before);
+  }
+});
+
+test('a source rejected after manifest export cannot be registered as a remote render', async t => {
+  const context = await remoteRenderContext(t, { sceneCount: 1 });
+  await context.store.transaction(state => { const asset = state.assets[0]; asset.qualityReview = { decision: 'rejected', sha256: asset.sha256, findings: 'The exported source has visibly incoherent action.' }; });
+  const before = await context.store.read();
+  await assert.rejects(context.production.registerRemoteRender(context.input), /rejected by quality review/);
+  assert.equal(context.calls.length, 0);
+  assert.deepEqual(await context.store.read(), before);
+});
+
+test('a rejection arriving during remote-render probing stops the final render commit', async t => {
+  const context = await remoteRenderContext(t, { sceneCount: 1, probeHook: async ({ context }) => {
+    await context.store.transaction(state => { const asset = state.assets[0]; asset.qualityReview = { decision: 'rejected', sha256: asset.sha256, findings: 'The current source was rejected while assembly was being checked.' }; });
+  } });
+  await assert.rejects(context.production.registerRemoteRender(context.input), /Remote render registration failed/);
+  const state = await context.store.read();
+  assert.equal(state.episodes[0].render, null);
+  assert.equal(state.episodes[0].approval, null);
+  assert.equal(state.assets[0].qualityReview.decision, 'rejected');
+  assert.equal(state.assets.length, 1);
+});
+
 test('remote assembly binds ordered scene/script/source hashes and independently probes its private copy', async t => {
   const context = await remoteRenderContext(t);
   assert.equal(context.manifest.format, 'long');

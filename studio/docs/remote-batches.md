@@ -44,6 +44,10 @@ attention checkpoints without diagnostics cannot be retroactively reclassified.
 
 Before import, verify the Actions run and commit through GitHub, bind that identity
 with `RemoteBatch.bindRun`, and pass the exact artifact to `RemoteBatch.accept`.
+An asset rejected by observed quality review remains in the cost/history ledger
+but cannot enter rendering, manifest export, editorial approval, derivation or
+publication/export. Rejection participates in the asset review hash; selection
+stops on the rejected current asset instead of falling back to older footage.
 Import verifies batch, scene, source, reference, run, commit and MP4 hash before
 committing a synthetic asset and completing the matching spending reservation.
 It does not approve media or publish anything. Human-authorized editorial review,

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -45,6 +45,18 @@ async function rendered(fixture, episode) {
 }
 
 const review = { originalityChecked: true, factsChecked: true, renderWatched: true, reviewedBy: 'Human editor', notes: 'Watched the complete render, compared scripts and verified the source and license evidence.' };
+
+test('asset review hashing retains the legacy wire format without a quality review and binds an added rejection', () => {
+  const episode = { render: { sceneAssets: [{ visualAssetId: 'visual' }] } };
+  const asset = { id: 'visual', episodeId: 'episode', sceneId: 'scene', kind: 'video', path: 'assets/current.mp4', sha256: 'a'.repeat(64), synthetic: true, provenance: {} };
+  const legacyWire = `[{"episodeId":"episode","id":"visual","kind":"video","path":"assets/current.mp4","provenance":{},"sceneId":"scene","sha256":"${'a'.repeat(64)}","synthetic":true}]`;
+  const legacyHash = createHash('sha256').update(legacyWire).digest('hex');
+  assert.equal(episodeAssetHash(episode, [asset]), legacyHash);
+  assert.equal(episodeAssetHash(episode, [{ ...asset, qualityReview: undefined }]), legacyHash);
+  const rejected = { ...asset, qualityReview: { decision: 'rejected', sha256: asset.sha256, findings: 'Observed incoherent geometry.' } };
+  assert.notEqual(episodeAssetHash(episode, [rejected]), legacyHash);
+  assert.notEqual(episodeAssetHash(episode, [rejected]), episodeAssetHash(episode, [{ ...rejected, qualityReview: { ...rejected.qualityReview, findings: 'Observed incoherent object interaction.' } }]));
+});
 
 test('store rolls back a failed async mutation and readers never see partial state', async (t) => {
   const f = await fixture(t);
@@ -252,6 +264,44 @@ test('derivation rejects unrendered or tampered parents and retains source hash 
   const findings = (await f.studio.editorialReview(short.id)).findings;
   assert.ok(findings.some(finding => finding.code === 'derivation_invalid' && /source changed/.test(finding.message)));
   await assert.rejects(f.studio.approveEpisode({ episodeId: short.id, review }), /source changed/);
+});
+
+test('rejected visual or audio sources invalidate an existing asset review and block approval and new derivation', async t => {
+  for (const kind of ['image', 'audio']) {
+    const f = await fixture(t);
+    const parent = await f.studio.planEpisode(episodeInput(f.project.id, { format: 'long', title: 'A master with inspected original reveals', scenes: longScenes }));
+    const { assets } = await rendered(f, parent);
+    const approved = await f.studio.approveEpisode({ episodeId: parent.id, review });
+    const target = assets.find(asset => asset.kind === kind);
+    await f.store.transaction(state => { state.assets.find(asset => asset.id === target.id).qualityReview = { decision: 'rejected', sha256: target.sha256, reviewedBy: 'Human editor', findings: 'The original asset has visibly incoherent interactions.' }; });
+    const before = await f.store.read();
+    assert.notEqual(episodeAssetHash(approved, before.assets), approved.approval.assetReviewHash);
+    const editorial = await f.studio.editorialReview(parent.id);
+    assert.equal(editorial.readyForApproval, false);
+    assert.ok(editorial.findings.some(finding => finding.code === 'asset_rejected'));
+    await assert.rejects(f.studio.approveEpisode({ episodeId: parent.id, review }), /rejected by quality review/);
+    await assert.rejects(f.studio.deriveShort(derivedInput(parent)), /source is invalid.*rejected by quality review/);
+    assert.deepEqual(await f.store.read(), before, 'Blocked work must retain all source assets, costs and previous review records');
+  }
+});
+
+test('derived approval rejects the original or copied source even if a parent hash is manually refreshed', async t => {
+  for (const originalRejected of [true, false]) {
+    const f = await fixture(t);
+    const parent = await f.studio.planEpisode(episodeInput(f.project.id, { format: 'long', title: 'Original source for a complete derived reveal', scenes: longScenes }));
+    await rendered(f, parent);
+    const short = await f.studio.deriveShort(derivedInput(parent));
+    await renderDerived(f, short);
+    await f.store.transaction(state => {
+      const source = state.assets.find(asset => asset.episodeId === parent.id && asset.kind === 'image');
+      const target = originalRejected ? source : state.assets.find(asset => asset.episodeId === short.id && asset.lineage.sourceAssetId === source.id);
+      target.qualityReview = { decision: 'rejected', sha256: target.sha256, findings: 'The source asset has visibly incoherent material behavior.' };
+      if (originalRejected) state.episodes.find(episode => episode.id === short.id).derivation.parentAssetReviewHash = episodeAssetHash(state.episodes.find(episode => episode.id === parent.id), state.assets);
+    });
+    const findings = (await f.studio.editorialReview(short.id)).findings;
+    assert.ok(findings.some(finding => finding.code === 'derivation_invalid' && /Rejected assets/.test(finding.message)));
+    await assert.rejects(f.studio.approveEpisode({ episodeId: short.id, review }), /Rejected assets/);
+  }
 });
 
 test('parent-child narrative reuse is narrow: repeated titles and sibling stories remain blocked', async t => {

@@ -219,6 +219,38 @@ test('Facebook changed reviewed render bytes stop before any account check or re
   assert.deepEqual((await f.store.read()).publications, []);
 });
 
+test('rejected render sources block every publisher and creator export even if the asset-review hash is refreshed', async t => {
+  for (const kind of ['image', 'audio']) {
+    const f = await facebookFixture(t);
+    f.env = { ...f.env, YOUTUBE_CHANNEL_ID: CHANNEL, YOUTUBE_ACCESS_TOKEN: TOKEN };
+    const target = f.assets.find(asset => asset.kind === kind);
+    const previousHash = f.episode.approval.assetReviewHash;
+    await f.store.transaction(state => {
+      state.assets.find(asset => asset.id === target.id).qualityReview = { decision: 'rejected', sha256: target.sha256, findings: 'Observed source interactions do not satisfy the directed scene.' };
+      const currentHash = episodeAssetHash(state.episodes[0], state.assets);
+      assert.notEqual(currentHash, previousHash);
+      // A rewritten hash cannot override the explicit rejection decision.
+      state.episodes[0].approval.assetReviewHash = currentHash;
+      state.spending.push({ id: 'retained-source-cost', episodeId: f.episode.id, assetId: target.id, status: 'completed', estimatedCostUsd: 0.5 });
+    });
+    const before = await f.store.read();
+    let requests = 0;
+    const publisher = new Publisher(f.store, { env: f.env, fetchImpl: async () => { requests++; assert.fail('Rejected sources must not reach a platform'); } });
+    for (const platform of ['youtube', 'facebook', 'tiktok', 'kwai']) {
+      const plan = await publisher.preflight({ episodeId: f.episode.id, platform, privacy: platform === 'facebook' ? 'public' : 'private' });
+      assert.equal(plan.ready, false);
+      assert.equal(plan.readyToExport, false);
+      assert.ok(plan.reasons.some(reason => reason.includes('rejected by quality review')));
+    }
+    await assert.rejects(publisher.publishYouTube(args(f)), /rejected by quality review/);
+    await assert.rejects(publisher.publishFacebook({ episodeId: f.episode.id, privacy: 'public', expectedReviewHash: f.episode.approval.reviewHash, execute: true }), /rejected by quality review/);
+    await assert.rejects(publisher.exportTikTok({ episodeId: f.episode.id, expectedReviewHash: f.episode.approval.reviewHash }), /rejected by quality review/);
+    await assert.rejects(publisher.exportPackage({ episodeId: f.episode.id, expectedReviewHash: f.episode.approval.reviewHash, platform: 'kwai' }), /rejected by quality review/);
+    assert.equal(requests, 0);
+    assert.deepEqual(await f.store.read(), before, 'No upload/export reservation may replace assets or erase their costs');
+  }
+});
+
 test('Facebook cadence includes Page Video and Reel reservations on the same Page', async t => {
   const f = await facebookFixture(t);
   await f.store.transaction(state => { state.publications.push({ id: 'another-master', episodeId: 'other-episode', projectId: 'other-project', platform: 'facebook', facebookVideoKind: 'page_video', accountId: '123456', status: 'unknown', effectiveAt: new Date().toISOString() }); });

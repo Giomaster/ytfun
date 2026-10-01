@@ -426,6 +426,9 @@ function selectSceneAssets(state, episode) {
     const audio = withAudio ? matching.findLast((asset) => asset.kind === 'audio') : undefined;
     if (!visual || (withAudio && !audio)) throw new Error(`Scene ${scene.id} requires synthetic visual${withAudio ? ` and ${mode === 'narrated' ? 'narration' : 'nonverbal'} audio` : ''} assets`);
     for (const asset of [visual, ...(audio ? [audio] : [])]) {
+      // Keep the current selection: rejection must stop assembly, never cause
+      // an implicit fallback to a previous visual or audio asset.
+      if (asset.qualityReview?.decision === 'rejected') throw new Error(`Asset ${asset.id} was rejected by quality review; select an explicit reviewed replacement before rendering`);
       if (asset.synthetic !== true) throw new Error('Only attested synthetic assets can be rendered');
       evidence(asset.provenance?.commercialLicense);
     }

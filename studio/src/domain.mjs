@@ -161,7 +161,7 @@ export function episodeAssetHash(episode, assets) {
   const ids = [...new Set((episode.render?.sceneAssets ?? []).flatMap((scene) => [scene.visualAssetId, scene.audioAssetId]).filter(Boolean))].sort();
   const manifest = ids.map((id) => {
     const asset = assets.find((entry) => entry.id === id);
-    return asset ? { id, episodeId: asset.episodeId, sceneId: asset.sceneId, kind: asset.kind, path: asset.path, sha256: asset.sha256, synthetic: asset.synthetic, provenance: asset.provenance, ...(asset.lineage === undefined ? {} : { lineage: asset.lineage }) } : { id, missing: true };
+    return asset ? { id, episodeId: asset.episodeId, sceneId: asset.sceneId, kind: asset.kind, path: asset.path, sha256: asset.sha256, synthetic: asset.synthetic, provenance: asset.provenance, ...(asset.lineage === undefined ? {} : { lineage: asset.lineage }), ...(asset.qualityReview === undefined ? {} : { qualityReview: asset.qualityReview }) } : { id, missing: true };
   });
   return createHash('sha256').update(canonicalJson(manifest)).digest('hex');
 }
@@ -240,6 +240,7 @@ function derivationSource(state, episode) {
       const record = lineage.assets?.find(asset => asset.sourceAssetId === original?.id && asset.sceneId === scene.id);
       const copied = state.assets.find(asset => asset.id === record?.assetId);
       if (!original || original.episodeId !== parent.id || original.sceneId !== id || !copied || copied.episodeId !== episode.id || copied.sceneId !== scene.id || copiedIds.has(copied.id)) throw new Error('Derived scene assets must be copied and remapped from their original source');
+      if (original.qualityReview?.decision === 'rejected' || copied.qualityReview?.decision === 'rejected') throw new Error('Rejected assets cannot be used as original or copied derivation sources');
       copiedIds.add(copied.id);
       const expected = { sourceEpisodeId: parent.id, sourceSceneId: id, sourceAssetId: original.id, sourceSha256: original.sha256, parentRenderSha256: parent.render.sha256 };
       if (record.sourceSceneId !== id || record.sha256 !== original.sha256 || canonicalJson(copied.lineage) !== canonicalJson(expected) || copied.kind !== original.kind || copied.path !== original.path || copied.sha256 !== original.sha256 || copied.synthetic !== true || canonicalJson(copied.provenance) !== canonicalJson(original.provenance)) throw new Error('Derived assets must preserve original bytes, generation provenance and lineage');
@@ -324,6 +325,7 @@ async function episodeFindings(state, episode, directory) {
     for (const [field, allowed] of fields) {
       const asset = state.assets.find((entry) => entry.id === linked?.[field]);
       if (!asset || asset.episodeId !== episode.id || asset.sceneId !== scene.id || !allowed.includes(asset.kind)) { add('scene_asset_invalid', `${scene.id}: ${field} needs a linked AI-generated ${allowed.join('/')} asset.`); continue; }
+      if (asset.qualityReview?.decision === 'rejected') { add('asset_rejected', `Asset ${asset.id} was rejected by quality review; replace it explicitly before approval or derivation.`); continue; }
       try { licenseEvidence(asset); await validateArtifactFile(directory, asset, sourceAssetMaximumBytes); } catch (error) { add('asset_invalid', error.message); }
     }
   }

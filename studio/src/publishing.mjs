@@ -253,6 +253,10 @@ export class Publisher {
         const assets = [[mapping?.visualAssetId, ['image', 'video']], ...(!silent ? [[mapping?.audioAssetId, ['audio']]] : [])];
         for (const [assetId, allowedKinds] of assets) {
           const asset = state.assets.find((item) => item.id === assetId);
+          if (asset?.qualityReview?.decision === 'rejected') {
+            reasons.push('A render source asset was rejected by quality review; replace it explicitly and review a new render before publication or export.');
+            continue;
+          }
           const license = asset?.provenance?.commercialLicense;
           let validLicense = false;
           try { validLicense = ['https:', 'http:'].includes(new URL(license?.url).protocol); } catch { /* Invalid evidence URL. */ }
