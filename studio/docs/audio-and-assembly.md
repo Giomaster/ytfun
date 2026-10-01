@@ -27,6 +27,12 @@ A seleção parcial permite revisar material conhecido sem encerrar nem reenviar
 uma geração pendente de outra cena. O master continua exigindo as 96 fontes,
 manifesto exato, reconciliação e revisão completas.
 
+`AI Meow Audio Input Diagnosis` é uma verificação remota somente de leitura,
+lançada por `review-diagnostic.json` com a identidade exata do review preparado.
+`audioOnly:true` para antes de qualquer GET ao provider, FFmpeg ou upload.
+Falhas mostram somente rótulos de etapas e códigos internos conhecidos; nunca
+mensagens arbitrárias, caminhos, tokens ou respostas de transporte.
+
 ## Áudio
 
 `studio/scripts/assembly-packets.mjs` exporta `packAssemblyPacket`, `packetHash`

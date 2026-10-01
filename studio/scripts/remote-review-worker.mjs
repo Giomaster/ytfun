@@ -7,8 +7,9 @@ import { mediaCommand, ownedAudioArtifact, shortCommand, verifiedProbe } from '.
 import { unpackReviewPacket } from './review-packets.mjs';
 
 /** Production review copies only. GET-only; never approves, publishes or changes Studio. */
-export async function runReviewWorker({ env = process.env, artifact = new DefaultArtifactClient(), fetchImpl = fetch,
+export async function runReviewWorker({ env = process.env, artifact = new DefaultArtifactClient(), fetchImpl = fetch, audioOnly = false,
   recover = recoverFalVideo, runner = mediaCommand, retrieveAudio = ownedAudioArtifact } = {}) {
+  let stage = 'packet';
   try {
     const context = remoteContext(env);
     if (!env.HF_TOKEN || !env.GITHUB_TOKEN) throw new Error('Original source connections required');
@@ -22,12 +23,15 @@ export async function runReviewWorker({ env = process.env, artifact = new Defaul
     await mkdir(audioDirectory, { recursive: true });
     await mkdir(sourcesDirectory, { recursive: true });
     // An audio verification projection, never an exported master/render manifest.
+    stage = 'audio-verification';
     await retrieveAudio({ episodeId: packet.episodeId, audioArtifact: packet.audioArtifact,
       manifest: { scenes: packet.audioBindings } }, { env, artifact, fetchImpl, directory: audioDirectory });
+    if (audioOnly) return { batchId: packet.id, status: 'audio-inputs-verified', ...context, reviewOnly: true, rendered: false };
     const receipt = { schemaVersion: 1, type: 'audiovisual-review', batchId: packet.id, episodeId: packet.episodeId,
       packetSha256: packetHash(packet), ...context, reviewOnly: true, approved: false, published: false, samples: [] };
     const files = [];
     for (const source of packet.sources) {
+      stage = 'original-get';
       const recovered = await recover(source.remoteRequest, { hfToken: env.HF_TOKEN, fetchImpl });
       if (recovered.remoteStatus !== 'COMPLETED' || recovered.requestId !== source.remoteRequest.requestId || !(recovered.blob instanceof Blob) || recovered.blob.size > SOURCE_MAX_BYTES) throw new Error('Original source is not ready');
       const bytes = Buffer.from(await recovered.blob.arrayBuffer());
@@ -36,17 +40,20 @@ export async function runReviewWorker({ env = process.env, artifact = new Defaul
       const video = join(sourcesDirectory, `${stem}.mp4`);
       const audio = join(audioDirectory, audioReceiptPath(source.index));
       await writeFile(video, bytes, { flag: 'wx', mode: 0o600 });
+      stage = 'original-probe';
       const originalProbe = JSON.parse((await runner('ffprobe', ['-v', 'error', '-show_format', '-show_streams', '-of', 'json', video], { timeoutMs: 30000 })).stdout);
       const visual = originalProbe.streams?.find(stream => stream.codec_type === 'video');
       const seconds = Number(visual?.duration ?? originalProbe.format?.duration);
       if (!visual || !Number.isFinite(seconds) || seconds < 7.5) throw new Error('Original source is too short');
       const output = join(outputDirectory, `${stem}.mp4`);
+      stage = 'encoding';
       await runner('ffmpeg', shortCommand(video, audio, output));
       const probe = JSON.parse((await runner('ffprobe', ['-v', 'error', '-show_format', '-show_streams', '-of', 'json', output], { timeoutMs: 30000 })).stdout);
       const profile = verifiedProbe(probe, 7.5);
       const rendered = await readFile(output);
       if (rendered.length < 12 || rendered.length > SOURCE_MAX_BYTES || rendered.toString('ascii', 4, 8) !== 'ftyp') throw new Error('Review output is invalid');
       const audition = join(outputDirectory, `${stem}.mp3`);
+      stage = 'audition';
       await runner('ffmpeg', ['-nostdin', '-v', 'error', '-i', audio, '-map', '0:a:0', '-map_metadata', '-1', '-t', '7.5', '-c:a', 'libmp3lame', '-b:a', '128k', '-ar', '48000', '-ac', '2', '-n', audition]);
       const auditionBytes = await readFile(audition);
       if (!auditionBytes.length || auditionBytes.length > 1024 * 1024) throw new Error('Audition output exceeds cap');
@@ -59,8 +66,22 @@ export async function runReviewWorker({ env = process.env, artifact = new Defaul
     const receiptFile = join(outputDirectory, 'review-manifest.json');
     await writeFile(receiptFile, JSON.stringify(receipt), { flag: 'wx', mode: 0o600 });
     files.push(receiptFile);
+    stage = 'artifact-upload';
     const uploaded = await artifact.uploadArtifact(`ai-meow-review-${packet.id}`, files, outputDirectory, { retentionDays: 7, compressionLevel: 0 });
     if (!Number.isSafeInteger(uploaded.id) || uploaded.id < 1) throw new Error('Review artifact receipt missing');
     return { batchId: packet.id, artifactId: uploaded.id, samples: packet.sources.length, reviewOnly: true, manifestSha256: packetHash(receipt), ...context };
-  } catch { throw new Error('Remote audiovisual review failed. No inference, approval, publication or canonical mutation occurred'); }
+  } catch (error) {
+    // Only exact, internally authored messages/codes become fixed public labels.
+    // Never echo exception messages, transport bodies, filenames or credentials.
+    const reasons = new Map([
+      ['Audio archive failed destination/digest verification', 'audio-archive'],
+      ['Original audio receipt differs from the authorized artifact', 'audio-receipt'],
+      ['Original audio does not match its imported scene/hash', 'audio-binding'],
+      ['Original audio WAV/hash does not match the manifest', 'audio-wave'],
+      ['Media must be a bounded regular file', 'audio-file-cap'],
+    ]);
+    const code = ['ENOENT', 'ELOOP', 'EACCES'].includes(error?.code) ? error.code : undefined;
+    const reason = reasons.get(error?.message) ?? code ?? stage;
+    throw new Error(`Remote audiovisual review failed [${reason}]. No inference, approval, publication or canonical mutation occurred`);
+  }
 }

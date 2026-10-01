@@ -58,6 +58,15 @@ test('audio ownership verification precedes all provider GETs and media encoding
     recover: async () => { later++; }, runner: async () => { later++; } }), /No inference/);
   assert.equal(later, 0);
 });
+test('audio-only diagnosis performs no provider recovery/render and sanitizes errors', async t => {
+  const packet = fixture(); const env = await context(t, packet); let later = 0;
+  const options = { env, audioOnly: true, recover: async () => { later++; }, runner: async () => { later++; } };
+  const result = await runReviewWorker({ ...options, retrieveAudio: async () => {} });
+  assert.equal(result.rendered, false); assert.equal(result.status, 'audio-inputs-verified');
+  await assert.rejects(runReviewWorker({ ...options, retrieveAudio: async () => { throw new Error('Original audio receipt differs from the authorized artifact'); } }), /\[audio-receipt\]/);
+  await assert.rejects(runReviewWorker({ ...options, retrieveAudio: async () => { throw new Error('fixture-hf-token signed-url private-message'); } }), error => !/fixture-hf-token|signed-url|private-message/.test(error.message) && error.message.includes('[audio-verification]'));
+  assert.equal(later, 0);
+});
 test('changed original hash fails before encoding, without a replacement generation', async t => {
   const packet = fixture(); const env = await context(t, packet); let commands = 0;
   await assert.rejects(runReviewWorker({ env, retrieveAudio: async () => {},
