@@ -95,6 +95,14 @@ no laptop; a regra do proprietário manda executar testes no GitHub Actions.
 | Distribuição | `ytfun_distribution_capabilities`, `ytfun_publish_plan`, `ytfun_youtube_publish`, `ytfun_youtube_publication_sync`, `ytfun_facebook_publish`, `ytfun_facebook_publication_sync`, `ytfun_tiktok_export`, `ytfun_kwai_export` |
 | Fila de entrega | `ytfun_delivery_enqueue`, `ytfun_delivery_list`, `ytfun_delivery_run_due`, `ytfun_delivery_cancel`, `ytfun_delivery_reconcile` |
 | Resultados | `ytfun_metrics_record`, `ytfun_youtube_metrics_sync` |
+| Dados YouTube | `ytfun_youtube_data_maintenance`, `ytfun_youtube_disconnect` (preview por padrão) |
+
+O MCP expurga snapshots de API do YouTube com 30 dias antes de responder e mantém
+um janitor independente do worker de entregas. Para a desconexão explícita,
+configure `YTFUN_PRIVATE_ENV_FILE` como o mesmo arquivo privado 0600 usado pelo
+host. Ela revoga todos os escopos Google do projeto, remove dados/tokens do
+YouTube e conserva bloqueios locais contra reenvio; não apaga vídeos na rede.
+[Retenção, falhas parciais e limites de backups/runtime](docs/youtube-data.md).
 
 Operações demoradas podem retornar um job persistido imediatamente. Há um job
 ativo por store. O processo MCP precisa continuar vivo; reiniciar não refaz

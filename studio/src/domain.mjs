@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { realpath, stat } from 'node:fs/promises';
 import { isAbsolute, resolve, sep } from 'node:path';
+import { assertYouTubeConnected, isYouTubeTrend, youtubeApiData } from './youtube-data-policy.mjs';
 
 const maximumTrendAgeMs = 7 * 24 * 60 * 60 * 1000;
 const futureToleranceMs = 5 * 60 * 1000;
@@ -201,7 +202,7 @@ async function episodeFindings(state, episode, directory) {
 }
 
 export class Studio {
-  constructor(store) { this.store = store; }
+  constructor(store, { env = process.env } = {}) { this.store = store; this.youtubeGrantId = env.YTFUN_YOUTUBE_GRANT_ID || 'legacy'; }
 
   async createProject(input) {
     rejectClientId(input);
@@ -231,7 +232,12 @@ export class Studio {
   async addTrend(input) {
     rejectClientId(input);
     const trend = { id: randomUUID(), topic: text(input.topic, 'topic', 500), sourceUrl: httpUrl(input.sourceUrl, 'sourceUrl'), observedAt: observedTime(input.observedAt), evidence: text(input.evidence, 'evidence'), ...(input.projectId === undefined ? {} : { projectId: text(input.projectId, 'projectId', 100) }) };
-    return this.store.transaction((state) => { if (trend.projectId) requireProject(state, trend.projectId); state.trends.push(trend); return trend; });
+    if (isYouTubeTrend(trend)) trend.apiData = youtubeApiData({ grantId: this.youtubeGrantId, now: Date.parse(trend.observedAt) });
+    return this.store.transaction((state) => {
+      if (trend.apiData) assertYouTubeConnected(state, { YTFUN_YOUTUBE_GRANT_ID: this.youtubeGrantId });
+      if (trend.projectId) requireProject(state, trend.projectId);
+      state.trends.push(trend); return trend;
+    });
   }
 
   async planEpisode(input) {
@@ -287,6 +293,7 @@ export class Studio {
     rejectClientId(input);
     if (!['youtube', 'facebook', 'tiktok', 'kwai'].includes(input.platform)) throw new Error('platform must be youtube, facebook, tiktok, or kwai');
     const metric = { id: randomUUID(), platform: input.platform, observedAt: observedTime(input.observedAt), sourceUrl: httpUrl(input.sourceUrl, 'sourceUrl') };
+    if (metric.platform === 'youtube') metric.apiData = youtubeApiData({ authorized: true, grantId: this.youtubeGrantId, now: Date.parse(metric.observedAt) });
     for (const [key, maximum] of [['views', Infinity], ['retentionRatio', Infinity], ['completionRate', 1], ['revenueUsd', Infinity]]) {
       if (input[key] !== undefined) metric[key] = number(input[key], key, 0, maximum);
     }
@@ -299,6 +306,7 @@ export class Studio {
       if (metric.periodStart > metric.periodEnd) throw new Error('periodStart must not be after periodEnd');
     }
     return this.store.transaction((state) => {
+      if (metric.platform === 'youtube') assertYouTubeConnected(state, { YTFUN_YOUTUBE_GRANT_ID: this.youtubeGrantId });
       const episode = requireEpisode(state, input.episodeId);
       if (episode.metrics.some((entry) => entry.platform === metric.platform && entry.observedAt === metric.observedAt && entry.sourceUrl === metric.sourceUrl && entry.periodStart === metric.periodStart && entry.periodEnd === metric.periodEnd)) throw new Error('Metric observation already recorded');
       episode.metrics.push(metric);

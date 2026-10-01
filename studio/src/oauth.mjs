@@ -77,10 +77,13 @@ export class YouTubeAuth {
   #inFlight = null;
   #terminalError = null;
   #lastFailure = null;
+  #invalidated = false;
+  #onInvalidGrant;
 
-  constructor({ env = process.env, fetchImpl = fetch, now = Date.now } = {}) {
+  constructor({ env = process.env, fetchImpl = fetch, now = Date.now, onInvalidGrant, requireGrantId = false } = {}) {
     this.#fetch = fetchImpl;
     this.#now = now;
+    this.#onInvalidGrant = onInvalidGrant;
     this.#mode = ['YOUTUBE_REFRESH_TOKEN', 'YOUTUBE_CLIENT_ID', 'YOUTUBE_CLIENT_SECRET'].some(name => configured(env[name]))
       ? 'refresh_token' : configured(env.YOUTUBE_ACCESS_TOKEN) ? 'access_token' : 'unconfigured';
     this.#credentials = {
@@ -99,6 +102,9 @@ export class YouTubeAuth {
       this.#staticExpiresAt = expirySetting(env.YOUTUBE_ACCESS_TOKEN_EXPIRES_AT, 'YOUTUBE_ACCESS_TOKEN_EXPIRES_AT', this.#configurationIssues);
     } else {
       this.#configurationIssues.push('Configure YOUTUBE_ACCESS_TOKEN or YOUTUBE_REFRESH_TOKEN with YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET.');
+    }
+    if (requireGrantId && this.#mode !== 'unconfigured' && (env.YTFUN_YOUTUBE_GRANT_ID === 'legacy' || !/^[A-Za-z0-9_-]{1,100}$/.test(env.YTFUN_YOUTUBE_GRANT_ID ?? ''))) {
+      this.#configurationIssues.push('YTFUN_YOUTUBE_GRANT_ID is required for the personal MCP. Use a unique local generation for this consent; stop old processes before migrating an existing grant.');
     }
     if (typeof fetchImpl !== 'function' || typeof now !== 'function') {
       this.#configurationIssues.push('YouTube authentication requires a fetch function and a clock function.');
@@ -141,7 +147,14 @@ export class YouTubeAuth {
     return this.readiness();
   }
 
-  async getAccessToken({ requiredScopes = [] } = {}) {
+  invalidate({ code = 'YOUTUBE_DISCONNECTED', message = 'YouTube access is disconnected; obtain fresh consent and restart the MCP.' } = {}) {
+    this.#invalidated = true;
+    this.#cache = null;
+    this.#credentials = {};
+    this.#terminalError = { code, message };
+  }
+
+  async getAccessToken({ requiredScopes = [], forceRefresh = false } = {}) {
     const scopes = requiredScopeList(requiredScopes);
     const readiness = this.readiness();
     if (!readiness.ready) {
@@ -149,7 +162,7 @@ export class YouTubeAuth {
     }
     if (this.#mode === 'access_token') return this.#credentials.accessToken;
     const now = this.#time();
-    if (this.#cache && now >= this.#cache.obtainedAt && now + EXPIRY_SKEW_MS < this.#cache.expiresAt) {
+    if (!forceRefresh && this.#cache && now >= this.#cache.obtainedAt && now + EXPIRY_SKEW_MS < this.#cache.expiresAt) {
       const issues = scopeIssues(this.#cache.scopes, scopes);
       if (issues.length) throw authError('YOUTUBE_OAUTH_SCOPE_MISSING', issues.join(' '));
       return this.#cache.token;
@@ -159,6 +172,7 @@ export class YouTubeAuth {
     let cache;
     try { cache = await pending; }
     finally { if (this.#inFlight === pending) this.#inFlight = null; }
+    if (this.#invalidated) throw authError('YOUTUBE_DISCONNECTED', 'YouTube access was disconnected during OAuth refresh.');
     const issues = scopeIssues(cache.scopes, scopes);
     if (issues.length) throw authError('YOUTUBE_OAUTH_SCOPE_MISSING', issues.join(' '));
     return cache.token;
@@ -216,6 +230,7 @@ export class YouTubeAuth {
         const expires = startedAt + Math.min(body.refresh_token_expires_in * 1000, Number.MAX_SAFE_INTEGER - startedAt);
         this.#refreshExpiresAt = Math.min(this.#refreshExpiresAt ?? expires, expires);
       }
+      if (this.#invalidated) throw authError('YOUTUBE_DISCONNECTED', 'YouTube access was disconnected during OAuth refresh.');
       this.#cache = { token: body.access_token, obtainedAt: startedAt, expiresAt, scopes };
       this.#lastFailure = null;
       return this.#cache;
@@ -224,6 +239,10 @@ export class YouTubeAuth {
         ? failure : authError('YOUTUBE_OAUTH_UNAVAILABLE', 'Google OAuth refresh failed; credentials and provider diagnostics are not logged.');
       if (['YOUTUBE_OAUTH_REAUTH_REQUIRED', 'YOUTUBE_OAUTH_CLIENT_REJECTED', 'YOUTUBE_OAUTH_SCOPE_REJECTED'].includes(error.code)) {
         this.#terminalError = { code: error.code, message: error.message };
+      }
+      if (error.code === 'YOUTUBE_OAUTH_REAUTH_REQUIRED') {
+        try { await this.#onInvalidGrant?.(); } catch { /* The lifecycle remains blocked and reports cleanup failure separately. */ }
+        this.invalidate({ code: error.code, message: error.message });
       }
       let failedAt = startedAt;
       try { failedAt = this.#time(); } catch { /* Keep the safe diagnostic from the refresh failure. */ }

@@ -7,6 +7,7 @@ import { episodeAssetHash, episodeReviewHash } from './domain.mjs';
 import { YouTubeAuth, YOUTUBE_UPLOAD_SCOPE, YOUTUBE_READONLY_SCOPE } from './oauth.mjs';
 import { FacebookReels, validateFacebookReel } from './facebook.mjs';
 import { distributionCapabilities, publicationPackage } from './distribution.mjs';
+import { assertYouTubeConnected, youtubeApiData, youtubeBlocked } from './youtube-data-policy.mjs';
 
 const DAY_MS = 86_400_000;
 const DEFAULT_MAX_BYTES = 250 * 1024 * 1024;
@@ -20,6 +21,10 @@ function nonempty(value) {
 function verifyDeliveryClaim(state, deliveryId, plan, { privacy, madeForKids } = {}) {
   if (deliveryId === undefined) return;
   const delivery = state.deliveries?.find(item => item.id === deliveryId && item.status === 'running');
+  if (plan.platform === 'youtube') {
+    assertYouTubeConnected(state, { YTFUN_YOUTUBE_GRANT_ID: plan.youtubeGrantId ?? 'legacy' });
+    if ((delivery?.apiData?.grantId ?? 'legacy') !== (plan.youtubeGrantId ?? 'legacy')) throw new Error('Delivery claim belongs to another YouTube consent generation.');
+  }
   if (!delivery || delivery.episodeId !== plan.episodeId || delivery.platform !== plan.platform ||
       delivery.accountId !== plan.accountId || delivery.reviewHash !== plan.reviewHash ||
       delivery.renderSha256 !== plan.render.sha256 || delivery.privacy !== privacy ||
@@ -145,6 +150,7 @@ export class Publisher {
   constructor(store, { env = process.env, fetchImpl = fetch, youtubeAuth, facebook } = {}) {
     this.store = store;
     this.env = env;
+    this.youtubeGrantId = env.YTFUN_YOUTUBE_GRANT_ID || 'legacy';
     this.fetch = fetchImpl;
     this.youtubeAuth = youtubeAuth ?? new YouTubeAuth({ env, fetchImpl });
     this.facebook = facebook ?? new FacebookReels({ env, fetchImpl });
@@ -162,6 +168,7 @@ export class Publisher {
     const project = state.projects.find((item) => item.id === episode.projectId);
     if (!project) throw new Error('Episode project not found.');
     const reasons = [];
+    if (platform === 'youtube' && youtubeBlocked(state, { YTFUN_YOUTUBE_GRANT_ID: this.youtubeGrantId })) reasons.push('YouTube is disconnected; obtain fresh consent and restart the MCP.');
     if (project.status !== 'active') reasons.push('The episode project must be active before publishing or exporting.');
     if (project.mode === 'factual' && (!Array.isArray(episode.factualSources) || episode.factualSources.length === 0)) {
       reasons.push('Factual content requires claim-specific sources before publishing.');
@@ -241,6 +248,7 @@ export class Publisher {
     if (platform === 'tiktok' && caption.length > 2200) reasons.push('TikTok caption exceeds 2200 UTF-16 code units.');
     return {
       episodeId: episode.id, projectId: project.id, platform, accountId, reviewHash, privacy,
+      ...(platform === 'youtube' ? { youtubeGrantId: this.youtubeGrantId } : {}),
       uploadPrivacy: publishAt === undefined ? privacy : 'private', effectiveAt,
       ...(publishAt !== undefined ? { publishAt: effectiveAt } : {}),
       ready: reasons.length === 0 && ['youtube', 'facebook'].includes(platform), readyToExport: reasons.length === 0 && ['tiktok', 'kwai'].includes(platform),
@@ -263,6 +271,10 @@ export class Publisher {
         return await this.store.transaction((state) => {
           const record = state.publications.find((item) => item.id === id);
           if (!record) throw new Error('Publication reservation not found.');
+          // A late provider response must not recreate deleted API/user data.
+          if (record.platform === 'youtube' && record.localOnly) return record;
+          if (record.platform === 'youtube' && youtubeBlocked(state, { YTFUN_YOUTUBE_GRANT_ID: this.youtubeGrantId })) return record;
+          if (record.platform === 'youtube' && (record.apiData?.grantId ?? 'legacy') !== this.youtubeGrantId) throw new Error('The publication belongs to another YouTube grant; a stale worker cannot replace its receipt.');
           Object.assign(record, changes, { updatedAt: new Date().toISOString() });
           const episode = state.episodes.find((item) => item.id === record.episodeId);
           if (episode && ['youtube', 'facebook'].includes(record.platform)) {
@@ -312,6 +324,7 @@ export class Publisher {
         id: randomUUID(), episodeId, projectId: plan.projectId, platform: 'youtube', accountId: plan.accountId,
         reviewHash: plan.reviewHash, renderSha256: plan.render.sha256, status: 'uploading',
         effectiveAt: plan.effectiveAt, createdAt: new Date().toISOString(), privacy, madeForKids,
+        apiData: youtubeApiData({ authorized: true, grantId: this.youtubeGrantId }),
         ...(publishAt !== undefined ? { publishAt: plan.effectiveAt } : {}),
         ...(deliveryId ? { deliveryId } : {}),
       };
@@ -354,6 +367,7 @@ export class Publisher {
       else if (publishAt !== undefined && returnedStatus.privacyStatus === 'private' &&
                Date.parse(returnedStatus.publishAt) === Date.parse(plan.publishAt) && Date.parse(plan.publishAt) > Date.now()) status = 'scheduled';
       return { publication: await this.updatePublication(publication.id, {
+        apiData: youtubeApiData({ authorized: true, grantId: this.youtubeGrantId }),
         status, videoId: resource.id, providerPrivacyStatus: returnedStatus.privacyStatus ?? null,
         providerUploadStatus: returnedStatus.uploadStatus ?? null,
         ...(status === 'published' ? { publishedAt: new Date().toISOString(), url: `https://www.youtube.com/watch?v=${encodeURIComponent(resource.id)}` } : {}),
@@ -369,6 +383,7 @@ export class Publisher {
   async syncPublication({ publicationId }) {
     const state = await this.store.read();
     const publication = state.publications.find(item => item.id === publicationId && item.platform === 'youtube');
+    if (publication && (publication.apiData?.grantId ?? 'legacy') !== this.youtubeGrantId) throw new Error('Use the original YouTube grant to verify this receipt; another generation cannot replace its data.');
     if (!publication?.videoId) throw new Error('A confirmed YouTube video ID is required; unknown uploads without receipts require operator reconciliation.');
     if (!this.youtubeAuth.readiness().ready || publication.accountId !== this.env.YOUTUBE_CHANNEL_ID) throw new Error('Use the original channel and valid OAuth token to verify this publication.');
     const accessToken = await this.youtubeAuth.getAccessToken({ requiredScopes: [YOUTUBE_READONLY_SCOPE] });
@@ -385,6 +400,7 @@ export class Publisher {
     else if (status.uploadStatus === 'processed' && status.privacyStatus === 'public') confirmed = 'published';
     else if (status.privacyStatus === 'private' && Date.parse(status.publishAt) > Date.now()) confirmed = 'scheduled';
     return this.updatePublication(publication.id, {
+      apiData: youtubeApiData({ authorized: true, grantId: this.youtubeGrantId }),
       status: confirmed, providerPrivacyStatus: status.privacyStatus ?? null, providerUploadStatus: status.uploadStatus ?? null, verifiedAt: new Date().toISOString(),
       ...(confirmed === 'published' ? { publishedAt: publication.publishedAt ?? new Date().toISOString(), url: `https://www.youtube.com/watch?v=${encodeURIComponent(publication.videoId)}` } : {}),
       ...(confirmed === 'scheduled' ? { scheduledAt: status.publishAt } : {}),

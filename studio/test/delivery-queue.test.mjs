@@ -6,6 +6,7 @@ import path from 'node:path';
 import { DeliveryQueue } from '../src/delivery-queue.mjs';
 import { StudioStore } from '../src/store.mjs';
 import { episodeReviewHash } from '../src/domain.mjs';
+import { purgeYouTubeData, setYouTubeConnection } from '../src/youtube-data-policy.mjs';
 
 const NOW = Date.parse('2026-09-30T12:00:00.000Z');
 const RENDER = 'b'.repeat(64);
@@ -29,6 +30,46 @@ async function fixture(t, { outcome = 'uploaded', throws = false } = {}) {
 }
 
 function args(extra = {}) { return { episodeId: 'episode', platform: 'youtube', privacy: 'private', madeForKids: false, expectedReviewHash: HASH, dueAt: new Date(NOW).toISOString(), ...extra }; }
+
+test('a preflight released after disconnect cannot recreate a queued receipt or account binding', async t => {
+  const f = await fixture(t);
+  const original = f.queue.publisher.preflight;
+  f.queue.publisher.youtubeGrantId = 'grant-A';
+  let entered, release;
+  const began = new Promise(resolve => { entered = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  f.queue.publisher.preflight = async input => {
+    const plan = await original(input);
+    entered(); await gate;
+    return { ...plan, youtubeGrantId: 'grant-A' };
+  };
+  const pending = f.queue.enqueue(args());
+  const rejected = assert.rejects(pending, /disconnected/);
+  await began;
+  await f.store.transaction(state => {
+    setYouTubeConnection(state, { grantId: 'grant-A', blocked: true, reason: 'user_disconnect' });
+    purgeYouTubeData(state, { now: NOW, all: true, grantId: 'grant-A' });
+  });
+  release();
+  await rejected;
+  assert.equal((await f.store.read()).deliveries?.length ?? 0, 0);
+  assert.equal(f.calls(), 0);
+});
+
+test('new grant B cannot claim or publish a queued delivery authorized by grant A on the same channel', async t => {
+  const f = await fixture(t);
+  const original = f.queue.publisher.preflight;
+  f.queue.publisher.youtubeGrantId = 'grant-A';
+  f.queue.publisher.preflight = async input => ({ ...await original(input), youtubeGrantId: f.queue.publisher.youtubeGrantId });
+  const queued = await f.queue.enqueue(args());
+  f.queue.publisher.youtubeGrantId = 'grant-B';
+  const result = await f.queue.runDue({ execute: true });
+  assert.equal(result.blocked, true);
+  assert.equal(result.delivery.status, 'attention');
+  assert.equal(result.delivery.id, queued.delivery.id);
+  assert.equal(result.delivery.apiData.grantId, 'grant-A');
+  assert.equal(f.calls(), 0);
+});
 
 test('queued delivery survives worker recreation; preview never uploads and completed task does not replay', async t => {
   const f = await fixture(t);

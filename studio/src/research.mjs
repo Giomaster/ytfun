@@ -1,11 +1,12 @@
 import { YouTubeAuth, YOUTUBE_ANALYTICS_SCOPE } from './oauth.mjs';
 // Research supplies signals, never source media or a promise of future views.
 export class Research {
-  constructor(studio, { env = process.env, fetchImpl = fetch, youtubeAuth } = {}) {
+  constructor(studio, { env = process.env, fetchImpl = fetch, youtubeAuth, youtubeLifecycle } = {}) {
     this.studio = studio;
     this.env = env;
     this.fetch = fetchImpl;
     this.youtubeAuth = youtubeAuth ?? new YouTubeAuth({ env, fetchImpl });
+    this.youtubeLifecycle = youtubeLifecycle;
   }
 
   async discover({ source, projectId, region = 'BR', limit = 10 }) {
@@ -13,6 +14,7 @@ export class Research {
     if (projectId) await this.project(projectId);
     let signals;
     if (source === 'youtube') {
+      await this.youtubeLifecycle?.assertConnected();
       if (!/^[A-Z]{2}$/.test(region)) throw new Error('region must be an ISO alpha-2 code');
       if (!this.env.YOUTUBE_API_KEY) throw new Error('Set YOUTUBE_API_KEY for official YouTube metadata');
       const url = new URL('https://www.googleapis.com/youtube/v3/videos');
@@ -25,8 +27,10 @@ export class Research {
       }));
     } else throw new Error('source must be youtube; external authorized connectors can supply other audience evidence');
     const observedAt = new Date().toISOString();
+    await this.youtubeLifecycle?.assertConnected();
     const records = [];
     for (const signal of signals) records.push(await this.studio.addTrend({ ...signal, projectId, observedAt }));
+    await this.youtubeLifecycle?.assertConnected();
     return { source, observedAt, signals: records, limitation: 'Metadata only. Use external authorized research connectors for broader signals. No ranking guarantees.' };
   }
 
@@ -45,6 +49,7 @@ export class Research {
   }
 
   async syncYouTubeMetrics({ episodeId, startDate, endDate }) {
+    await this.youtubeLifecycle?.assertConnected();
     for (const date of [startDate, endDate]) {
       if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || new Date(date).toISOString().slice(0, 10) !== date) throw new Error('Use valid YYYY-MM-DD dates');
     }
@@ -60,7 +65,9 @@ export class Research {
     if (!body.rows?.length) return { episodeId, recorded: false, reason: 'No data returned for this period; absent data is not zero.' };
     const values = Object.fromEntries((body.columnHeaders ?? []).map((column, index) => [column.name, body.rows[0][index]]));
     if (!Number.isFinite(values.views) || values.views < 0 || !Number.isFinite(values.averageViewPercentage)) throw new Error('Analytics returned invalid metrics');
+    await this.youtubeLifecycle?.assertConnected();
     const metric = await this.studio.recordMetrics({ episodeId, platform: 'youtube', observedAt: new Date().toISOString(), sourceUrl: `https://studio.youtube.com/video/${publication.videoId}/analytics`, views: values.views, retentionRatio: values.averageViewPercentage / 100, periodStart: startDate, periodEnd: endDate });
+    await this.youtubeLifecycle?.assertConnected();
     return { recorded: true, metric, period: { startDate, endDate }, observations: values, limitation: 'Average view percentage may exceed 100% on loops. Views and retention are period aggregates, not a causal experiment.' };
   }
 

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { episodeReviewHash } from './domain.mjs';
 import { setTimeout as delay } from 'node:timers/promises';
+import { assertYouTubeConnected, youtubeApiData } from './youtube-data-policy.mjs';
 
 const PLATFORMS = ['youtube', 'facebook', 'tiktok', 'kwai'];
 const ACTIVE = new Set(['queued', 'running', 'attention']);
@@ -32,6 +33,7 @@ export class DeliveryQueue {
     if (plan.reviewHash !== expectedReviewHash) throw new Error('Episode changed since review.');
     if (!plan.ready && !plan.readyToExport) throw new Error(plan.reasons.join(' '));
     return this.store.transaction(state => {
+      if (platform === 'youtube') assertYouTubeConnected(state, { YTFUN_YOUTUBE_GRANT_ID: plan.youtubeGrantId ?? 'legacy' });
       state.deliveries ??= [];
       const existing = state.deliveries.find(item => item.episodeId === episodeId && item.platform === platform &&
         (ACTIVE.has(item.status) || (item.reviewHash === expectedReviewHash && item.status === 'completed')));
@@ -41,6 +43,7 @@ export class DeliveryQueue {
       const delivery = { id: randomUUID(), episodeId, platform, accountId: plan.accountId, reviewHash: expectedReviewHash,
         renderSha256: plan.render.sha256, privacy, ...(platform === 'youtube' ? { madeForKids } : {}), dueAt,
         mode: ['youtube', 'facebook'].includes(platform) ? 'official_api' : 'creator_export',
+        ...(platform === 'youtube' ? { apiData: youtubeApiData({ authorized: true, grantId: plan.youtubeGrantId ?? 'legacy', now: this.now() }) } : {}),
         status: 'queued', createdAt: new Date(this.now()).toISOString() };
       state.deliveries.push(delivery);
       return { delivery, warning: 'Cadence and authorization are checked again when due. Queued time is not a provider-confirmed schedule.' };
@@ -69,6 +72,7 @@ export class DeliveryQueue {
         return { delivery, reason: 'Stopped claim had no publication reservation. Closed without retrying any operation.' };
       }
       const publication = matches[0];
+      if (delivery.platform === 'youtube' && (delivery.apiData?.grantId ?? delivery.grantId ?? 'legacy') !== (publication?.apiData?.grantId ?? publication?.grantId ?? 'legacy')) throw new Error('Reconcile only a receipt from the same YouTube grant generation.');
       if (matches.length !== 1 || !publication || publication.episodeId !== delivery.episodeId || publication.platform !== delivery.platform || publication.accountId !== delivery.accountId || publication.reviewHash !== delivery.reviewHash || publication.renderSha256 !== delivery.renderSha256 || !['uploaded', 'processing', 'scheduled', 'published', 'exported', 'failed'].includes(publication.status)) throw new Error('Reconcile the exact provider publication first; this operation never guesses an unknown outcome or resets a task for retry.');
       Object.assign(delivery, { status: 'completed', publicationId: publication.id, outcome: publication.status, reconciledBy: confirmedBy.trim(), reconciliationEvidence: evidence.trim(), updatedAt: new Date(this.now()).toISOString() });
       return { delivery };
@@ -88,14 +92,24 @@ export class DeliveryQueue {
       if (current.deliveries?.some(item => item.status === 'running')) return null;
       const item = current.deliveries?.find(entry => entry.id === candidate.id);
       if (item?.status !== 'queued' || Date.parse(item.dueAt) > this.now()) return null;
+      if (item.platform === 'youtube') {
+        const grantId = this.publisher.youtubeGrantId ?? 'legacy';
+        assertYouTubeConnected(current, { YTFUN_YOUTUBE_GRANT_ID: grantId });
+        if ((item.apiData?.grantId ?? 'legacy') !== grantId) {
+          Object.assign(item, { status: 'attention', phase: 'preflight', error: 'Delivery belongs to another YouTube consent generation; cancel and explicitly authorize a new delivery.', updatedAt: new Date(this.now()).toISOString() });
+          return { blocked: true, delivery: item };
+        }
+      }
       item.status = 'running'; item.startedAt = new Date(this.now()).toISOString();
       return item;
     });
     if (!claimed) return { contended: true };
+    if (claimed.blocked) return claimed;
     let result;
     let phase = 'preflight';
     try {
       const plan = await this.publisher.preflight({ episodeId: claimed.episodeId, platform: claimed.platform, privacy: claimed.privacy });
+      if (claimed.platform === 'youtube' && (claimed.apiData?.grantId ?? 'legacy') !== (plan.youtubeGrantId ?? 'legacy')) throw new Error('Delivery consent generation changed.');
       if (plan.accountId !== claimed.accountId || plan.reviewHash !== claimed.reviewHash || plan.render?.sha256 !== claimed.renderSha256) throw new Error('Delivery identity or reviewed content changed.');
       if (!plan.ready && !plan.readyToExport && !plan.publication) throw new Error('Delivery preflight no longer permits the operation.');
       const input = { episodeId: claimed.episodeId, expectedReviewHash: claimed.reviewHash, privacy: claimed.privacy, madeForKids: claimed.madeForKids, execute: true, deliveryId: claimed.id };

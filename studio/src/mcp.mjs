@@ -11,6 +11,7 @@ import { Publisher } from './publishing.mjs';
 import { Research } from './research.mjs';
 import { ProductionJobs } from './jobs.mjs';
 import { DeliveryQueue } from './delivery-queue.mjs';
+import { YouTubeDataLifecycle } from './youtube-data.mjs';
 
 const id = z.string().uuid();
 const text = z.string().trim().min(1).max(10_000);
@@ -23,19 +24,21 @@ const generationSchema = {
   episodeId: id, sceneId: id, kind, model: z.string().trim().min(1).max(200), provider: z.string().trim().min(1).max(100), prompt: text.optional(), estimatedCostUsd: z.number().finite().nonnegative(), pricingSourceUrl: url, commercialLicense: license, acknowledgePaidCost: z.boolean().default(false),
 };
 
-export function createServer({ directory = process.env.YTFUN_STUDIO_DIR, store, studio, production, publisher, research } = {}) {
+export function createServer({ directory = process.env.YTFUN_STUDIO_DIR, env = process.env, fetchImpl = fetch, store, studio, production, publisher, research, youtubeLifecycle } = {}) {
   if (!directory && !store) throw new Error('YTFUN_STUDIO_DIR is required; use a private persistent absolute path');
   store ??= new StudioStore(directory);
-  studio ??= new Studio(store);
+  youtubeLifecycle ??= new YouTubeDataLifecycle(store, { env, fetchImpl });
+  studio ??= new Studio(store, { env });
   production ??= new Production(store);
-  publisher ??= new Publisher(store);
-  research ??= new Research(studio);
+  publisher ??= new Publisher(store, { env, fetchImpl: youtubeLifecycle.fetch, youtubeAuth: youtubeLifecycle.auth });
+  research ??= new Research(studio, { env, fetchImpl: youtubeLifecycle.fetch, youtubeAuth: youtubeLifecycle.auth, youtubeLifecycle });
   const jobs = new ProductionJobs(store, production);
   const deliveries = new DeliveryQueue(store, publisher);
   const server = new McpServer({ name: 'ytfun-ai-studio', version: '0.1.0' });
   const register = (name, description, schema, handler, { readOnly = false, external = false } = {}) => {
     server.registerTool(name, { description, inputSchema: schema, annotations: { readOnlyHint: readOnly, destructiveHint: !readOnly, idempotentHint: readOnly, openWorldHint: external } }, async input => {
       try {
+        await youtubeLifecycle.maintain();
         const result = await handler(input);
         return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
       } catch (error) {
@@ -80,6 +83,8 @@ export function createServer({ directory = process.env.YTFUN_STUDIO_DIR, store, 
   register('ytfun_publish_plan', 'Read readiness, review hash, channel-wide cadence and release blockers without uploading. Choose privacy explicitly. Scheduling public release requires audit/release flags.', { episodeId: id, platform, privacy: z.enum(['private', 'unlisted', 'public']), publishAt: z.iso.datetime().optional() }, input => publisher.preflight(input), { readOnly: true });
   register('ytfun_youtube_publish', 'Upload the exact reviewed original synthetic video through official YouTube OAuth. execute=false previews; execute=true has an external effect. Unknown outcomes reserve the attempt and must be reconciled before another upload.', { episodeId: id, privacy: z.enum(['private', 'unlisted', 'public']), publishAt: z.iso.datetime().optional(), expectedReviewHash: z.string().regex(/^[a-f0-9]{64}$/), madeForKids: z.boolean(), execute: z.boolean().default(false) }, input => publisher.publishYouTube(input), { external: true });
   register('ytfun_youtube_publication_sync', 'Verify an owned uploaded video through YouTube before declaring it published. Public privacy plus processed upload are required. Does not retry uploads or guess a receipt for unknown attempts.', { publicationId: id }, input => publisher.syncPublication(input), { external: true });
+  register('ytfun_youtube_data_maintenance', 'Preview or execute removal of expired YouTube API snapshots. Preserves original media and local dedupe blocks; never resets an upload or deletes a YouTube video.', { execute: z.boolean().default(false) }, input => youtubeLifecycle.maintenance(input));
+  register('ytfun_youtube_disconnect', 'Preview personal-account disconnect and data deletion. execute=true requires the exact channel ID, revokes every Google OAuth scope for this project, removes stored YouTube data/tokens, cancels unstarted deliveries and preserves local upload blocks. Backups/AI host transcripts require separate deletion; existing YouTube videos remain.', { execute: z.boolean().default(false), expectedChannelId: z.string().min(1).max(100).optional() }, input => youtubeLifecycle.disconnect(input), { external: true });
   register('ytfun_tiktok_export', 'Export the reviewed vertical video, caption/hashtags, disclosure and subtitles for posting through a permitted TikTok workflow. Exported is not posted. No Direct Post bypass.', { episodeId: id, expectedReviewHash: z.string().regex(/^[a-f0-9]{64}$/) }, input => publisher.exportTikTok(input));
   register('ytfun_distribution_capabilities', 'Read implemented delivery modes, configuration gaps and official platform constraints. Does not reveal tokens or confirm live authorization.', {}, () => publisher.capabilities(), { readOnly: true });
   register('ytfun_facebook_publish', 'Publish a reviewed synthetic Page Reel through official Meta APIs. Explicit public privacy and execute=true are required. Processing is not confirmed publication.', { episodeId: id, expectedReviewHash: z.string().regex(/^[a-f0-9]{64}$/), privacy: z.literal('public'), execute: z.boolean().default(false) }, input => publisher.publishFacebook(input), { external: true });
@@ -94,13 +99,17 @@ export function createServer({ directory = process.env.YTFUN_STUDIO_DIR, store, 
   register('ytfun_youtube_metrics_sync', 'Fetch period-level YouTube Analytics with yt-analytics.readonly OAuth. Empty data stays unknown. Does not establish qualified monetization views.', { episodeId: id, startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) }, input => research.syncYouTubeMetrics(input), { external: true });
   register('ytfun_project_insights', 'Compare recorded episode performance and cost estimates to choose the next editorial experiment. No fabricated RPM, revenue prediction or causal conclusion.', { projectId: id }, ({ projectId }) => research.insights(projectId), { readOnly: true });
 
-  server.registerResource('studio-state', 'ytfun://studio/state', { mimeType: 'application/json', description: 'Private persisted original-series studio state, including evidence and receipts. No credentials.' }, async uri => ({ contents: [{ uri: uri.href, mimeType: 'application/json', text: JSON.stringify(await store.read(), null, 2) }] }));
+  server.registerResource('studio-state', 'ytfun://studio/state', { mimeType: 'application/json', description: 'Private persisted original-series studio state, including evidence and receipts. No credentials.' }, async uri => {
+    await youtubeLifecycle.maintain();
+    return { contents: [{ uri: uri.href, mimeType: 'application/json', text: JSON.stringify(await store.read(), null, 2) }] };
+  });
   server.registerPrompt('studio-director', { description: 'Plan an original AI series and continue its episodes from recorded evidence.', argsSchema: { direction: z.string().optional() } }, ({ direction }) => ({ messages: [{ role: 'user', content: { type: 'text', text: `Use ytfun_project_list and ytfun_overview first. Direction: ${direction ?? 'Explore original AI fiction, animation, humor or factual storytelling.'} Propose a series premise, audience, characters/style bible, distinct episode ideas and continuity. Research current signals with authorized connectors and preserve source/time. Reach concept consensus with the user before creating a project. Everything in the final video must be original synthetic media with commercial terms evidence; no borrowed clips, famous character replicas, celebrity voice imitation or invented facts. Start free-first; do not pretend inference is free or approve paid calls without acknowledgment. Do not predict top trends or income. Plan strong hook, comprehensible story, voiced scenes, deliberate pacing and distinct ending. Check previous episodes before each next script. Generate/import assets, render, inspect the actual output, record a truthful review, then preview publication and execute only within authorized scope. YouTube requires synthetic disclosure; private TikTok workflow exports a package for a permitted posting experience. Collect real performance and change one hypothesis at a time.` } }] }));
-  if (process.env.YTFUN_DELIVERY_WORKER_ENABLED === 'true') {
+  youtubeLifecycle.start();
+  if (env.YTFUN_DELIVERY_WORKER_ENABLED === 'true') {
     deliveries.start();
-    const close = server.close.bind(server);
-    server.close = async () => { deliveries.stop(); await close(); };
   }
+  const close = server.close.bind(server);
+  server.close = async () => { youtubeLifecycle.stop(); deliveries.stop(); await close(); };
   return server;
 }
 

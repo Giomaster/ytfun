@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { constants } from 'node:fs';
 import { open, realpath, rename, unlink } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -64,9 +64,9 @@ function environment(text) {
 }
 
 export async function persistGrant(envFile, expectedChannelId, client, tokens, { signal, now = Date.now } = {}) {
-  let lock, temporary;
-  const lockFile = `${path.resolve(envFile)}.oauth.lock`;
+  let lock, temporary, lockFile;
   try {
+    lockFile = `${path.join(await realpath(path.dirname(path.resolve(envFile))), path.basename(envFile))}.oauth.lock`;
     try { lock = await open(lockFile, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600); }
     catch { throw fail('OAUTH_ENV_BUSY', 'The environment file is being updated by another OAuth setup; no changes were written.'); }
     const before = await privateFile(envFile);
@@ -76,6 +76,7 @@ export async function persistGrant(envFile, expectedChannelId, client, tokens, {
     const values = {
       YOUTUBE_CLIENT_ID: client.client_id, YOUTUBE_CLIENT_SECRET: client.client_secret,
       YOUTUBE_REFRESH_TOKEN: tokens.refresh_token,
+      YTFUN_YOUTUBE_GRANT_ID: randomUUID(),
       YTFUN_YOUTUBE_PUBLIC_ENABLED: 'false', YTFUN_YOUTUBE_AUDIT_CONFIRMED: 'false',
     };
     for (const value of Object.values(values)) {

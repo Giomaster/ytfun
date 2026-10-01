@@ -19,7 +19,7 @@ test('stdio MCP negotiates, lists tools and persists a series across restarts', 
   const client = await connect();
   t.after(() => client.close());
   const tools = await client.listTools();
-  assert.equal(tools.tools.length, 32);
+  assert.equal(tools.tools.length, 34);
   assert.ok(tools.tools.some(tool => tool.name === 'ytfun_tiktok_export'));
   assert.ok(!tools.tools.some(tool => tool.name === 'ytfun_tiktok_publish'));
   assert.ok(tools.tools.some(tool => tool.name === 'ytfun_facebook_publish'));
