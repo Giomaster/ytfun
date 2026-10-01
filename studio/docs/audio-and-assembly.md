@@ -7,6 +7,26 @@ rodam somente quando esses arquivos mudam na branch `codex/ai-original-studio`.
 Não há workflow_dispatch, chamadas pagas, POST ao provider ou nova imagem.
 Os testes usam mocks somente no GitHub CI; não executar áudio/render no laptop.
 
+## Prévia para revisão audiovisual
+
+`review-packets.mjs` e `remote-review-worker.mjs` montam até 12 fontes distintas
+já observadas e aceitas com seus WAVs originais. O packet privado vincula o hash
+aceito de cada vídeo, seu recibo original, a posição/cena correspondente e os
+96 bindings de áudio. `ownedAudioArtifact` reaplica as verificações de propriedade,
+recibo e todos os WAVs; a projeção de áudio não é um manifesto de render do master.
+Os vídeos são recuperados somente por GET e precisam manter hash e duração.
+
+Secret `AI_MEOW_REVIEW_PACKET`; launch público `studio/batches/review-launch.json`
+contém somente schemaVersion1, type `review`, batchId, episodeId e packetSha256.
+O workflow `AI Meow Audiovisual Review` produz MP4s no perfil final e MP3s para
+audição, com `review-manifest.json`, no artifact `ai-meow-review-<batchId>`.
+Não gera imagens, inferência, aprovações, publicações ou registros canônicos.
+Recibos de revisão têm `reviewOnly:true`, `approved:false`, `published:false`;
+gerar/copiar um arquivo não atesta que alguém o ouviu ou revisou o sincronismo.
+A seleção parcial permite revisar material conhecido sem encerrar nem reenviar
+uma geração pendente de outra cena. O master continua exigindo as 96 fontes,
+manifesto exato, reconciliação e revisão completas.
+
 ## Áudio
 
 `studio/scripts/assembly-packets.mjs` exporta `packAssemblyPacket`, `packetHash`
