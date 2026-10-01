@@ -28,6 +28,14 @@ function validateState(state) {
       ids.add(entity.id);
     }
   }
+  if (state.deliveries !== undefined) {
+    if (!Array.isArray(state.deliveries)) throw new Error('Invalid studio state: deliveries must be an array');
+    const ids = new Set();
+    for (const item of state.deliveries) {
+      if (!item || typeof item.id !== 'string' || !item.id || ids.has(item.id) || !['queued', 'running', 'completed', 'attention', 'cancelled'].includes(item.status)) throw new Error('Invalid studio delivery record');
+      ids.add(item.id);
+    }
+  }
 }
 
 export class StudioStore {

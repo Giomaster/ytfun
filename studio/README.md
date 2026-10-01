@@ -37,8 +37,10 @@ série precisa ser combinado antes de entrar em produção.
    episódio, arquivo final e proveniência. As verificações estruturais não
    substituem assistir ao vídeo ou confirmar fontes.
 7. YouTube recebe upload oficial, declaração de conteúdo sintético, privacidade
-   escolhida explicitamente e agendamento opcional. TikTok recebe um pacote de
-   postagem com MP4, legenda, hashtags, disclosure e SRT para o fluxo permitido.
+   escolhida explicitamente e agendamento opcional. Facebook recebe Page Reels
+   pela API oficial, com declaração de IA e confirmação de processamento.
+   TikTok e Kwai recebem pacotes com MP4, legenda, hashtags, disclosure e SRT
+   para publicação pelo criador em um fluxo permitido.
 8. Métricas observadas e estimativas de custo orientam o próximo experimento.
    Métricas das plataformas ficam separadas; ausência de dado não vira zero.
 
@@ -90,19 +92,21 @@ no laptop; a regra do proprietário manda executar testes no GitHub Actions.
 | Assets e edição | `ytfun_asset_generate`, `ytfun_asset_import`, `ytfun_episode_render` |
 | Produção demorada | `ytfun_production_job_start`, `ytfun_production_job_get`, `ytfun_production_job_reconcile` |
 | Revisão | `ytfun_episode_review`, `ytfun_episode_approve` |
-| Distribuição | `ytfun_publish_plan`, `ytfun_youtube_publish`, `ytfun_youtube_publication_sync`, `ytfun_tiktok_export` |
+| Distribuição | `ytfun_distribution_capabilities`, `ytfun_publish_plan`, `ytfun_youtube_publish`, `ytfun_youtube_publication_sync`, `ytfun_facebook_publish`, `ytfun_facebook_publication_sync`, `ytfun_tiktok_export`, `ytfun_kwai_export` |
+| Fila de entrega | `ytfun_delivery_enqueue`, `ytfun_delivery_list`, `ytfun_delivery_run_due`, `ytfun_delivery_cancel`, `ytfun_delivery_reconcile` |
 | Resultados | `ytfun_metrics_record`, `ytfun_youtube_metrics_sync` |
 
 Operações demoradas podem retornar um job persistido imediatamente. Há um job
 ativo por store. O processo MCP precisa continuar vivo; reiniciar não refaz
 inferência automaticamente. A ferramenta de reconciliação fecha apenas o
 registro de worker depois de inspeção do operador, preservando estados de
-cobrança/publicação incertos. Jobs não formam um scheduler de postagem contínua.
+cobrança/publicação incertos. Os jobs de produção são separados da
+[fila de distribuição](docs/delivery-queue.md), que guarda entregas já revisadas.
 
 ## Contratos de operação
 
 O `state.json` versionado guarda projetos, episódios, tendências, assets,
-publicações, reservas de geração e jobs. Transações usam lock de diretório,
+publicações, reservas de geração, jobs e entregas. Transações usam lock de diretório,
 arquivo temporário com fsync e rename. Corrupção não é convertida em store vazio.
 Um lock abandonado exige verificar que nenhum processo o possui; não é apagado
 automaticamente. O store foi pensado para um filesystem privado local ao worker,
@@ -119,10 +123,15 @@ intervalo mínimo de 12 horas e até 3 uploads por janela de 24 horas. O publish
 aplica a regra mais restritiva dos projetos que compartilham o mesmo canal, conta
 reservas/futuros e não faz afirmações sobre uma frequência oficial antispam.
 
-YouTube precisa de `YOUTUBE_ACCESS_TOKEN` OAuth válido e `YOUTUBE_CHANNEL_ID`.
+YouTube precisa de OAuth válido e `YOUTUBE_CHANNEL_ID`.
 Escopos: `youtube.upload` e `youtube.readonly`; métricas pedem
 `yt-analytics.readonly`. A autenticação histórica do ytfun pode ser reaproveitada
-para consentimento OAuth, mas este pacote não renova tokens automaticamente.
+para iniciar consentimento OAuth; o grant histórico com apenas upload não basta
+para verificar o canal. O novo [provider OAuth](docs/youtube-auth.md) renova
+tokens com `YOUTUBE_REFRESH_TOKEN`, `YOUTUBE_CLIENT_ID` e
+`YOUTUBE_CLIENT_SECRET` já consentidos pelo usuário. Token manual
+`YOUTUBE_ACCESS_TOKEN` continua aceito, mas não é renovado. Não ocorre
+consentimento, conexão de conta ou gravação de segredos por ferramenta MCP.
 Privado funciona sem liberação pública; unlisted/public e agendamento de tornar
 público exigem `YTFUN_YOUTUBE_PUBLIC_ENABLED=true` e
 `YTFUN_YOUTUBE_AUDIT_CONFIRMED=true`. Só marque auditoria quando confirmada.
@@ -137,7 +146,25 @@ confirmado não vira publicação confirmada sem consultar o provider. A ferrame
 quando YouTube confirma processamento concluído e privacidade pública.
 Para desfechos incertos, conferir no provider e reconciliar com evidência antes
 de outra tentativa; não apagar registros para recomeçar. A versão inicial não
-tem reconciliação automática de cobrança nem de uploads desconhecidos.
+tem reconciliação automática de cobrança nem de uploads sem recibo.
+
+[Facebook](docs/facebook-publishing.md) exige Page token, ID explícito da Página,
+versão Graph fixada e confirmação dos requisitos de permissão/acesso da Meta.
+As flags `YTFUN_FACEBOOK_PUBLISH_ENABLED=true` e
+`YTFUN_FACEBOOK_APP_REVIEW_CONFIRMED=true` habilitam envio público depois da
+configuração real. A identidade da Página é verificada antes do envio. O perfil
+conservador do adapter é MP4 vertical de 4–60 segundos; episódios maiores
+precisam de outro corte revisado. Esse é o limite verificado adotado pelo
+adapter, não uma alegação sobre o máximo atual de todas as interfaces Facebook.
+O renderer guarda resolução, fps e formato na revisão. Receber `success:true`
+ao enviar não equivale a confirmar publicação; processamento e propriedade do
+vídeo são consultados no provider. A fila respeita esses mesmos gates.
+
+[TikTok e Kwai internacional](docs/short-video-publishing.md) ficam como pacotes
+para o criador. Não foi confirmada uma API pública de postagem para Kwai
+internacional; APIs do Kuaishou chinês não são tratadas como compatíveis.
+Métricas manuais aceitam as quatro plataformas, mantendo valores e fontes
+separados. Nenhuma elegibilidade de monetização é inferida da exportação.
 
 ## Políticas atuais consideradas — 30/09/2026
 
@@ -167,6 +194,7 @@ suíte histórica do ytfun. Os novos testes exercitam falhas de persistência,
 concorrência, licenças, hashes, custos, render e rede simulada; não geram cobrança
 nem publicam vídeos reais. O parecer final é o CI no commit da PR.
 
-Próximas integrações dependem da pesquisa de monetização multiplataforma, dos
-formatos escolhidos e da elegibilidade real de cada conta. O catálogo atual de
-ações não promete publishers para redes que ainda não têm adapter implementado.
+Os adapters e a fila exigem credenciais e um processo MCP persistente em um
+worker adequado. Configurar perfis no navegador é separado de conectar APIs.
+Este código não criou app OAuth, concedeu permissões, habilitou worker ou
+enviou vídeos reais. A validação dos novos adapters e da fila ocorre no CI.

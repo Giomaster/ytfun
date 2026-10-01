@@ -19,9 +19,12 @@ test('stdio MCP negotiates, lists tools and persists a series across restarts', 
   const client = await connect();
   t.after(() => client.close());
   const tools = await client.listTools();
-  assert.equal(tools.tools.length, 23);
+  assert.equal(tools.tools.length, 32);
   assert.ok(tools.tools.some(tool => tool.name === 'ytfun_tiktok_export'));
   assert.ok(!tools.tools.some(tool => tool.name === 'ytfun_tiktok_publish'));
+  assert.ok(tools.tools.some(tool => tool.name === 'ytfun_facebook_publish'));
+  assert.ok(tools.tools.some(tool => tool.name === 'ytfun_kwai_export'));
+  assert.ok(tools.tools.some(tool => tool.name === 'ytfun_delivery_enqueue'));
   const created = await client.callTool({ name: 'ytfun_project_create', arguments: { title: 'Arquivo das cidades impossíveis', premise: 'Uma cidade imaginária diferente por episódio.', audience: 'Pessoas interessadas em ficção especulativa.', language: 'pt-BR' } });
   assert.ok(!created.isError, JSON.stringify(created));
   const project = JSON.parse(created.content[0].text);

@@ -10,13 +10,14 @@ import { Production } from './production.mjs';
 import { Publisher } from './publishing.mjs';
 import { Research } from './research.mjs';
 import { ProductionJobs } from './jobs.mjs';
+import { DeliveryQueue } from './delivery-queue.mjs';
 
 const id = z.string().uuid();
 const text = z.string().trim().min(1).max(10_000);
 const url = z.url().refine(value => ['https:', 'http:'].includes(new URL(value).protocol), 'HTTP(S) URL required');
 const license = z.object({ url, notes: text });
 const kind = z.enum(['image', 'video', 'audio']);
-const platform = z.enum(['youtube', 'tiktok']);
+const platform = z.enum(['youtube', 'facebook', 'tiktok', 'kwai']);
 const metadata = z.object({ description: z.string().max(5000), hashtags: z.array(z.string().trim().min(1).max(60).regex(/^#[\p{L}\p{N}_]+$/u)).max(8) });
 const generationSchema = {
   episodeId: id, sceneId: id, kind, model: z.string().trim().min(1).max(200), provider: z.string().trim().min(1).max(100), prompt: text.optional(), estimatedCostUsd: z.number().finite().nonnegative(), pricingSourceUrl: url, commercialLicense: license, acknowledgePaidCost: z.boolean().default(false),
@@ -30,6 +31,7 @@ export function createServer({ directory = process.env.YTFUN_STUDIO_DIR, store, 
   publisher ??= new Publisher(store);
   research ??= new Research(studio);
   const jobs = new ProductionJobs(store, production);
+  const deliveries = new DeliveryQueue(store, publisher);
   const server = new McpServer({ name: 'ytfun-ai-studio', version: '0.1.0' });
   const register = (name, description, schema, handler, { readOnly = false, external = false } = {}) => {
     server.registerTool(name, { description, inputSchema: schema, annotations: { readOnlyHint: readOnly, destructiveHint: !readOnly, idempotentHint: readOnly, openWorldHint: external } }, async input => {
@@ -46,7 +48,7 @@ export function createServer({ directory = process.env.YTFUN_STUDIO_DIR, store, 
 
   register('ytfun_overview', 'Read studio projects, production and publication states. Uploaded, scheduled, exported and published are distinct.', {}, async () => {
     const state = await store.read();
-    return { schemaVersion: state.schemaVersion, projects: state.projects, episodes: state.episodes.map(episode => ({ id: episode.id, projectId: episode.projectId, title: episode.title, status: episode.status, durationSeconds: episode.scenes.reduce((sum, scene) => sum + scene.durationSeconds, 0), render: episode.render, approval: episode.approval })), publications: state.publications, spending: state.spending, constraints: ['Only original synthetic source media', 'Free-first; cost estimates are not invoices', 'TikTok export only: Direct Post is not available for this private self-posting utility', 'No guarantee of views, distribution or revenue'] };
+    return { schemaVersion: state.schemaVersion, projects: state.projects, episodes: state.episodes.map(episode => ({ id: episode.id, projectId: episode.projectId, title: episode.title, status: episode.status, durationSeconds: episode.scenes.reduce((sum, scene) => sum + scene.durationSeconds, 0), render: episode.render, approval: episode.approval })), publications: state.publications, deliveries: state.deliveries ?? [], spending: state.spending, constraints: ['Only original synthetic source media', 'Free-first; cost estimates are not invoices', 'TikTok and Kwai export packages require creator publication', 'No guarantee of views, distribution or revenue'] };
   }, { readOnly: true });
   register('ytfun_project_create', 'Persist an agreed original AI series: premise, audience, continuity and editorial cadence. Do not create an approved project before the user agrees to the concept.', {
     title: z.string().trim().min(1).max(160), premise: text, audience: text, language: z.string().min(2).max(30), continuity: text.optional(), mode: z.enum(['fiction', 'factual']).default('fiction'),
@@ -79,12 +81,26 @@ export function createServer({ directory = process.env.YTFUN_STUDIO_DIR, store, 
   register('ytfun_youtube_publish', 'Upload the exact reviewed original synthetic video through official YouTube OAuth. execute=false previews; execute=true has an external effect. Unknown outcomes reserve the attempt and must be reconciled before another upload.', { episodeId: id, privacy: z.enum(['private', 'unlisted', 'public']), publishAt: z.iso.datetime().optional(), expectedReviewHash: z.string().regex(/^[a-f0-9]{64}$/), madeForKids: z.boolean(), execute: z.boolean().default(false) }, input => publisher.publishYouTube(input), { external: true });
   register('ytfun_youtube_publication_sync', 'Verify an owned uploaded video through YouTube before declaring it published. Public privacy plus processed upload are required. Does not retry uploads or guess a receipt for unknown attempts.', { publicationId: id }, input => publisher.syncPublication(input), { external: true });
   register('ytfun_tiktok_export', 'Export the reviewed vertical video, caption/hashtags, disclosure and subtitles for posting through a permitted TikTok workflow. Exported is not posted. No Direct Post bypass.', { episodeId: id, expectedReviewHash: z.string().regex(/^[a-f0-9]{64}$/) }, input => publisher.exportTikTok(input));
+  register('ytfun_distribution_capabilities', 'Read implemented delivery modes, configuration gaps and official platform constraints. Does not reveal tokens or confirm live authorization.', {}, () => publisher.capabilities(), { readOnly: true });
+  register('ytfun_facebook_publish', 'Publish a reviewed synthetic Page Reel through official Meta APIs. Explicit public privacy and execute=true are required. Processing is not confirmed publication.', { episodeId: id, expectedReviewHash: z.string().regex(/^[a-f0-9]{64}$/), privacy: z.literal('public'), execute: z.boolean().default(false) }, input => publisher.publishFacebook(input), { external: true });
+  register('ytfun_facebook_publication_sync', 'Check a Facebook receipt, Page ownership and completed processing before marking a Reel published. Does not repeat uploads.', { publicationId: id }, input => publisher.syncFacebook(input), { external: true });
+  register('ytfun_kwai_export', 'Export the reviewed video, metadata and AI disclosure guidance for international Kwai. A Kuaishou API is not evidence of international Kwai support; export is not publication.', { episodeId: id, expectedReviewHash: z.string().regex(/^[a-f0-9]{64}$/) }, input => publisher.exportPackage({ ...input, platform: 'kwai' }));
+  register('ytfun_delivery_enqueue', 'Authorize one reviewed delivery for a selected account and due time. The worker rechecks review, identity and cadence. TikTok/Kwai produce packages, not automatic posts. Queue time is not a provider-confirmed schedule.', { episodeId: id, platform, expectedReviewHash: z.string().regex(/^[a-f0-9]{64}$/), privacy: z.enum(['private', 'unlisted', 'public']), madeForKids: z.boolean().optional(), dueAt: z.iso.datetime() }, input => deliveries.enqueue(input));
+  register('ytfun_delivery_list', 'Read persistent queued, running, completed and attention deliveries. Interrupted attempts are never replayed automatically.', {}, () => deliveries.list(), { readOnly: true });
+  register('ytfun_delivery_run_due', 'Preview the next due delivery, or execute one when execute=true. Official API uploads have external effects; creator exports remain pending creator publication.', { execute: z.boolean().default(false) }, input => deliveries.runDue(input), { external: true });
+  register('ytfun_delivery_cancel', 'Cancel an unstarted queued delivery; never cancels or deletes provider media.', { deliveryId: id }, input => deliveries.cancel(input));
+  register('ytfun_delivery_reconcile', 'Close an interrupted delivery only after its exact publication receipt is reconciled and the operator verifies the original worker is stopped. Never resets unknown attempts for retry.', { deliveryId: id, workerStopped: z.literal(true), confirmedBy: text, evidence: text }, input => deliveries.reconcile(input));
   register('ytfun_metrics_record', 'Record a real performance observation from a platform/export with timestamp and source. Keep unknown values absent and platform metrics separate. Ratios may exceed 1 for loops.', { episodeId: id, platform, observedAt: z.iso.datetime(), sourceUrl: url, views: z.number().int().nonnegative().optional(), retentionRatio: z.number().finite().nonnegative().optional(), completionRate: z.number().min(0).max(1).optional(), revenueUsd: z.number().finite().nonnegative().optional(), periodStart: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), periodEnd: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional() }, input => studio.recordMetrics(input));
   register('ytfun_youtube_metrics_sync', 'Fetch period-level YouTube Analytics with yt-analytics.readonly OAuth. Empty data stays unknown. Does not establish qualified monetization views.', { episodeId: id, startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) }, input => research.syncYouTubeMetrics(input), { external: true });
   register('ytfun_project_insights', 'Compare recorded episode performance and cost estimates to choose the next editorial experiment. No fabricated RPM, revenue prediction or causal conclusion.', { projectId: id }, ({ projectId }) => research.insights(projectId), { readOnly: true });
 
   server.registerResource('studio-state', 'ytfun://studio/state', { mimeType: 'application/json', description: 'Private persisted original-series studio state, including evidence and receipts. No credentials.' }, async uri => ({ contents: [{ uri: uri.href, mimeType: 'application/json', text: JSON.stringify(await store.read(), null, 2) }] }));
   server.registerPrompt('studio-director', { description: 'Plan an original AI series and continue its episodes from recorded evidence.', argsSchema: { direction: z.string().optional() } }, ({ direction }) => ({ messages: [{ role: 'user', content: { type: 'text', text: `Use ytfun_project_list and ytfun_overview first. Direction: ${direction ?? 'Explore original AI fiction, animation, humor or factual storytelling.'} Propose a series premise, audience, characters/style bible, distinct episode ideas and continuity. Research current signals with authorized connectors and preserve source/time. Reach concept consensus with the user before creating a project. Everything in the final video must be original synthetic media with commercial terms evidence; no borrowed clips, famous character replicas, celebrity voice imitation or invented facts. Start free-first; do not pretend inference is free or approve paid calls without acknowledgment. Do not predict top trends or income. Plan strong hook, comprehensible story, voiced scenes, deliberate pacing and distinct ending. Check previous episodes before each next script. Generate/import assets, render, inspect the actual output, record a truthful review, then preview publication and execute only within authorized scope. YouTube requires synthetic disclosure; private TikTok workflow exports a package for a permitted posting experience. Collect real performance and change one hypothesis at a time.` } }] }));
+  if (process.env.YTFUN_DELIVERY_WORKER_ENABLED === 'true') {
+    deliveries.start();
+    const close = server.close.bind(server);
+    server.close = async () => { deliveries.stop(); await close(); };
+  }
   return server;
 }
 

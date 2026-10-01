@@ -1,9 +1,11 @@
+import { YouTubeAuth, YOUTUBE_ANALYTICS_SCOPE } from './oauth.mjs';
 // Research supplies signals, never source media or a promise of future views.
 export class Research {
-  constructor(studio, { env = process.env, fetchImpl = fetch } = {}) {
+  constructor(studio, { env = process.env, fetchImpl = fetch, youtubeAuth } = {}) {
     this.studio = studio;
     this.env = env;
     this.fetch = fetchImpl;
+    this.youtubeAuth = youtubeAuth ?? new YouTubeAuth({ env, fetchImpl });
   }
 
   async discover({ source, projectId, region = 'BR', limit = 10 }) {
@@ -47,13 +49,14 @@ export class Research {
       if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || new Date(date).toISOString().slice(0, 10) !== date) throw new Error('Use valid YYYY-MM-DD dates');
     }
     if (startDate > endDate) throw new Error('startDate must precede endDate');
-    if (!this.env.YOUTUBE_ACCESS_TOKEN || !this.env.YOUTUBE_CHANNEL_ID) throw new Error('YouTube OAuth token and channel are required');
+    if (!this.youtubeAuth.readiness().ready || !this.env.YOUTUBE_CHANNEL_ID) throw new Error('YouTube OAuth token and channel are required');
     const state = await this.studio.store.read();
     const publication = state.publications.find(item => item.episodeId === episodeId && item.platform === 'youtube' && item.accountId === this.env.YOUTUBE_CHANNEL_ID && item.videoId && ['uploaded', 'published', 'scheduled'].includes(item.status));
     if (!publication) throw new Error('No confirmed YouTube upload for this episode and channel');
     const url = new URL('https://youtubeanalytics.googleapis.com/v2/reports');
     url.search = new URLSearchParams({ ids: `channel==${this.env.YOUTUBE_CHANNEL_ID}`, startDate, endDate, metrics: 'views,averageViewPercentage,likes,shares,subscribersGained', filters: `video==${publication.videoId}` }).toString();
-    const body = await this.getJson(url, { Authorization: `Bearer ${this.env.YOUTUBE_ACCESS_TOKEN}` });
+    const accessToken = await this.youtubeAuth.getAccessToken({ requiredScopes: [YOUTUBE_ANALYTICS_SCOPE] });
+    const body = await this.getJson(url, { Authorization: `Bearer ${accessToken}` });
     if (!body.rows?.length) return { episodeId, recorded: false, reason: 'No data returned for this period; absent data is not zero.' };
     const values = Object.fromEntries((body.columnHeaders ?? []).map((column, index) => [column.name, body.rows[0][index]]));
     if (!Number.isFinite(values.views) || values.views < 0 || !Number.isFinite(values.averageViewPercentage)) throw new Error('Analytics returned invalid metrics');

@@ -8,7 +8,7 @@ import { episodeReviewHash } from './domain.mjs';
 const MAX_ASSET_BYTES = 100 * 1024 * 1024;
 const MAX_PROBE_BYTES = 1024 * 1024;
 const KINDS = new Set(['image', 'audio', 'video']);
-const PUBLICATION_FREEZE_STATUSES = new Set(['reserved', 'uploading', 'sending', 'unknown', 'uploaded', 'scheduled', 'published']);
+const PUBLICATION_FREEZE_STATUSES = new Set(['reserved', 'uploading', 'sending', 'unknown', 'processing', 'uploaded', 'scheduled', 'published']);
 const MIME_EXTENSIONS = {
   image: { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp' },
   audio: { 'audio/wav': '.wav', 'audio/x-wav': '.wav', 'audio/mpeg': '.mp3', 'audio/ogg': '.ogg', 'audio/flac': '.flac', 'audio/mp4': '.m4a' },
@@ -43,7 +43,7 @@ function sceneContext(state, episodeId, sceneId) {
 }
 
 function mutableEpisode(episode, state) {
-  if (['rendering', 'publishing', 'uploaded', 'scheduled', 'unknown', 'published'].includes(episode.status)) throw new Error(`Episode is ${episode.status}; assets cannot change now`);
+  if (['rendering', 'publishing', 'processing', 'uploaded', 'scheduled', 'unknown', 'published'].includes(episode.status)) throw new Error(`Episode is ${episode.status}; assets cannot change now`);
   if (state.publications.some((item) => item.episodeId === episode.id && PUBLICATION_FREEZE_STATUSES.has(item.status))) throw new Error('Episode has a reserved, uploaded or unknown publication; reconcile it before changing production assets');
   if (state.projects.find((item) => item.id === episode.projectId)?.status !== 'active') throw new Error('The episode project must be active for production');
 }
@@ -385,7 +385,7 @@ export class Production {
           if (sha256(await boundedFile(await internalPath(this.store, asset.path))) !== asset.sha256) throw new Error('Source asset changed during render');
         }
       }
-      const render = { path: `assets/render-${attemptId}.mp4`, sha256: sha256(finalBytes), durationSeconds, captionsPath: `assets/render-${attemptId}.srt`, captionsSha256: sha256(await boundedFile(captionsPath)), captionsTiming: 'scene-approximate', sceneAssets: snapshot.selected.map(({ sceneId, visual, audio }) => ({ sceneId, visualAssetId: visual.id, audioAssetId: audio.id })), visualMethod: snapshot.selected.some(({ visual }) => visual.kind === 'image') ? 'includes-animated-images' : 'generated-video', synthetic: true, createdAt: new Date().toISOString() };
+      const render = { path: `assets/render-${attemptId}.mp4`, sha256: sha256(finalBytes), durationSeconds, width: videoStream.width, height: videoStream.height, framesPerSecond, format: 'mp4', captionsPath: `assets/render-${attemptId}.srt`, captionsSha256: sha256(await boundedFile(captionsPath)), captionsTiming: 'scene-approximate', sceneAssets: snapshot.selected.map(({ sceneId, visual, audio }) => ({ sceneId, visualAssetId: visual.id, audioAssetId: audio.id })), visualMethod: snapshot.selected.some(({ visual }) => visual.kind === 'image') ? 'includes-animated-images' : 'generated-video', synthetic: true, createdAt: new Date().toISOString() };
       return await this.store.transaction((state) => {
         const episode = state.episodes.find((item) => item.id === episodeId);
         if (!episode || episode.status !== 'rendering' || episode.renderAttempt?.id !== attemptId || fingerprint(episode, selectSceneAssets(state, episode)) !== snapshot.fingerprint) throw new Error('Episode or selected assets changed during rendering; render cannot be committed');

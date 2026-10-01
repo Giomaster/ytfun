@@ -4,14 +4,26 @@ import { mkdir, realpath, rename, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { episodeAssetHash, episodeReviewHash } from './domain.mjs';
+import { YouTubeAuth, YOUTUBE_UPLOAD_SCOPE, YOUTUBE_READONLY_SCOPE } from './oauth.mjs';
+import { FacebookReels, validateFacebookReel } from './facebook.mjs';
+import { distributionCapabilities, publicationPackage } from './distribution.mjs';
 
 const DAY_MS = 86_400_000;
 const DEFAULT_MAX_BYTES = 250 * 1024 * 1024;
 const GOOGLE_API = 'https://www.googleapis.com';
-const RESERVED_STATUSES = new Set(['reserved', 'uploading', 'sending', 'unknown', 'uploaded', 'scheduled', 'published']);
+const RESERVED_STATUSES = new Set(['reserved', 'uploading', 'sending', 'unknown', 'processing', 'uploaded', 'scheduled', 'published']);
 
 function nonempty(value) {
   return typeof value === 'string' && value.trim().length > 0;
+}
+
+function verifyDeliveryClaim(state, deliveryId, plan, { privacy, madeForKids } = {}) {
+  if (deliveryId === undefined) return;
+  const delivery = state.deliveries?.find(item => item.id === deliveryId && item.status === 'running');
+  if (!delivery || delivery.episodeId !== plan.episodeId || delivery.platform !== plan.platform ||
+      delivery.accountId !== plan.accountId || delivery.reviewHash !== plan.reviewHash ||
+      delivery.renderSha256 !== plan.render.sha256 || delivery.privacy !== privacy ||
+      (plan.platform === 'youtube' && delivery.madeForKids !== madeForKids)) throw new Error('Delivery claim no longer matches this exact publication.');
 }
 
 function publicEnabled(env) {
@@ -130,14 +142,20 @@ async function responseJson(response) {
 }
 
 export class Publisher {
-  constructor(store, { env = process.env, fetchImpl = fetch } = {}) {
+  constructor(store, { env = process.env, fetchImpl = fetch, youtubeAuth, facebook } = {}) {
     this.store = store;
     this.env = env;
     this.fetch = fetchImpl;
+    this.youtubeAuth = youtubeAuth ?? new YouTubeAuth({ env, fetchImpl });
+    this.facebook = facebook ?? new FacebookReels({ env, fetchImpl });
+  }
+
+  capabilities() {
+    return { platforms: distributionCapabilities(this.env), youtubeAuth: this.youtubeAuth.readiness(), facebook: this.facebook.readiness() };
   }
 
   async plan(state, { episodeId, platform, privacy = 'private', publishAt }, now = Date.now()) {
-    if (!['youtube', 'tiktok'].includes(platform)) throw new Error('Platform must be youtube or tiktok.');
+    if (!['youtube', 'facebook', 'tiktok', 'kwai'].includes(platform)) throw new Error('Platform must be youtube, facebook, tiktok, or kwai.');
     if (!['private', 'unlisted', 'public'].includes(privacy)) throw new Error('Privacy must be private, unlisted, or public.');
     const episode = state.episodes.find((item) => item.id === episodeId);
     if (!episode) throw new Error('Episode not found.');
@@ -201,34 +219,41 @@ export class Publisher {
         reasons.push('publishAt requires a future YouTube public-release schedule and cannot use unlisted privacy.');
       } else effectiveAt = new Date(scheduled).toISOString();
     }
-    const accountId = platform === 'youtube' ? this.env.YOUTUBE_CHANNEL_ID : (this.env.TIKTOK_ACCOUNT_ID ?? null);
+    const accountId = { youtube: this.env.YOUTUBE_CHANNEL_ID, facebook: this.env.FACEBOOK_PAGE_ID, tiktok: this.env.TIKTOK_ACCOUNT_ID, kwai: this.env.KWAI_ACCOUNT_ID }[platform] ?? null;
     const existing = state.publications.find((item) => item.episodeId === episode.id && item.platform === platform && RESERVED_STATUSES.has(item.status));
     if (existing) reasons.push('This reviewed episode already has an upload or reservation; reconcile its existing publication.');
     const cadence = cadenceIssues(state, project, platform, accountId, effectiveAt);
     if (platform === 'youtube') {
       if (!nonempty(accountId)) reasons.push('YOUTUBE_CHANNEL_ID must identify the intended channel.');
-      if (!nonempty(this.env.YOUTUBE_ACCESS_TOKEN)) reasons.push('YouTube requires an OAuth access token with youtube.upload and youtube.readonly scopes.');
+      if (!this.youtubeAuth.readiness().ready) reasons.push('YouTube requires OAuth credentials with youtube.upload and youtube.readonly scopes.');
       if ((privacy !== 'private' || publishAt !== undefined) && !publicEnabled(this.env)) {
         reasons.push('External visibility requires confirmed YouTube API audit and explicit public publishing enablement.');
       }
       reasons.push(...cadence);
     }
+    if (platform === 'facebook') {
+      if (privacy !== 'public') reasons.push('Facebook Page Reels requires explicitly selected public visibility.');
+      reasons.push(...this.facebook.readiness().reasons, ...cadence);
+      reasons.push(...validateFacebookReel(episode.render ?? {}).reasons);
+    }
     const caption = metadata ? [metadata.title, metadata.description].filter(nonempty).join('\n\n') : '';
+    if (platform === 'facebook' && caption.length > 5000) reasons.push('Facebook caption exceeds the studio 5000-character limit.');
     if (platform === 'tiktok' && caption.length > 2200) reasons.push('TikTok caption exceeds 2200 UTF-16 code units.');
     return {
       episodeId: episode.id, projectId: project.id, platform, accountId, reviewHash, privacy,
       uploadPrivacy: publishAt === undefined ? privacy : 'private', effectiveAt,
       ...(publishAt !== undefined ? { publishAt: effectiveAt } : {}),
-      ready: reasons.length === 0 && platform === 'youtube', readyToExport: reasons.length === 0 && platform === 'tiktok',
+      ready: reasons.length === 0 && ['youtube', 'facebook'].includes(platform), readyToExport: reasons.length === 0 && ['tiktok', 'kwai'].includes(platform),
       reasons: [...new Set(reasons)], cadence: { warnings: cadence }, disclosure: { synthetic: true },
-      capabilities: { directPost: platform === 'youtube', requiresCreatorPublishing: platform === 'tiktok' },
+      capabilities: { directPost: ['youtube', 'facebook'].includes(platform), requiresCreatorPublishing: ['tiktok', 'kwai'].includes(platform) },
       ...(render ? { render: { path: render.relativePath, sha256: episode.render.sha256, sizeBytes: render.sizeBytes, durationSeconds: episode.render.durationSeconds } } : {}),
       ...(metadata ? { metadata, caption } : {}), ...(existing ? { publication: existing } : {}),
     };
   }
 
-  async preflight(args) {
-    return this.plan(await this.store.read(), args);
+  async preflight(args, { now = Date.now() } = {}) {
+    if (!Number.isSafeInteger(now) || now < 0) throw new Error('Publication planning requires a valid clock.');
+    return this.plan(await this.store.read(), args, now);
   }
 
   async updatePublication(id, changes) {
@@ -240,7 +265,7 @@ export class Publisher {
           if (!record) throw new Error('Publication reservation not found.');
           Object.assign(record, changes, { updatedAt: new Date().toISOString() });
           const episode = state.episodes.find((item) => item.id === record.episodeId);
-          if (episode && record.platform === 'youtube') {
+          if (episode && ['youtube', 'facebook'].includes(record.platform)) {
             episode.status = record.status === 'unknown' ? 'publishing' : record.status === 'failed' ? 'approved' : record.status;
           }
           return record;
@@ -252,7 +277,7 @@ export class Publisher {
     }
   }
 
-  async publishYouTube({ episodeId, privacy = 'private', publishAt, expectedReviewHash, madeForKids, execute = false }) {
+  async publishYouTube({ episodeId, privacy = 'private', publishAt, expectedReviewHash, madeForKids, execute = false, deliveryId }) {
     if (typeof madeForKids !== 'boolean') throw new Error('madeForKids must be explicitly selected as a boolean.');
     if (typeof execute !== 'boolean') throw new Error('execute must be a boolean.');
     const initial = await this.preflight({ episodeId, platform: 'youtube', privacy, publishAt });
@@ -260,10 +285,11 @@ export class Publisher {
     if (!execute) return { ...initial, execute: false, madeForKids };
     if (initial.publication) return { duplicate: true, publication: initial.publication };
     if (!initial.ready) throw new Error(initial.reasons.join(' '));
+    const accessToken = await this.youtubeAuth.getAccessToken({ requiredScopes: [YOUTUBE_UPLOAD_SCOPE, YOUTUBE_READONLY_SCOPE] });
     let channelResponse;
     try {
       channelResponse = await this.fetch(`${GOOGLE_API}/youtube/v3/channels?part=id&mine=true`, {
-        headers: { Authorization: `Bearer ${this.env.YOUTUBE_ACCESS_TOKEN}` }, redirect: 'error', signal: AbortSignal.timeout(30_000),
+        headers: { Authorization: `Bearer ${accessToken}` }, redirect: 'error', signal: AbortSignal.timeout(30_000),
       });
     } catch { throw new Error('Could not verify the authorized YouTube channel.'); }
     const channels = await responseJson(channelResponse);
@@ -276,6 +302,7 @@ export class Publisher {
       if (plan.reviewHash !== expectedReviewHash) throw new Error('Episode changed after publication was requested.');
       if (plan.publication) return { duplicate: true, publication: plan.publication };
       if (!plan.ready) throw new Error(plan.reasons.join(' '));
+      verifyDeliveryClaim(state, deliveryId, plan, { privacy, madeForKids });
       const file = await verifiedFile(this.store.directory, plan.render.path, plan.render.sha256, maxFileBytes(this.env));
       const body = await boundedMediaBody(file.absolutePath, maxFileBytes(this.env));
       if (body.length > maxFileBytes(this.env) || createHash('sha256').update(body).digest('hex') !== plan.render.sha256.toLowerCase()) {
@@ -286,6 +313,7 @@ export class Publisher {
         reviewHash: plan.reviewHash, renderSha256: plan.render.sha256, status: 'uploading',
         effectiveAt: plan.effectiveAt, createdAt: new Date().toISOString(), privacy, madeForKids,
         ...(publishAt !== undefined ? { publishAt: plan.effectiveAt } : {}),
+        ...(deliveryId ? { deliveryId } : {}),
       };
       state.publications.push(publication);
       state.episodes.find((item) => item.id === episodeId).status = 'publishing';
@@ -296,7 +324,7 @@ export class Publisher {
     if (reserved.duplicate) return reserved;
     const { publication, plan } = reserved;
     const body = uploadBody;
-    const authHeaders = { Authorization: `Bearer ${this.env.YOUTUBE_ACCESS_TOKEN}` };
+    const authHeaders = { Authorization: `Bearer ${accessToken}` };
     try {
       const init = await this.fetch(`${GOOGLE_API}/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status`, {
         method: 'POST', redirect: 'error', signal: AbortSignal.timeout(30_000),
@@ -342,11 +370,12 @@ export class Publisher {
     const state = await this.store.read();
     const publication = state.publications.find(item => item.id === publicationId && item.platform === 'youtube');
     if (!publication?.videoId) throw new Error('A confirmed YouTube video ID is required; unknown uploads without receipts require operator reconciliation.');
-    if (!this.env.YOUTUBE_ACCESS_TOKEN || publication.accountId !== this.env.YOUTUBE_CHANNEL_ID) throw new Error('Use the original channel and valid OAuth token to verify this publication.');
+    if (!this.youtubeAuth.readiness().ready || publication.accountId !== this.env.YOUTUBE_CHANNEL_ID) throw new Error('Use the original channel and valid OAuth token to verify this publication.');
+    const accessToken = await this.youtubeAuth.getAccessToken({ requiredScopes: [YOUTUBE_READONLY_SCOPE] });
     const url = new URL(`${GOOGLE_API}/youtube/v3/videos`);
     url.search = new URLSearchParams({ part: 'snippet,status', id: publication.videoId }).toString();
     let response;
-    try { response = await this.fetch(url, { headers: { Authorization: `Bearer ${this.env.YOUTUBE_ACCESS_TOKEN}` }, redirect: 'error', signal: AbortSignal.timeout(30_000) }); }
+    try { response = await this.fetch(url, { headers: { Authorization: `Bearer ${accessToken}` }, redirect: 'error', signal: AbortSignal.timeout(30_000) }); }
     catch { throw new Error('Could not verify the YouTube publication; existing state is preserved.'); }
     const resource = (await responseJson(response))?.items?.find(item => item.id === publication.videoId);
     if (!response.ok || !resource || resource.snippet?.channelId !== publication.accountId) throw new Error('YouTube did not confirm an owned video; existing state is preserved.');
@@ -363,11 +392,71 @@ export class Publisher {
   }
 
   async exportTikTok({ episodeId, expectedReviewHash }) {
+    return this.exportPackage({ episodeId, expectedReviewHash, platform: 'tiktok' });
+  }
+
+  async publishFacebook({ episodeId, expectedReviewHash, privacy, execute = false, deliveryId }) {
+    if (privacy !== 'public') throw new Error('Facebook Page Reels requires explicit public visibility.');
+    if (typeof execute !== 'boolean') throw new Error('execute must be a boolean.');
+    const initial = await this.preflight({ episodeId, platform: 'facebook', privacy });
+    if (!nonempty(expectedReviewHash) || expectedReviewHash !== initial.reviewHash) throw new Error('Expected review fingerprint does not match the current episode.');
+    if (!execute) return { ...initial, execute: false };
+    if (initial.publication) return { duplicate: true, publication: initial.publication };
+    if (!initial.ready) throw new Error(initial.reasons.join(' '));
+    await this.facebook.verifyAccount();
+    let media;
+    const reservation = await this.store.transaction(async state => {
+      const plan = await this.plan(state, { episodeId, platform: 'facebook', privacy });
+      if (plan.reviewHash !== expectedReviewHash) throw new Error('Episode changed after publication was requested.');
+      if (plan.publication) return { duplicate: true, publication: plan.publication };
+      if (!plan.ready) throw new Error(plan.reasons.join(' '));
+      verifyDeliveryClaim(state, deliveryId, plan, { privacy });
+      const file = await verifiedFile(this.store.directory, plan.render.path, plan.render.sha256, maxFileBytes(this.env));
+      media = await boundedMediaBody(file.absolutePath, maxFileBytes(this.env));
+      if (createHash('sha256').update(media).digest('hex') !== plan.render.sha256.toLowerCase()) throw new Error('Render changed while preparing the upload.');
+      const publication = { id: randomUUID(), episodeId, projectId: plan.projectId, platform: 'facebook', accountId: plan.accountId, reviewHash: plan.reviewHash, renderSha256: plan.render.sha256, status: 'uploading', privacy, effectiveAt: plan.effectiveAt, createdAt: new Date().toISOString(), ...(deliveryId ? { deliveryId } : {}) };
+      state.publications.push(publication);
+      state.episodes.find(item => item.id === episodeId).status = 'publishing';
+      return { publication, plan };
+    });
+    if (reservation.duplicate) return reservation;
+    const { publication, plan } = reservation;
+    try {
+      const receipt = await this.facebook.upload({ media, caption: plan.caption, synthetic: true, onReceipt: async ({ videoId, status, phase }) => {
+        if (!/^\d+$/.test(videoId ?? '')) throw new Error('Facebook returned an invalid receipt.');
+        if (!['unknown', 'uploaded', 'processing'].includes(status) || !['start', 'transfer', 'finish'].includes(phase)) throw new Error('Facebook returned an invalid upload phase.');
+        await this.updatePublication(publication.id, { videoId, status, providerPhase: phase });
+      } });
+      let status = ['uploaded', 'processing', 'published', 'unknown', 'failed'].includes(receipt?.status) ? receipt.status : 'unknown';
+      const videoId = /^\d+$/.test(receipt?.videoId ?? '') ? receipt.videoId : undefined;
+      if (status === 'published' && (!videoId || receipt.confirmed !== true)) status = 'unknown';
+      if (status === 'unknown' && receipt?.phase === 'status') {
+        const stored = (await this.store.read()).publications.find(item => item.id === publication.id);
+        if (['uploaded', 'processing'].includes(stored?.status)) status = stored.status;
+      }
+      return { publication: await this.updatePublication(publication.id, { status, ...(videoId ? { videoId } : {}), ...(status === 'published' && videoId ? { publishedAt: new Date().toISOString(), url: `https://www.facebook.com/reel/${videoId}` } : {}), ...(status === 'unknown' ? { error: 'Facebook upload outcome requires reconciliation; do not repeat it.' } : {}) }) };
+    } catch {
+      return { publication: await this.updatePublication(publication.id, { status: 'unknown', error: 'Facebook upload outcome is unknown; reconcile before any retry.' }) };
+    }
+  }
+
+  async syncFacebook({ publicationId }) {
+    const state = await this.store.read();
+    const publication = state.publications.find(item => item.id === publicationId && item.platform === 'facebook');
+    if (!publication?.videoId || publication.accountId !== this.env.FACEBOOK_PAGE_ID) throw new Error('A receipt and the original Facebook Page are required for reconciliation.');
+    const receipt = await this.facebook.status({ videoId: publication.videoId });
+    if (!['uploaded', 'processing', 'published', 'failed'].includes(receipt?.status)) return { publication, verified: false, reason: 'Facebook has not confirmed the owned publication; existing state is preserved.' };
+    return { verified: true, publication: await this.updatePublication(publication.id, { status: receipt.status, verifiedAt: new Date().toISOString(), ...(receipt.status === 'published' ? { publishedAt: publication.publishedAt ?? new Date().toISOString(), url: `https://www.facebook.com/reel/${publication.videoId}` } : {}) }) };
+  }
+
+  async exportPackage({ episodeId, expectedReviewHash, platform, deliveryId }) {
+    if (!['tiktok', 'kwai'].includes(platform)) throw new Error('Export platform must be tiktok or kwai.');
     return this.store.transaction(async (state) => {
-      const plan = await this.plan(state, { episodeId, platform: 'tiktok', privacy: 'private' });
+      const plan = await this.plan(state, { episodeId, platform, privacy: 'private' });
       if (!nonempty(expectedReviewHash) || expectedReviewHash !== plan.reviewHash) throw new Error('Expected review fingerprint does not match the current episode.');
       if (!plan.readyToExport) throw new Error(plan.reasons.join(' '));
-      const existing = state.publications.find((item) => item.episodeId === episodeId && item.platform === 'tiktok' &&
+      verifyDeliveryClaim(state, deliveryId, plan, { privacy: 'private' });
+      const existing = state.publications.find((item) => item.episodeId === episodeId && item.platform === platform &&
         item.reviewHash === plan.reviewHash && item.status === 'exported');
       if (existing) return { duplicate: true, publication: existing };
       const episode = state.episodes.find((item) => item.id === episodeId);
@@ -377,17 +466,9 @@ export class Publisher {
       const root = await realpath(this.store.directory);
       const exportRoot = await realpath(exportDirectory);
       if (path.relative(root, exportRoot) !== 'exports') throw new Error('Export directory must remain inside studio storage.');
-      const exportPath = path.join('exports', `tiktok-${id}.json`);
+      const exportPath = path.join('exports', `${platform}-${id}.json`);
       const destination = path.join(root, exportPath);
-      const packageData = {
-        schemaVersion: 1, platform: 'tiktok', episodeId, projectId: plan.projectId, reviewHash: plan.reviewHash,
-        createdAt: new Date().toISOString(), status: 'exported',
-        video: { path: plan.render.path, sha256: plan.render.sha256, durationSeconds: plan.render.durationSeconds },
-        caption: plan.caption, hashtags: plan.metadata.hashtags, disclosure: { isAigc: true, synthetic: true },
-        creatorActions: ['Review the video and editable caption.', 'Select privacy and interaction settings.', 'Disclose generated AI content.', 'Publish through TikTok or an approved compatible integration.'],
-        monetization: { creatorRewardsDurationCandidate: plan.render.durationSeconds > 60, eligibilityConfirmed: false },
-        cadenceWarnings: plan.cadence.warnings,
-      };
+      const packageData = structuredClone(publicationPackage({ platform, plan, episode, createdAt: new Date().toISOString() }));
       if (episode.render.captionsPath) {
         const captionsPath = episode.render.captionsPath;
         if (typeof captionsPath !== 'string' || path.isAbsolute(captionsPath)) throw new Error('Subtitles require a path within studio storage.');
@@ -406,9 +487,10 @@ export class Publisher {
       await writeFile(temporary, `${JSON.stringify(packageData, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
       await rename(temporary, destination);
       const publication = {
-        id, episodeId, projectId: plan.projectId, platform: 'tiktok', accountId: plan.accountId,
+        id, episodeId, projectId: plan.projectId, platform, accountId: plan.accountId,
         reviewHash: plan.reviewHash, renderSha256: plan.render.sha256, status: 'exported', exportPath,
         createdAt: packageData.createdAt,
+        ...(deliveryId ? { deliveryId } : {}),
       };
       state.publications.push(publication);
       return { publication, package: packageData };

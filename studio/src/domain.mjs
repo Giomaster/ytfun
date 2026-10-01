@@ -100,6 +100,8 @@ export function episodeReviewHash(episode) {
     render: episode.render ? {
       sha256: episode.render.sha256, path: episode.render.path,
       durationSeconds: episode.render.durationSeconds,
+      width: episode.render.width, height: episode.render.height,
+      framesPerSecond: episode.render.framesPerSecond, format: episode.render.format,
       captionsPath: episode.render.captionsPath, captionsSha256: episode.render.captionsSha256,
       sceneAssets: episode.render.sceneAssets, synthetic: episode.render.synthetic,
     } : null,
@@ -170,7 +172,7 @@ async function episodeFindings(state, episode, directory) {
   const duplicates = state.episodes.filter((other) => other.id !== episode.id && (tokenOverlap(other.title, episode.title) > 0.85 || tokenOverlap((other.scenes ?? []).map((scene) => scene.narration).join(' '), episode.scenes.map((scene) => scene.narration).join(' ')) > 0.85));
   if (duplicates.length) add('duplicate_episode', `Near duplicate episodes: ${duplicates.map((entry) => entry.id).join(', ')}`);
   if (!episode.originalAngle?.trim()) add('original_angle_missing', 'Describe the original narrative angle.');
-  if (['rendering', 'publishing', 'uploaded', 'scheduled', 'published'].includes(episode.status) || state.publications.some((publication) => publication.episodeId === episode.id && ['reserved', 'uploading', 'sending', 'unknown', 'uploaded', 'scheduled', 'published'].includes(publication.status))) add('episode_busy', 'Publication has reserved or frozen this episode; approval cannot change until its outcome is reconciled.');
+  if (['rendering', 'publishing', 'processing', 'uploaded', 'scheduled', 'published'].includes(episode.status) || state.publications.some((publication) => publication.episodeId === episode.id && ['reserved', 'uploading', 'sending', 'unknown', 'processing', 'uploaded', 'scheduled', 'published'].includes(publication.status))) add('episode_busy', 'Publication has reserved or frozen this episode; approval cannot change until its outcome is reconciled.');
   if (!episode.render) {
     add('render_missing', 'Generate and watch the final render before approval.');
     return findings;
@@ -283,7 +285,7 @@ export class Studio {
 
   async recordMetrics(input) {
     rejectClientId(input);
-    if (!['youtube', 'tiktok'].includes(input.platform)) throw new Error('platform must be youtube or tiktok');
+    if (!['youtube', 'facebook', 'tiktok', 'kwai'].includes(input.platform)) throw new Error('platform must be youtube, facebook, tiktok, or kwai');
     const metric = { id: randomUUID(), platform: input.platform, observedAt: observedTime(input.observedAt), sourceUrl: httpUrl(input.sourceUrl, 'sourceUrl') };
     for (const [key, maximum] of [['views', Infinity], ['retentionRatio', Infinity], ['completionRate', 1], ['revenueUsd', Infinity]]) {
       if (input[key] !== undefined) metric[key] = number(input[key], key, 0, maximum);

@@ -111,6 +111,15 @@ Quality, required checks and authorization are constraints, not token-saving opt
 - Unknown upload outcomes need reconciliation; never retry them blindly.
 - YouTube synthetic disclosure is always set. Audit and release flags apply
   to every externally visible upload including scheduled release.
+- Facebook targets an explicitly authorized Page through official APIs,
+  requests AI disclosure, and confirms ownership and processing before
+  declaring publication. Creating a browser profile/Page does not authorize API access.
 - Private TikTok self-posting MCP utilities do not satisfy Direct Post guidance.
   Export a publication package; adding a publisher needs a permitted integration
   and the required preview, privacy selection and consent experience.
+- International Kwai uses creator export until a permitted publishing API is
+  verified for that product/account; mainland Kuaishou access proves neither.
+- Delivery queue timestamps are planned operation times, not guaranteed
+  provider schedules. Recheck exact review/account/cadence at execution.
+  Interrupted tasks require their own receipt or a stopped unreserved claim;
+  never reconcile against an older attempt or retry an unknown remote outcome.
