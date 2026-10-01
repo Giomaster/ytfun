@@ -22,6 +22,26 @@ to repository readers; they contain only original media intended for publication
 An interrupted or uncertain request keeps its charge barrier. Automatic job reruns
 are rejected. Retrieve the existing provider request with `recoverFalVideo` through
 the Hugging Face router; never submit again just because a worker timed out.
+
+New `attention` checkpoints include a bounded `diagnostic` (version 1): an
+allowlisted `errorClass`, numeric `httpStatus` or `null`, `stage`,
+`providerPostAttempted`, and `receiptCaptured`. They never copy exception messages,
+response bodies, request headers or URLs into the diagnostic. Stages distinguish
+`sdk_preflight`, `hub_lookup`, `sdk_fetch`, `provider_submission`, `queue_receipt`,
+`receipt_persistence`, `provider_response`, `output_validation` and
+`result_persistence`. POST attempted means the guarded fetch was invoked, not
+that a provider accepted or charged it. Receipt captured means the validated queue
+receipt artifact upload completed; an in-memory `remoteRequest` alone is insufficient.
+
+The supported HF SDK 4.13.30 fetch hook observes Hub lookup and initial submission.
+Its polling/result/media requests use global fetch; `provider_response` is an
+aggregate phase. Typed Hub/provider API errors can supply a numeric HTTP status
+even outside the hook, but a transport/output exception may have no observable
+status. No cause, insufficient-credit diagnosis or refund is inferred from an absent
+receipt or billing totals. Hub GET 402, provider POST 402 and transport failures all
+still leave spending `unknown` and the reservation barrier intact. Historical
+attention checkpoints without diagnostics cannot be retroactively reclassified.
+
 Before import, verify the Actions run and commit through GitHub, bind that identity
 with `RemoteBatch.bindRun`, and pass the exact artifact to `RemoteBatch.accept`.
 Import verifies batch, scene, source, reference, run, commit and MP4 hash before

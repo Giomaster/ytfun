@@ -1,12 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { InferenceClientHubApiError, InferenceClientProviderApiError } from '@huggingface/inference';
 import { StudioStore } from '../src/store.mjs';
 import { RemoteBatch, BATCH_MODEL, BATCH_ESTIMATE, hash, packetHash, validatePacket, sourceUrl } from '../src/remote-batch.mjs';
 import { unpackPacket, assertNoPreviousSubmission, runWorker } from '../scripts/remote-batch-worker.mjs';
@@ -80,13 +81,13 @@ test('production worker refuses local execution and automatic reruns without cal
   assert.equal(called, false);
 });
 
-async function workerFixture(t, failReceipt = false) {
+async function workerFixture(t, failReceipt = false, submission = () => Response.json({ request_id: 'owned-request', response_url: 'https://queue.fal.run/fal-ai/wan/requests/owned-request', status: 'IN_QUEUE' })) {
   const { service, input, directory } = await fixture(t); const packet = await service.reserve(input);
   const launch = { batchId: packet.id, packetSha256: packetHash(packet), sceneIndices: [1] };
   const { mkdir } = await import('node:fs/promises');
   await mkdir(join(directory, 'studio/batches'), { recursive: true });
   await writeFile(join(directory, 'studio/batches/launch.json'), JSON.stringify(launch));
-  const events = []; let posts = 0;
+  const events = []; const checkpoints = new Map(); let posts = 0;
   const fetchImpl = async (url, options = {}) => {
     if (String(url).startsWith('https://api.github.com/')) return Response.json({ total_count: 0, artifacts: [] });
     if (String(url).startsWith('https://v3.fal.media/')) {
@@ -94,10 +95,11 @@ async function workerFixture(t, failReceipt = false) {
       return new Response(Buffer.from('0000ftypremote-original'));
     }
     assert.equal(options.method, 'POST'); posts++; events.push('POST');
-    return Response.json({ request_id: 'owned-request', response_url: 'https://queue.fal.run/fal-ai/wan/requests/owned-request', status: 'IN_QUEUE' });
+    return submission();
   };
   const artifact = { uploadArtifact: async (name, files) => {
     const suffix = name.split('-').at(-1); events.push(`upload-${suffix}`);
+    if (suffix !== 'result') checkpoints.set(suffix, JSON.parse(await readFile(files[0], 'utf8')));
     if (failReceipt && suffix === 'receipt') throw new Error('transport contains private-provider-secret');
     assert.ok(files.length > 0); return { id: 1 };
   } };
@@ -112,7 +114,7 @@ async function workerFixture(t, failReceipt = false) {
     await writeFile(args.at(-1), Buffer.from('89504e470d0a1a0a00000000', 'hex'));
   };
   const env = { GITHUB_ACTIONS: 'true', GITHUB_RUN_ATTEMPT: '1', YTFUN_BATCH_PAID_ENABLED: 'true', HF_TOKEN: 'private-provider-secret', GITHUB_TOKEN: 'private-github-secret', GITHUB_WORKSPACE: directory, RUNNER_TEMP: directory, GITHUB_REPOSITORY: 'owner/repo', GITHUB_RUN_ID: '42', GITHUB_SHA: 'a'.repeat(40), SPHERE_INDEX: '1', AI_MEOW_BATCH_PACKET: gzipSync(JSON.stringify(packet)).toString('base64') };
-  return { env, artifact, client, fetchImpl, runner, events, posts: () => posts };
+  return { env, artifact, client, fetchImpl, runner, events, checkpoints, posts: () => posts };
 }
 
 test('reservation is remote before POST and receipt is remote before polling', async t => {
@@ -127,6 +129,85 @@ test('receipt persistence failure prevents polling and cannot trigger a replacem
   await assert.rejects(runWorker(setup), error => /reconciliation/.test(error.message) && !error.message.includes('private-provider-secret'));
   assert.equal(setup.posts(), 1);
   assert.deepEqual(setup.events, ['upload-reserved', 'POST', 'upload-receipt', 'upload-attention']);
+  const attention = setup.checkpoints.get('attention');
+  assert.equal(attention.spending[0].status, 'unknown');
+  assert.equal(attention.spending[0].remoteRequest.requestId, 'owned-request');
+  assert.deepEqual(attention.diagnostic, { version: 1, stage: 'receipt_persistence', httpStatus: null, providerPostAttempted: true, receiptCaptured: false, errorClass: 'Error' });
+  assert.equal(JSON.stringify(attention).includes('private-provider-secret'), false);
+});
+
+test('Hub GET 402 is diagnosed before any provider POST and keeps the reservation unknown', async t => {
+  const setup = await workerFixture(t); const originalFetch = setup.fetchImpl;
+  setup.fetchImpl = async (url, options) => String(url).startsWith('https://huggingface.co/api/models/')
+    ? Response.json({ error: 'private-provider-secret https://private.test/raw-body' }, { status: 402 })
+    : originalFetch(url, options);
+  setup.client = { imageToVideo: async (_args, options) => {
+    assert.equal(options.retry_on_error, false);
+    const response = await options.fetch('https://huggingface.co/api/models/owned/model?expand[]=inferenceProviderMapping');
+    throw new InferenceClientHubApiError('private-provider-secret', { url: 'https://private.test', method: 'GET' }, { status: response.status, requestId: 'private-request', body: await response.json() });
+  } };
+  await assert.rejects(runWorker(setup), /reconciliation/);
+  const attention = setup.checkpoints.get('attention');
+  assert.equal(setup.posts(), 0);
+  assert.deepEqual(setup.events, ['upload-reserved', 'upload-attention']);
+  assert.equal(attention.spending[0].status, 'unknown');
+  assert.equal(attention.spending[0].remoteRequest, undefined);
+  assert.deepEqual(attention.diagnostic, { version: 1, stage: 'hub_lookup', httpStatus: 402, providerPostAttempted: false, receiptCaptured: false, errorClass: 'InferenceClientHubApiError' });
+  assert.equal(JSON.stringify(attention).includes('private'), false);
+});
+
+test('provider POST 402 is diagnosed without interpreting its missing receipt as permission to retry', async t => {
+  const setup = await workerFixture(t, false, () => Response.json({ error: 'private-provider-secret https://private.test/raw-body' }, { status: 402 }));
+  setup.client = { imageToVideo: async (_args, options) => {
+    assert.equal(options.retry_on_error, false);
+    const response = await options.fetch('https://router.huggingface.co/fal-ai/fal-ai/wan?_subdomain=queue', { method: 'POST', headers: { Authorization: 'Bearer private-provider-secret' } });
+    throw new InferenceClientProviderApiError('private-provider-secret', { url: 'https://private.test', method: 'POST', headers: { Authorization: 'Bearer private-provider-secret' }, body: { secret: 'private-body' } }, { status: response.status, requestId: 'private-request', body: await response.json() });
+  } };
+  await assert.rejects(runWorker(setup), /reconciliation/);
+  const attention = setup.checkpoints.get('attention');
+  assert.equal(setup.posts(), 1);
+  assert.deepEqual(setup.events, ['upload-reserved', 'POST', 'upload-attention']);
+  assert.equal(attention.spending[0].status, 'unknown');
+  assert.equal(attention.spending[0].remoteRequest, undefined);
+  assert.deepEqual(attention.diagnostic, { version: 1, stage: 'provider_submission', httpStatus: 402, providerPostAttempted: true, receiptCaptured: false, errorClass: 'InferenceClientProviderApiError' });
+  assert.equal(JSON.stringify(attention).includes('private'), false);
+});
+
+test('provider transport exception retains its safe class but cannot infer HTTP status or outcome', async t => {
+  const setup = await workerFixture(t, false, () => { throw new TypeError('Authorization: private-provider-secret https://private.test/raw-body'); });
+  await assert.rejects(runWorker(setup), error => /reconciliation/.test(error.message) && !error.message.includes('private-provider-secret'));
+  const attention = setup.checkpoints.get('attention');
+  assert.equal(setup.posts(), 1);
+  assert.deepEqual(setup.events, ['upload-reserved', 'POST', 'upload-attention']);
+  assert.equal(attention.spending[0].status, 'unknown');
+  assert.deepEqual(attention.diagnostic, { version: 1, stage: 'provider_submission', httpStatus: null, providerPostAttempted: true, receiptCaptured: false, errorClass: 'TypeError' });
+  assert.equal(JSON.stringify(attention).includes('private'), false);
+});
+
+test('SDK HTTP errors after a durable receipt retain numeric status without pretending polling was hooked', async t => {
+  const setup = await workerFixture(t); const originalClient = setup.client;
+  setup.client = { imageToVideo: async (args, options) => {
+    await originalClient.imageToVideo(args, options);
+    throw new InferenceClientProviderApiError('private-provider-secret', { url: 'https://private.test', method: 'GET' }, { status: 503, requestId: 'private-request', body: 'private-provider-secret' });
+  } };
+  await assert.rejects(runWorker(setup), /reconciliation/);
+  const attention = setup.checkpoints.get('attention');
+  assert.equal(setup.posts(), 1);
+  assert.equal(attention.spending[0].status, 'unknown');
+  assert.deepEqual(attention.diagnostic, { version: 1, stage: 'provider_response', httpStatus: 503, providerPostAttempted: true, receiptCaptured: true, errorClass: 'InferenceClientProviderApiError' });
+  assert.equal(JSON.stringify(attention).includes('private'), false);
+});
+
+test('unrecognized exception classes and loose status fields never enter attention diagnostics', async t => {
+  const secretError = class PrivateProviderSecret extends Error {};
+  const setup = await workerFixture(t, false, () => {
+    const error = new secretError('private-provider-secret'); error.status = 402; error.httpResponse = { status: '402', body: 'private-provider-secret' }; throw error;
+  });
+  await assert.rejects(runWorker(setup), /reconciliation/);
+  const attention = setup.checkpoints.get('attention');
+  assert.equal(attention.spending[0].status, 'unknown');
+  assert.deepEqual(attention.diagnostic, { version: 1, stage: 'provider_submission', httpStatus: null, providerPostAttempted: true, receiptCaptured: false, errorClass: 'UnknownError' });
+  assert.equal(JSON.stringify(attention).includes('private'), false);
 });
 
 test('CLI remains alive while the SDK-style polling timer is unreferenced', async () => {

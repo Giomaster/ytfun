@@ -1,4 +1,4 @@
-import { InferenceClient } from '@huggingface/inference';
+import { InferenceClient, InferenceClientHubApiError, InferenceClientProviderApiError } from '@huggingface/inference';
 import { DefaultArtifactClient } from '@actions/artifact';
 import { gunzipSync } from 'node:zlib';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
@@ -6,6 +6,57 @@ import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { falQueueReceiptFetch } from '../src/fal-queue-receipt.mjs';
 import { BATCH_PARAMETERS, hash, packetHash, sourceUrl, validatePacket } from '../src/remote-batch.mjs';
+
+const ERROR_CLASSES = new Set(['Error', 'TypeError', 'RangeError', 'SyntaxError', 'InferenceClientInputError', 'InferenceClientRoutingError', 'InferenceClientProviderApiError', 'InferenceClientHubApiError', 'InferenceClientProviderOutputError']);
+function safeErrorClass(error) {
+  try {
+    if (error instanceof DOMException && ['AbortError', 'TimeoutError'].includes(error.name)) return error.name;
+    const name = error?.constructor?.name;
+    return ERROR_CLASSES.has(name) ? name : 'UnknownError';
+  } catch { return 'UnknownError'; }
+}
+const httpStatus = value => Number.isInteger(value) && value >= 100 && value <= 599 ? value : null;
+
+// Only the supported SDK fetch hook is observed; never inspect bodies, headers or
+// exception messages. SDK polling/media fetches bypass this hook in 4.13.30.
+function generationDiagnostic(fetchImpl) {
+  const state = { stage: 'sdk_preflight', httpStatus: null, providerPostAttempted: false, receiptCaptured: false };
+  let causeClass = null;
+  const setStage = stage => { state.stage = stage; state.httpStatus = null; causeClass = null; };
+  return {
+    setStage,
+    receiptCaptured: () => { state.receiptCaptured = true; setStage('provider_response'); },
+    captureError: error => { causeClass = safeErrorClass(error); },
+    fetch: async (input, options = {}) => {
+      const method = (options.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
+      let stage = 'sdk_fetch';
+      if (method === 'POST') stage = 'provider_submission';
+      else {
+        try {
+          const url = new URL(input instanceof Request ? input.url : input);
+          if (method === 'GET' && url.origin === 'https://huggingface.co' && url.pathname.startsWith('/api/models/')) stage = 'hub_lookup';
+        } catch { /* Classification has no bearing on the existing fetch/URL guards. */ }
+      }
+      setStage(stage);
+      // falQueueReceiptFetch validates the POST URL and duplicate guard before
+      // invoking this fetch. This flag means dispatch attempted, not charge proven.
+      if (method === 'POST') state.providerPostAttempted = true;
+      try {
+        const response = await fetchImpl(input, options);
+        if (!response.ok) state.httpStatus = httpStatus(response.status);
+        else if (method === 'POST') setStage('queue_receipt');
+        return response;
+      } catch (error) { causeClass = safeErrorClass(error); throw error; }
+    },
+    failure: error => {
+      let status = state.httpStatus;
+      // The pinned SDK exposes numeric HTTP status on these two error types,
+      // including polling failures that the supported fetch hook cannot observe.
+      if (status === null && (error instanceof InferenceClientHubApiError || error instanceof InferenceClientProviderApiError)) status = httpStatus(error.httpResponse?.status);
+      return { version: 1, ...state, httpStatus: status, errorClass: causeClass ?? safeErrorClass(error) };
+    },
+  };
+}
 
 export function unpackPacket(value, expectedHash) {
   if (typeof value !== 'string' || value.length > 65536) throw new Error('Private batch packet missing or oversized');
@@ -86,13 +137,22 @@ async function worker({ env = process.env, artifact = new DefaultArtifactClient(
   if (reference.length > 100 * 1024 * 1024 || reference.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a') throw new Error('Original frame extraction failed');
   ledger.referenceImageSha256 = hash(reference);
   await checkpoint('reserved');
-  const store = { transaction: async fn => { const value = fn(ledger); await checkpoint('receipt'); return value; } };
+  const diagnostic = generationDiagnostic(fetchImpl);
+  const store = { transaction: async fn => {
+    diagnostic.setStage('receipt_persistence');
+    try {
+      const value = fn(ledger); await checkpoint('receipt');
+      diagnostic.receiptCaptured(); return value;
+    } catch (error) { diagnostic.captureError(error); throw error; }
+  } };
   try {
     const sdk = client ?? new InferenceClient(env.HF_TOKEN);
-    const output = await sdk.imageToVideo({ model: packet.model, provider: packet.provider, inputs: new Blob([reference], { type: 'image/png' }), parameters: { ...BATCH_PARAMETERS, seed: scene.seed, prompt: scene.prompt } }, { retry_on_error: false, fetch: falQueueReceiptFetch(store, scene.reservationId, { fetchImpl }) });
+    const output = await sdk.imageToVideo({ model: packet.model, provider: packet.provider, inputs: new Blob([reference], { type: 'image/png' }), parameters: { ...BATCH_PARAMETERS, seed: scene.seed, prompt: scene.prompt } }, { retry_on_error: false, fetch: falQueueReceiptFetch(store, scene.reservationId, { fetchImpl: diagnostic.fetch }) });
+    diagnostic.setStage('output_validation');
     if (!(output instanceof Blob) || output.size < 12 || output.size > 100 * 1024 * 1024 || output.type.split(';')[0] !== 'video/mp4') throw new Error('Provider output is not a bounded MP4');
     const bytes = Buffer.from(await output.arrayBuffer());
     if (bytes.toString('ascii', 4, 8) !== 'ftyp' || !ledger.spending[0].remoteRequest) throw new Error('MP4 header or durable queue receipt is missing');
+    diagnostic.setStage('result_persistence');
     const filename = join(directory, 'original-result.mp4');
     await writeFile(filename, bytes, { mode: 0o600 });
     ledger.status = 'completed'; ledger.sha256 = hash(bytes); ledger.remoteRequest = ledger.spending[0].remoteRequest; ledger.completedAt = new Date().toISOString(); ledger.spending[0].status = 'completed';
@@ -100,8 +160,9 @@ async function worker({ env = process.env, artifact = new DefaultArtifactClient(
     await writeFile(resultFile, JSON.stringify(ledger), { mode: 0o600 });
     await upload('result', [resultFile, filename, referencePath]);
     return { batchId: packet.id, index: scene.index, status: 'completed', sha256: ledger.sha256 };
-  } catch {
+  } catch (error) {
     ledger.status = 'attention'; ledger.spending[0].status = 'unknown';
+    ledger.diagnostic = diagnostic.failure(error);
     await checkpoint('attention').catch(() => {});
     throw new Error('Remote generation needs reconciliation. Its reservation and queue receipt are preserved; no replacement was submitted');
   }
