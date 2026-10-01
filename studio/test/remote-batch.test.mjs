@@ -171,4 +171,9 @@ test('quality retakes require exact observed rejection and changed direction whi
   assert.equal(retake.scenes[0].replacesRejectedAssetId, assetId); assert.equal(retake.scenes[0].seed, packet.scenes[0].seed + 1000);
   const state = await store.read(); assert.equal(state.spending.length, 2); assert.equal(state.spending[0].status, 'completed'); assert.equal(state.assets.at(-1).id, assetId);
   await assert.rejects(service.reserve(changed), /reconciled/);
+  await service.bindRun({ batchId: retake.id, runId: '55', commitSha: 'c'.repeat(40), packetSha256: packetHash(retake) });
+  const skippedRetake = new RemoteBatch(store, { repository: 'owner/repo', githubToken: 'private-token', fetchImpl: async () => Response.json({ id: 88, run_id: 55, head_sha: 'c'.repeat(40), name: 'sphere (1)', status: 'completed', steps: [{ name: 'Run actions/github-script@v7', status: 'completed', conclusion: 'skipped' }] }) });
+  await skippedRetake.releaseUnsubmitted({ batchId: retake.id, sceneId, jobId: 88 });
+  const after = await store.read(); assert.equal(after.spending[0].status, 'completed'); assert.equal(after.spending[1].actualCostUsd, 0); assert.equal(after.assets.at(-1).id, assetId);
+  const safeReplacement = await service.reserve(changed); assert.notEqual(safeReplacement.id, retake.id);
 });

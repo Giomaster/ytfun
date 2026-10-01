@@ -107,7 +107,8 @@ export class RemoteBatch {
     return this.store.transaction(draft => {
       const current = draft.productionBatches.find(x => x.id === batchId); context(draft, batch.packet.episodeId);
       const reservation = draft.spending.find(x => x.id === scene.reservationId);
-      if (current.remoteRun.runId !== batch.remoteRun.runId || reservation.status !== 'reserved' || reservation.remoteRequest || draft.assets.some(x => x.episodeId === batch.packet.episodeId && x.sceneId === sceneId && x.kind === 'video')) throw new Error('Submission evidence or generation outcome changed');
+      const existing = draft.assets.findLast(x => x.episodeId === batch.packet.episodeId && x.sceneId === sceneId && x.kind === 'video');
+      if (current.remoteRun.runId !== batch.remoteRun.runId || reservation.status !== 'reserved' || reservation.remoteRequest || reservation.assetId || (existing && existing.id !== scene.replacesRejectedAssetId)) throw new Error('Submission evidence or generation outcome changed');
       reservation.status = 'failed'; reservation.actualCostUsd = 0; reservation.unsubmittedEvidence = { url: job.html_url ?? url, jobId: String(jobId), runId: current.remoteRun.runId, commitSha: job.head_sha, providerStep: 'skipped', verifiedAt: new Date().toISOString() }; current.status = 'attention';
       return reservation.unsubmittedEvidence;
     });
