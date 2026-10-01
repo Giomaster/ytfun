@@ -8,6 +8,7 @@ import { Studio } from '../src/domain.mjs';
 import { Production } from '../src/production.mjs';
 import { ProductionJobs } from '../src/jobs.mjs';
 import { InferenceClient } from '@huggingface/inference';
+import { randomUUID } from 'node:crypto';
 
 // Small signatures are intentional: these tests exercise contracts with a fake
 // inference client/process runner. They never perform inference or media encoding.
@@ -32,6 +33,127 @@ async function setup(t, { budgetMonthlyUsd = null, sceneCount = 1, audioMode } =
 function generation(episode, overrides = {}) {
   return { episodeId: episode.id, sceneId: episode.scenes[0].id, kind: 'image', model: 'example/licensed-model', provider: 'hf-inference', estimatedCostUsd: 0, pricingSourceUrl: 'https://provider.example/pricing', commercialLicense: license, ...overrides };
 }
+
+async function interruptedFalGeneration(t, { withJob = false } = {}) {
+  const context = await setup(t, { audioMode: 'silent' });
+  const jobId = withJob ? randomUUID() : undefined;
+  if (withJob) await context.store.transaction(state => {
+    state.productionJobs = [{ id: jobId, action: 'generate', episodeId: context.episode.id, status: 'running' }];
+  });
+  let posts = 0;
+  const input = generation(context.episode, { kind: 'video', provider: 'fal-ai', model: 'Wan-AI/Wan2.2-TI2V-5B',
+    videoParameters: { resolution: '720p', aspect_ratio: '9:16', num_frames: 121, frames_per_second: 24, seed: 20261002, interpolator_model: 'none', num_interpolated_frames: 0 },
+    estimatedCostUsd: 0.15, acknowledgePaidCost: true, ...(withJob ? { productionJobId: jobId } : {}) });
+  const initial = new Production(context.store, { env: { ...env, YTFUN_PAID_GENERATION_ENABLED: 'true' },
+    fetchImpl: async (url, options) => {
+      assert.equal(options.method, 'POST');
+      posts += 1;
+      return Response.json({ request_id: 'request-123', status: 'IN_QUEUE', response_url: 'https://queue.fal.run/fal-ai/wan/requests/request-123' });
+    }, inferenceClient: { textToVideo: async (args, options) => {
+      await options.fetch('https://router.huggingface.co/fal-ai/fal-ai/wan/v2.2-5b/text-to-video?_subdomain=queue', { method: 'POST' });
+      throw new Error('private-provider-timeout');
+    } } });
+  await assert.rejects(initial.generateAsset(input), /Generation failed after reservation/);
+  const reservation = (await context.store.read()).spending[0];
+  assert.equal(reservation.status, 'unknown');
+  assert.equal(posts, 1);
+  return { ...context, input, reservation, jobId };
+}
+
+test('24fps Wan5B recovery reconciles the original unknown reservation without a POST or additional cost', async t => {
+  const context = await interruptedFalGeneration(t);
+  const replies = [Response.json({ status: 'IN_PROGRESS' }), Response.json({ status: 'COMPLETED' }),
+    Response.json({ video: { url: 'https://v3.fal.media/pilot.mp4' } }), new Response(MP4, { headers: { 'content-type': 'video/mp4' } })];
+  let gets = 0;
+  const recovery = new Production(context.store, { env, inferenceClient: { textToVideo: async () => assert.fail('Recovery must never invoke inference') },
+    fetchImpl: async (url, options) => {
+      assert.equal(options.method, 'GET');
+      gets += 1;
+      assert.ok(replies.length);
+      return replies.shift();
+    } });
+  const input = { ...context.input, acknowledgePaidCost: false, resumeReservationId: context.reservation.id };
+  assert.deepEqual(await recovery.generateAsset(input), { reservationId: context.reservation.id, status: 'pending', remoteStatus: 'IN_PROGRESS', submitted: false });
+  const pending = await context.store.read();
+  assert.equal(pending.spending[0].status, 'unknown');
+  assert.equal(pending.assets.length, 0);
+  const asset = await recovery.generateAsset(input);
+  assert.equal(asset.kind, 'video');
+  assert.deepEqual(asset.provenance.videoParameters, context.input.videoParameters);
+  assert.deepEqual(await readFile(resolve(context.directory, asset.path)), MP4);
+  assert.deepEqual(await recovery.generateAsset(input), asset);
+  assert.equal(gets, 4);
+  const state = await context.store.read();
+  assert.equal(state.spending.length, 1);
+  assert.equal(state.assets.length, 1);
+  assert.equal(state.spending[0].estimatedCostUsd, 0.15);
+  assert.equal(state.spending[0].status, 'completed');
+  assert.equal(state.spending[0].assetId, asset.id);
+  assert.equal(state.spending[0].recoveryClaim, undefined);
+  assert.equal(state.spending[0].error, undefined);
+  assert.doesNotMatch(JSON.stringify(state), /private-provider-timeout|fake-token/);
+});
+
+test('receipt recovery blocks changed provenance, absent receipts and active original jobs before HTTP', async t => {
+  const context = await interruptedFalGeneration(t, { withJob: true });
+  let gets = 0;
+  const production = new Production(context.store, { env, fetchImpl: async () => { gets += 1; assert.fail('Rejected recovery reached the network'); } });
+  const input = { ...context.input, resumeReservationId: context.reservation.id };
+  await assert.rejects(production.generateAsset(input), /original generation worker is still active/);
+  await context.store.transaction(state => { state.productionJobs[0].status = 'failed'; });
+  for (const overrides of [{ prompt: 'Changed original intent' }, { model: 'other/model' }, { estimatedCostUsd: 0 },
+    { commercialLicense: { ...license, notes: 'Changed license attestation' } }, { videoParameters: { ...context.input.videoParameters, seed: 7 } }]) {
+    await assert.rejects(production.generateAsset({ ...input, ...overrides }), /match the original persisted generation request/);
+  }
+  await context.store.transaction(state => { delete state.spending[0].remoteRequest; });
+  await assert.rejects(production.generateAsset(input), /persisted remote queue receipt is required/);
+  assert.equal(gets, 0);
+  assert.equal((await context.store.read()).spending.length, 1);
+});
+
+test('a reserved request can resume only after its original job is truthfully reconciled as stopped', async t => {
+  const context = await interruptedFalGeneration(t, { withJob: true });
+  const input = { ...context.input, resumeReservationId: context.reservation.id };
+  await context.store.transaction(state => {
+    state.spending[0].status = 'reserved';
+    state.productionJobs[0].status = 'interrupted';
+  });
+  const production = new Production(context.store, { env, fetchImpl: async (url, options) => {
+    assert.equal(options.method, 'GET');
+    return Response.json({ status: 'IN_QUEUE' });
+  } });
+  assert.equal((await production.generateAsset(input)).status, 'pending');
+  await context.store.transaction(state => { delete state.spending[0].productionJobId; });
+  await assert.rejects(production.generateAsset(input), /reconciliation of its stopped original worker/);
+});
+
+test('concurrent recovery claims share no asset mutation and never repeat a submission', async t => {
+  const context = await interruptedFalGeneration(t);
+  let release;
+  let entered;
+  const ready = new Promise(resolve => { entered = resolve; });
+  const blocked = new Promise(resolve => { release = resolve; });
+  let gets = 0;
+  const production = new Production(context.store, { env, fetchImpl: async (url, options) => {
+    assert.equal(options.method, 'GET');
+    gets += 1;
+    entered();
+    await blocked;
+    return Response.json({ status: 'IN_PROGRESS' });
+  } });
+  const input = { ...context.input, resumeReservationId: context.reservation.id };
+  const first = production.generateAsset(input);
+  try {
+    await ready;
+    await assert.rejects(production.generateAsset(input), /already being retrieved/);
+  } finally { release(); }
+  assert.equal((await first).status, 'pending');
+  assert.equal(gets, 1);
+  const state = await context.store.read();
+  assert.equal(state.spending.length, 1);
+  assert.equal(state.assets.length, 0);
+  assert.equal(state.spending[0].recoveryClaim, undefined);
+});
 
 async function addSourceAssets(context, production, { alsoVideo = false, includeAudio = context.episode.audioMode !== 'silent' } = {}) {
   const sourceImage = join(context.directory, 'source.png');

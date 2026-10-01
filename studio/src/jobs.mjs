@@ -11,7 +11,7 @@ export class ProductionJobs {
 
   async start({ action, input }) {
     if (!['generate', 'render'].includes(action)) throw new Error('action must be generate or render');
-    const job = { id: randomUUID(), action, episodeId: input.episodeId, status: 'running', createdAt: new Date().toISOString() };
+    const job = { id: randomUUID(), action, episodeId: input.episodeId, ...(input.resumeReservationId === undefined ? {} : { resumeReservationId: input.resumeReservationId }), status: 'running', createdAt: new Date().toISOString() };
     await this.store.transaction(state => {
       if (!state.episodes.some(episode => episode.id === input.episodeId)) throw new Error('Episode not found');
       state.productionJobs ??= [];
@@ -27,7 +27,7 @@ export class ProductionJobs {
 
   async #execute(job, input) {
     try {
-      const result = await (job.action === 'generate' ? this.production.generateAsset(input) : this.production.renderEpisode(input));
+      const result = await (job.action === 'generate' ? this.production.generateAsset({ ...input, productionJobId: job.id }) : this.production.renderEpisode(input));
       await this.store.transaction(state => {
         const record = state.productionJobs.find(item => item.id === job.id);
         Object.assign(record, { status: 'completed', result, completedAt: new Date().toISOString() });

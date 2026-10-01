@@ -132,6 +132,15 @@ recibos retroativamente. A
 pode continuar processando após timeout do cliente; a reconciliação requer
 inspeção do provider antes de qualquer novo envio.
 
+Para recuperar uma tentativa com recibo, envie `resumeReservationId` em
+`ytfun_asset_generate` (ou no input do job), mantendo episódio, cena, modelo,
+prompt, parâmetros, licença e estimativa originais. A operação faz somente GET:
+retorna `pending` enquanto a fila trabalha e registra o MP4 quando concluído,
+sem nova reserva ou nova inferência. Recusa worker original ativo/não reconciliado
+e recuperação concorrente. Novas reservas guardam a intenção e o job original;
+reservas antigas sem esses dados não são reconstruídas. URLs/erros/credenciais
+remotos não são expostos; JSON tem limite de 64 KiB e MP4 de 100 MiB.
+
 ## Contratos de operação
 
 O `state.json` versionado guarda projetos, episódios, tendências, assets,
@@ -154,7 +163,7 @@ reservas/futuros e não faz afirmações sobre uma frequência oficial antispam.
 
 Geração de vídeo aceita `videoParameters` opcional na ferramenta direta e no job.
 O subconjunto explícito admite resolução 480p/580p/720p, proporção 16:9/9:16,
-81–121 quadros inteiros, 16 fps, 1–40 passos, seed de 0 a 2³²−1, interpolador
+81–121 quadros inteiros, 16 ou 24 fps, 1–40 passos, seed de 0 a 2³²−1, interpolador
 `none`, zero quadros interpolados e expansão de prompt booleana. Sem parâmetros,
 os defaults atuais do provedor ficam intactos. Parâmetros usados ficam na reserva
 e na proveniência; a estimativa e a autorização de custo continuam explícitas.

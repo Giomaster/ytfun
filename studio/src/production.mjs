@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process';
 import { z } from 'zod';
 import { episodeReviewHash } from './domain.mjs';
 import { falQueueReceiptFetch } from './fal-queue-receipt.mjs';
+import { recoverFalVideo } from './fal-queue-recovery.mjs';
 
 const MAX_ASSET_BYTES = 100 * 1024 * 1024;
 const MAX_PROBE_BYTES = 1024 * 1024;
@@ -23,7 +24,7 @@ export const videoParametersSchema = z.strictObject({
   resolution: z.enum(['480p', '580p', '720p']).optional(),
   aspect_ratio: z.enum(['16:9', '9:16']).optional(),
   num_frames: z.number().int().min(81).max(121).optional(),
-  frames_per_second: z.literal(16).optional(),
+  frames_per_second: z.union([z.literal(16), z.literal(24)]).optional(),
   num_inference_steps: z.number().int().min(1).max(40).optional(),
   seed: z.number().int().min(0).max(4_294_967_295).optional(),
   interpolator_model: z.literal('none').optional(),
@@ -255,7 +256,7 @@ export class Production {
     this.fetch = fetchImpl;
   }
 
-  async generateAsset({ episodeId, sceneId, kind, model, provider, prompt, videoParameters, estimatedCostUsd, pricingSourceUrl, commercialLicense, acknowledgePaidCost = false }) {
+  async generateAsset({ episodeId, sceneId, kind, model, provider, prompt, videoParameters, estimatedCostUsd, pricingSourceUrl, commercialLicense, acknowledgePaidCost = false, resumeReservationId, productionJobId }) {
     requireKind(kind);
     const parameters = videoParametersFor(kind, videoParameters);
     model = requiredText(model, 'model', 300);
@@ -264,20 +265,25 @@ export class Production {
     const license = evidence(commercialLicense);
     const pricing = evidence({ url: pricingSourceUrl, notes: 'Caller-supplied estimate; zero does not prove the provider will not bill.' });
     if (!Number.isFinite(estimatedCostUsd) || estimatedCostUsd < 0) throw new Error('estimatedCostUsd must be an explicit nonnegative finite estimate');
-    if (estimatedCostUsd > 0 && (acknowledgePaidCost !== true || this.env.YTFUN_PAID_GENERATION_ENABLED !== 'true')) throw new Error('Paid generation needs explicit per-call cost acknowledgment and YTFUN_PAID_GENERATION_ENABLED=true');
     const initial = await this.store.read();
     const context = sceneContext(initial, episodeId, sceneId);
     requireProductionKind(context.episode, kind);
     if (!this.env.HF_TOKEN) throw new Error('HF_TOKEN is required for cloud inference');
     const inputs = requiredText(prompt ?? (kind === 'audio' ? context.scene.narration : context.scene.visualPrompt), 'prompt');
+    if (resumeReservationId !== undefined) return this.recoverAsset({
+      episodeId, sceneId, kind, model, provider, inputs, parameters, estimatedCostUsd,
+      pricingSourceUrl: pricing.url, commercialLicense: license, resumeReservationId,
+    });
+    if (estimatedCostUsd > 0 && (acknowledgePaidCost !== true || this.env.YTFUN_PAID_GENERATION_ENABLED !== 'true')) throw new Error('Paid generation needs explicit per-call cost acknowledgment and YTFUN_PAID_GENERATION_ENABLED=true');
     const id = randomUUID();
     await this.store.transaction((state) => {
       const { episode, project } = sceneContext(state, episodeId, sceneId);
       mutableEpisode(episode, state);
       requireProductionKind(episode, kind);
+      if (productionJobId !== undefined && !state.productionJobs?.some(job => job.id === productionJobId && job.action === 'generate' && job.episodeId === episodeId && job.status === 'running')) throw new Error('Generation job is not the active owner of this episode request');
       if (hasPendingGeneration(state, episodeId, sceneId, kind)) throw new Error('A previous generation is reserved or has an unknown charge outcome; reconcile it before retrying');
       assertBudget(state, project, estimatedCostUsd);
-      state.spending.push({ id, projectId: project.id, episodeId, sceneId, kind, provider, model, ...(parameters === undefined ? {} : { videoParameters: { ...parameters } }), estimatedCostUsd, pricingSourceUrl: pricing.url, priceNote: pricing.notes, status: 'reserved', createdAt: new Date().toISOString() });
+      state.spending.push({ id, projectId: project.id, episodeId, sceneId, kind, provider, model, prompt: inputs, commercialLicense: license, ...(productionJobId === undefined ? {} : { productionJobId }), ...(parameters === undefined ? {} : { videoParameters: { ...parameters } }), estimatedCostUsd, pricingSourceUrl: pricing.url, priceNote: pricing.notes, status: 'reserved', createdAt: new Date().toISOString() });
       invalidate(episode);
     });
     let asset;
@@ -334,6 +340,103 @@ export class Production {
       // Provider exceptions may embed request headers, URLs or response bodies.
       // Never return them through MCP or persist them in the job/state records.
       throw new Error(`Generation failed after reservation ${id}; reconcile the provider outcome before retrying.`);
+    }
+  }
+
+  async recoverAsset({ episodeId, sceneId, kind, model, provider, inputs, parameters, estimatedCostUsd, pricingSourceUrl, commercialLicense, resumeReservationId }) {
+    if (kind !== 'video' || provider !== 'fal-ai' || typeof resumeReservationId !== 'string' ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(resumeReservationId)) throw new Error('Recovery requires the UUID of an existing fal-ai video reservation');
+    const attemptId = randomUUID();
+    const claim = await this.store.transaction(state => {
+      const { episode } = sceneContext(state, episodeId, sceneId);
+      mutableEpisode(episode, state);
+      const reservation = state.spending.find(item => item.id === resumeReservationId);
+      if (!reservation || reservation.episodeId !== episodeId || reservation.sceneId !== sceneId ||
+          reservation.kind !== kind || reservation.provider !== provider || reservation.model !== model ||
+          reservation.prompt !== inputs || reservation.estimatedCostUsd !== estimatedCostUsd ||
+          reservation.pricingSourceUrl !== pricingSourceUrl ||
+          JSON.stringify(reservation.videoParameters) !== JSON.stringify(parameters) ||
+          JSON.stringify(reservation.commercialLicense) !== JSON.stringify(commercialLicense)) throw new Error('Recovery inputs must match the original persisted generation request');
+      if (reservation.status === 'completed') {
+        const asset = state.assets.find(item => item.id === reservation.assetId && item.episodeId === episodeId && item.sceneId === sceneId);
+        if (!asset) throw new Error('Completed generation has no recorded asset');
+        return { asset };
+      }
+      if (!['reserved', 'unknown'].includes(reservation.status) || !reservation.remoteRequest) throw new Error('A persisted remote queue receipt is required; recovery never submits a replacement');
+      const originalJob = state.productionJobs?.find(job => job.id === reservation.productionJobId);
+      if (originalJob?.status === 'running' || state.productionJobs?.some(job => job.action === 'generate' && job.episodeId === episodeId && job.status === 'running' && job.resumeReservationId !== resumeReservationId)) throw new Error('The original generation worker is still active or unreconciled');
+      if (reservation.status === 'reserved' && !['failed', 'interrupted'].includes(originalJob?.status)) throw new Error('A reserved generation requires reconciliation of its stopped original worker');
+      if (reservation.recoveryClaim && Date.parse(reservation.recoveryClaim.expiresAt) > Date.now()) throw new Error('This generation is already being retrieved');
+      reservation.recoveryClaim = { id: attemptId, expiresAt: new Date(Date.now() + 240_000).toISOString() };
+      return { receipt: reservation.remoteRequest };
+    });
+    if (claim.asset) return claim.asset;
+    let asset;
+    try {
+      const result = await recoverFalVideo(claim.receipt, { hfToken: this.env.HF_TOKEN, fetchImpl: this.fetch });
+      if (!result.blob) {
+        return await this.store.transaction(state => {
+          const reservation = state.spending.find(item => item.id === resumeReservationId);
+          if (reservation?.recoveryClaim?.id !== attemptId) throw new Error('Recovery claim changed');
+          if (reservation.status === 'completed') {
+            const existing = state.assets.find(item => item.id === reservation.assetId);
+            if (!existing) throw new Error('Completed generation has no recorded asset');
+            delete reservation.recoveryClaim;
+            return existing;
+          }
+          reservation.remoteRequest.status = result.remoteStatus;
+          reservation.remoteRequest.checkedAt = new Date().toISOString();
+          delete reservation.recoveryClaim;
+          return { reservationId: resumeReservationId, status: 'pending', remoteStatus: result.remoteStatus, submitted: false };
+        });
+      }
+      const bytes = Buffer.from(await result.blob.arrayBuffer());
+      asset = await saveAsset(this.store, bytes, detectType(bytes, 'video'), {
+        episodeId, sceneId, kind, provenance: { provider, model, prompt: inputs,
+          ...(parameters === undefined ? {} : { videoParameters: { ...parameters } }), commercialLicense },
+      });
+      const committed = await this.store.transaction(state => {
+        const { episode } = sceneContext(state, episodeId, sceneId);
+        mutableEpisode(episode, state);
+        const reservation = state.spending.find(item => item.id === resumeReservationId);
+        if (reservation?.recoveryClaim?.id !== attemptId) throw new Error('Recovery claim changed');
+        if (reservation.status === 'completed') {
+          const existing = state.assets.find(item => item.id === reservation.assetId);
+          if (!existing) throw new Error('Completed generation has no recorded asset');
+          delete reservation.recoveryClaim;
+          return { asset: existing, reused: true };
+        }
+        if (!['reserved', 'unknown'].includes(reservation.status)) throw new Error('Generation reservation changed during retrieval');
+        state.assets.push(asset);
+        reservation.status = 'completed';
+        reservation.assetId = asset.id;
+        reservation.completedAt = new Date().toISOString();
+        reservation.remoteRequest.status = 'COMPLETED';
+        reservation.remoteRequest.checkedAt = reservation.completedAt;
+        delete reservation.recoveryClaim;
+        delete reservation.error;
+        invalidate(episode);
+        return { asset, reused: false };
+      });
+      if (committed.reused) {
+        try { await rm(await internalPath(this.store, asset.path), { force: true }); }
+        catch { /* Cleanup must not hide the original completed asset. */ }
+      }
+      return committed.asset;
+    } catch {
+      if (asset) {
+        try { await rm(await internalPath(this.store, asset.path), { force: true }); }
+        catch { /* Path/cleanup failures must not skip recording the outcome. */ }
+      }
+      await this.store.transaction(state => {
+        const reservation = state.spending.find(item => item.id === resumeReservationId);
+        if (reservation?.recoveryClaim?.id === attemptId) {
+          delete reservation.recoveryClaim;
+          if (reservation.status === 'reserved') reservation.status = 'unknown';
+          reservation.recoveryError = 'The existing request could not be retrieved locally; preserve its receipt and do not submit again.';
+        }
+      }).catch(() => {});
+      throw new Error(`Recovery failed for reservation ${resumeReservationId}; preserve its receipt and do not submit again.`);
     }
   }
 

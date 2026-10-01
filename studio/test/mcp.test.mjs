@@ -30,7 +30,10 @@ test('stdio MCP negotiates, lists tools and persists a series across restarts', 
   assert.deepEqual(videoSchema.properties.resolution.enum, ['480p', '580p', '720p']);
   assert.equal(videoSchema.properties.num_frames.minimum, 81);
   assert.equal(videoSchema.properties.num_frames.maximum, 121);
-  assert.equal(videoSchema.properties.frames_per_second.const, 16);
+  assert.deepEqual(videoSchema.properties.frames_per_second.anyOf, [
+    { type: 'number', const: 16 },
+    { type: 'number', const: 24 },
+  ]);
   const jobSchema = tools.tools.find(tool => tool.name === 'ytfun_production_job_start').inputSchema;
   assert.match(JSON.stringify(jobSchema), /"videoParameters"/);
   const created = await client.callTool({ name: 'ytfun_project_create', arguments: { title: 'Arquivo das cidades impossíveis', premise: 'Uma cidade imaginária diferente por episódio.', audience: 'Pessoas interessadas em ficção especulativa.', language: 'pt-BR' } });
