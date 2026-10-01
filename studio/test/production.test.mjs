@@ -127,7 +127,10 @@ test('explicit video pilot parameters reach the SDK and survive in reservation a
     return new Blob([MP4], { type: 'video/mp4' });
   } } });
   const asset = await production.generateAsset(generation(context.episode, { kind: 'video', provider: 'fal-ai', videoParameters: pilotVideoParameters, estimatedCostUsd: 0.2, acknowledgePaidCost: true }));
-  assert.deepEqual(received, { args: { model: 'example/licensed-model', provider: 'fal-ai', inputs: context.episode.scenes[0].visualPrompt, parameters: pilotVideoParameters }, options: { retry_on_error: false } });
+  assert.deepEqual(received.args, { model: 'example/licensed-model', provider: 'fal-ai', inputs: context.episode.scenes[0].visualPrompt, parameters: pilotVideoParameters });
+  assert.equal(received.options.retry_on_error, false);
+  assert.equal(typeof received.options.fetch, 'function');
+  assert.deepEqual(Object.keys(received.options).sort(), ['fetch', 'retry_on_error']);
   assert.deepEqual(asset.provenance.videoParameters, pilotVideoParameters);
   assert.deepEqual(pilotVideoParameters.seed, 20261001);
   const state = await context.store.read();
@@ -191,20 +194,23 @@ test('asynchronous generation jobs forward partial parameters without adding omi
 test('the real SDK submits a paid video only once after 503 and preserves unknown billing', async (t) => {
   const context = await setup(t, { audioMode: 'silent' });
   let submissions = 0;
-  const client = new InferenceClient('hf_fake_ci_only', { retry_on_error: true, fetch: async (url, init) => {
+  const mockFetch = async (url, init) => {
     if (new URL(url).hostname === 'huggingface.co') {
       assert.match(new URL(url).pathname, /^\/api\/models\/ci-only\/wan-503-contract$/);
       return Response.json({ inferenceProviderMapping: { 'fal-ai': { providerId: 'fal-ai/wan/v2.2-a14b/text-to-video', status: 'live', task: 'text-to-video' } } });
     }
     assert.equal(init.method, 'POST');
+    assert.equal(url, 'https://router.huggingface.co/fal-ai/fal-ai/wan/v2.2-a14b/text-to-video?_subdomain=queue');
+    assert.equal(init.redirect, 'error');
     submissions += 1;
     // Bound the regression even if a future SDK starts retrying again.
     if (submissions > 1) throw new Error('A second submission is forbidden');
     const payload = JSON.parse(init.body);
     for (const [key, value] of Object.entries(pilotVideoParameters)) assert.deepEqual(payload[key], value);
     return Response.json({ error: 'Ambiguous failure with fake-provider-secret' }, { status: 503 });
-  } });
-  const production = new Production(context.store, { env: { ...env, YTFUN_PAID_GENERATION_ENABLED: 'true' }, inferenceClient: client });
+  };
+  const client = new InferenceClient('hf_fake_ci_only', { retry_on_error: true, fetch: mockFetch });
+  const production = new Production(context.store, { env: { ...env, YTFUN_PAID_GENERATION_ENABLED: 'true' }, inferenceClient: client, fetchImpl: mockFetch });
   const input = generation(context.episode, { kind: 'video', provider: 'fal-ai', model: 'ci-only/wan-503-contract', videoParameters: pilotVideoParameters, estimatedCostUsd: 0.2, acknowledgePaidCost: true });
   await assert.rejects(production.generateAsset(input), /Generation failed after reservation/);
   assert.equal(submissions, 1);
@@ -216,6 +222,90 @@ test('the real SDK submits a paid video only once after 503 and preserves unknow
   assert.doesNotMatch(JSON.stringify(state), /hf_fake_ci_only|fake-provider-secret/);
   await assert.rejects(production.generateAsset(input), /unknown charge outcome/);
   assert.equal(submissions, 1);
+});
+
+test('fal-ai queue identity commits before polling and survives an interrupted generation without resubmission', async (t) => {
+  const context = await setup(t, { audioMode: 'silent' });
+  const submissionUrl = 'https://router.huggingface.co/fal-ai/fal-ai/wan/v2.2-a14b/text-to-video?_subdomain=queue';
+  const responsePath = '/fal-ai/wan/requests/pilot-queue-123';
+  let submissions = 0;
+  let polling = 0;
+  const production = new Production(context.store, {
+    env: { ...env, YTFUN_PAID_GENERATION_ENABLED: 'true' },
+    fetchImpl: async (url, options) => {
+      assert.equal(url, submissionUrl);
+      assert.equal(options.method, 'POST');
+      submissions += 1;
+      return Response.json({ request_id: 'pilot-queue-123', response_url: `https://queue.fal.run${responsePath}`,
+        status: 'IN_QUEUE', logs: ['fake-provider-secret'], video: { url: 'https://media.example/video.mp4?token=fake-private-query' } });
+    },
+    inferenceClient: { textToVideo: async (_args, options) => {
+      assert.equal(options.retry_on_error, false);
+      const response = await options.fetch(submissionUrl, { method: 'POST', headers: { Authorization: 'Bearer fake-token' } });
+      const state = await context.store.read();
+      assert.equal(state.spending[0].status, 'reserved');
+      assert.deepEqual(state.spending[0].remoteRequest, { provider: 'fal-ai', transport: 'huggingface-router',
+        requestId: 'pilot-queue-123', submissionUrl, responsePath, status: 'IN_QUEUE', capturedAt: state.spending[0].remoteRequest.capturedAt });
+      assert.match(state.spending[0].remoteRequest.capturedAt, /^\d{4}-\d{2}-\d{2}T/);
+      assert.equal((await response.json()).request_id, 'pilot-queue-123');
+      polling += 1;
+      throw new Error('Simulated polling interruption with fake-provider-secret');
+    } },
+  });
+  const input = generation(context.episode, { kind: 'video', provider: 'fal-ai', estimatedCostUsd: 0.2, acknowledgePaidCost: true });
+  await assert.rejects(production.generateAsset(input), /Generation failed after reservation/);
+  const state = await context.store.read();
+  assert.equal(state.spending[0].status, 'unknown');
+  assert.equal(state.spending[0].remoteRequest.requestId, 'pilot-queue-123');
+  assert.equal(state.assets.length, 0);
+  assert.doesNotMatch(JSON.stringify(state), /fake-token|fake-provider-secret|fake-private-query|logs|media.example/);
+  await assert.rejects(production.generateAsset(input), /unknown charge outcome/);
+  assert.equal(submissions, 1);
+  assert.equal(polling, 1);
+});
+
+test('fal-ai receipt persistence failure prevents polling and preserves a sanitized retry barrier even if recording unknown fails', async (t) => {
+  for (const failUnknownCommit of [false, true]) {
+    const context = await setup(t, { audioMode: 'silent' });
+    const transaction = context.store.transaction.bind(context.store);
+    context.store.transaction = fn => transaction(state => {
+      const result = fn(state);
+      if (state.spending.some(item => item.remoteRequest || (failUnknownCommit && item.status === 'unknown'))) {
+        throw new Error('Simulated receipt commit failure: fake-private-storage');
+      }
+      return result;
+    });
+    let submissions = 0;
+    let polling = 0;
+    const production = new Production(context.store, {
+      env: { ...env, YTFUN_PAID_GENERATION_ENABLED: 'true' },
+      fetchImpl: async (_url, options) => {
+        assert.equal(options.method, 'POST');
+        submissions += 1;
+        return Response.json({ request_id: 'pilot-queue-123', status: 'IN_QUEUE',
+          response_url: 'https://queue.fal.run/fal-ai/wan/requests/pilot-queue-123' });
+      },
+      inferenceClient: { textToVideo: async (_args, options) => {
+        await options.fetch('https://router.huggingface.co/fal-ai/fal-ai/wan/v2.2-a14b/text-to-video?_subdomain=queue', { method: 'POST' });
+        polling += 1;
+        assert.fail('Polling cannot begin before the receipt commits');
+      } },
+    });
+    const input = generation(context.episode, { kind: 'video', provider: 'fal-ai', estimatedCostUsd: 0.2, acknowledgePaidCost: true });
+    await assert.rejects(production.generateAsset(input), error => {
+      assert.match(error.message, /Generation failed after reservation/);
+      assert.doesNotMatch(error.message, /fake-private-storage/);
+      return true;
+    });
+    const state = await context.store.read();
+    assert.equal(state.spending[0].status, failUnknownCommit ? 'reserved' : 'unknown');
+    assert.equal(state.spending[0].remoteRequest, undefined);
+    assert.equal(state.assets.length, 0);
+    assert.doesNotMatch(JSON.stringify(state), /fake-private-storage/);
+    await assert.rejects(production.generateAsset(input), /unknown charge outcome/);
+    assert.equal(submissions, 1);
+    assert.equal(polling, 0);
+  }
 });
 
 test('a caller may set an optional ceiling; pending and completed estimates count toward it', async (t) => {
@@ -666,4 +756,61 @@ test('persistent production jobs complete a silent video generation and render w
   assert.equal(done.result.hasAudio, false);
   assert.equal(done.result.captionsPath, undefined);
   assert.equal((await context.store.read()).spending[0].status, 'completed');
+});
+
+test('a missing saved asset during cleanup cannot bypass sanitized unknown billing or lose its queue receipt', async (t) => {
+  const context = await setup(t, { audioMode: 'silent' });
+  const transaction = context.store.transaction.bind(context.store);
+  let failedAssetCommits = 0;
+  context.store.transaction = fn => transaction(async state => {
+    const result = await fn(state);
+    if (state.assets.length > 0) {
+      failedAssetCommits += 1;
+      // The media file exists before its asset/state commit. Removing it here
+      // makes the subsequent cleanup's internalPath lookup fail with ENOENT.
+      await rm(resolve(context.directory, state.assets[0].path));
+      throw new Error('Simulated asset commit failure: fake-private-commit');
+    }
+    return result;
+  });
+  const submissionUrl = 'https://router.huggingface.co/fal-ai/fal-ai/wan/v2.2-a14b/text-to-video?_subdomain=queue';
+  const responsePath = '/fal-ai/wan/requests/cleanup-queue-123';
+  let submissions = 0;
+  const production = new Production(context.store, {
+    env: { ...env, YTFUN_PAID_GENERATION_ENABLED: 'true' },
+    fetchImpl: async (url, options) => {
+      assert.equal(url, submissionUrl);
+      assert.equal(options.method, 'POST');
+      submissions += 1;
+      assert.equal(submissions, 1, 'A second paid submission is forbidden');
+      return Response.json({ request_id: 'cleanup-queue-123', status: 'IN_QUEUE',
+        response_url: `https://queue.fal.run${responsePath}` });
+    },
+    inferenceClient: { textToVideo: async (_args, options) => {
+      const response = await options.fetch(submissionUrl, { method: 'POST' });
+      assert.equal((await response.json()).request_id, 'cleanup-queue-123');
+      return new Blob([MP4], { type: 'video/mp4' });
+    } },
+  });
+  const input = generation(context.episode, { kind: 'video', provider: 'fal-ai',
+    estimatedCostUsd: 0.2, acknowledgePaidCost: true });
+  await assert.rejects(production.generateAsset(input), error => {
+    assert.match(error.message, /Generation failed after reservation/);
+    assert.doesNotMatch(error.message, /fake-private-commit|ENOENT/);
+    assert.equal(error.message.includes(context.directory), false);
+    return true;
+  });
+  const state = await context.store.read();
+  assert.equal(failedAssetCommits, 1);
+  assert.equal(state.spending.length, 1);
+  assert.equal(state.spending[0].status, 'unknown');
+  assert.deepEqual(state.spending[0].remoteRequest, { provider: 'fal-ai', transport: 'huggingface-router',
+    requestId: 'cleanup-queue-123', submissionUrl, responsePath, status: 'IN_QUEUE',
+    capturedAt: state.spending[0].remoteRequest.capturedAt });
+  assert.match(state.spending[0].remoteRequest.capturedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.deepEqual(state.assets, []);
+  assert.doesNotMatch(JSON.stringify(state), /fake-private-commit|ENOENT/);
+  assert.equal(submissions, 1);
+  await assert.rejects(production.generateAsset(input), /unknown charge outcome/);
+  assert.equal(submissions, 1);
 });

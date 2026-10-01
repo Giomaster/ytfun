@@ -5,6 +5,7 @@ import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { spawn } from 'node:child_process';
 import { z } from 'zod';
 import { episodeReviewHash } from './domain.mjs';
+import { falQueueReceiptFetch } from './fal-queue-receipt.mjs';
 
 const MAX_ASSET_BYTES = 100 * 1024 * 1024;
 const MAX_PROBE_BYTES = 1024 * 1024;
@@ -246,11 +247,12 @@ function selectSceneAssets(state, episode) {
 
 /** Cloud inference and asynchronous rendering; no scraping or downloaded source footage. */
 export class Production {
-  constructor(store, { env = process.env, inferenceClient, runner = runCommand } = {}) {
+  constructor(store, { env = process.env, inferenceClient, runner = runCommand, fetchImpl = fetch } = {}) {
     this.store = store;
     this.env = env;
     this.inferenceClient = inferenceClient;
     this.runner = runner;
+    this.fetch = fetchImpl;
   }
 
   async generateAsset({ episodeId, sceneId, kind, model, provider, prompt, videoParameters, estimatedCostUsd, pricingSourceUrl, commercialLicense, acknowledgePaidCost = false }) {
@@ -285,6 +287,9 @@ export class Production {
       // Official SDK textToVideo/textToSpeech return Blob; textToImage is forced to Blob.
       // A 503 may have an ambiguous charge outcome; disable the SDK's recursive retry.
       const options = { retry_on_error: false, ...(kind === 'image' ? { outputType: 'blob' } : {}) };
+      // The SDK polls only after this supported hook returns its POST response.
+      // Preserve the remote queue identity before polling can outlive this worker.
+      if (kind === 'video' && provider === 'fal-ai') options.fetch = falQueueReceiptFetch(this.store, id, { fetchImpl: this.fetch });
       const output = await client[method]({ model, provider, inputs, ...(parameters === undefined ? {} : { parameters: { ...parameters } }) }, options);
       if (!(output instanceof Blob) || output.size === 0 || output.size > MAX_ASSET_BYTES) throw new Error('Inference response must be a nonempty Blob no larger than 100 MiB');
       const extension = MIME_EXTENSIONS[kind][output.type.toLowerCase().split(';')[0]];
@@ -306,15 +311,26 @@ export class Production {
         return asset;
       });
     } catch (error) {
-      if (asset) await rm(await internalPath(this.store, asset.path), { force: true }).catch(() => {});
-      await this.store.transaction((state) => {
-        const reservation = state.spending.find((item) => item.id === id);
-        if (reservation?.status === 'reserved') {
-          reservation.status = 'unknown';
-          reservation.error = 'Generation did not complete locally; provider billing must be reconciled before retrying.';
-          reservation.failedAt = new Date().toISOString();
+      if (asset) {
+        try {
+          await rm(await internalPath(this.store, asset.path), { force: true });
+        } catch {
+          // Cleanup/path failures cannot skip recording the uncertain outcome.
         }
-      });
+      }
+      try {
+        await this.store.transaction((state) => {
+          const reservation = state.spending.find((item) => item.id === id);
+          if (reservation?.status === 'reserved') {
+            reservation.status = 'unknown';
+            reservation.error = 'Generation did not complete locally; provider billing must be reconciled before retrying.';
+            reservation.failedAt = new Date().toISOString();
+          }
+        });
+      } catch {
+        // If storage is still unavailable, the committed reserved state remains
+        // a retry barrier. Never expose the secondary storage error or resubmit.
+      }
       // Provider exceptions may embed request headers, URLs or response bodies.
       // Never return them through MCP or persist them in the job/state records.
       throw new Error(`Generation failed after reservation ${id}; reconcile the provider outcome before retrying.`);

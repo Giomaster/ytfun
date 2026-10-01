@@ -108,6 +108,30 @@ registro de worker depois de inspeção do operador, preservando estados de
 cobrança/publicação incertos. Os jobs de produção são separados da
 [fila de distribuição](docs/delivery-queue.md), que guarda entregas já revisadas.
 
+Vídeos `fal-ai` enviados pelo router Hugging Face usam o hook público `Options.fetch`
+do SDK fixado em `4.13.30`. Antes de liberar a resposta do POST para polling, o
+worker grava `spending[].remoteRequest`: `requestId`, URL de envio, caminho de
+resultado remoto, status inicial e instante da captura. A validação aceita apenas
+HTTPS dos hosts esperados, o parâmetro fixo `?_subdomain=queue` e um caminho de
+resultado ligado ao mesmo ID. Headers, credenciais, logs e URLs de mídia assinadas
+não são persistidos. O POST recusa redirecionamentos e continua com
+`retry_on_error:false`; cada hook permite no máximo um POST.
+
+Falha de validação/gravação impede o polling e mantém a cobrança incerta. Se nem
+o registro de `unknown` puder ser gravado, a reserva `reserved` anterior continua
+bloqueando reenvio. O recibo é evidência de identidade da tentativa, sem confirmar
+fatura, sucesso ou mídia disponível; o status gravado não é atualizado por polling.
+Este contrato não implementa retomada automática. O SDK atual faz polling e
+download com seu `fetch` global, depois da captura, e o processo MCP ainda precisa
+ficar vivo. No SDK `4.13.30`, um `response_url` válido terminado em `/response`
+pode produzir polling em `/response/status` e falhar; o recibo validado permanece
+para reconciliação manual, sem garantir que a geração termine. Uma interrupção
+antes do commit pode deixar uma tentativa sem ID; reservas antigas não ganham
+recibos retroativamente. A
+[fila oficial fal.ai](https://fal.ai/docs/documentation/model-apis/inference/queue)
+pode continuar processando após timeout do cliente; a reconciliação requer
+inspeção do provider antes de qualquer novo envio.
+
 ## Contratos de operação
 
 O `state.json` versionado guarda projetos, episódios, tendências, assets,
