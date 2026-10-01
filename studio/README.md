@@ -7,8 +7,8 @@ série precisa ser combinado antes de entrar em produção.
 
 ## Direção acordada
 
-- Marca dos primeiros canais: **The AI Guy**, em YouTube, Facebook, TikTok e Kwai.
-  [Proposta visual](assets/brand/the-ai-guy/README.md) e
+- Marca dos primeiros canais: **AI Meow**, em YouTube, Facebook, TikTok e Kwai.
+  [Identidade visual aprovada](assets/brand/ai-meow/README.md) e
   [pesquisa de 75 plataformas/serviços](docs/monetization-landscape.md).
 - Qualquer formato feito inteiramente com IA: ficção, animação, humor, histórias,
   explicações factuais e novos experimentos.

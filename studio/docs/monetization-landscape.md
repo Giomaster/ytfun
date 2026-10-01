@@ -2,7 +2,7 @@
 
 Pesquisa em fontes oficiais consultadas em **30/09/2026**, considerando um criador residente no **Brasil**, obras concebidas e produzidas com IA e preferência por custo mínimo. O mapa cobre **75 plataformas/serviços distintos**, incluindo distribuição, apoio de fãs, licenciamento e programas encerrados. Formatos e aliases do mesmo serviço não são recontados — por exemplo, YouTube/Shorts, TikTok/LIVE, Vimeo/OTT e SOOP/AfreecaTV. Filmhub é contado como distribuidor; infraestrutura de pagamento e programas do mesmo serviço não acrescentam plataformas. O levantamento é amplo, sem alegar um inventário completo mundial. Programas privados e páginas que exigem login deixam lacunas explícitas.
 
-**Operação inicial escolhida: The AI Guy em YouTube, Facebook, TikTok e Kwai.** Essas quatro redes são os primeiros candidatos de receita por audiência, sujeitos à aprovação de cada conta e obra. Como expansão, avaliar Dailymotion após confirmar onboarding brasileiro e preparar podcast em vídeo para o Spotify, cuja expansão brasileira foi anunciada para **20/10/2026**. Instagram pode distribuir cortes e construir comunidade. Assinaturas e licenciamento podem acrescentar receita quando houver público ou catálogo adequado.
+**Operação inicial escolhida: AI Meow em YouTube, Facebook, TikTok e Kwai.** Essas quatro redes são os primeiros candidatos de receita por audiência, sujeitos à aprovação de cada conta e obra. Como expansão, avaliar Dailymotion após confirmar onboarding brasileiro e preparar podcast em vídeo para o Spotify, cuja expansão brasileira foi anunciada para **20/10/2026**. Instagram pode distribuir cortes e construir comunidade. Assinaturas e licenciamento podem acrescentar receita quando houver público ou catálogo adequado. [Direção visual de AI Meow](../assets/brand/ai-meow/README.md).
 
 “Disponível no Brasil” descreve um programa ou fluxo documentado, **não a aprovação das nossas contas**. “Não confirmado” significa que a pesquisa não obteve prova oficial suficiente; não significa proibição. Uma API de publicação, um rótulo IA ou acesso ao aplicativo não comprovam elegibilidade financeira.
 
@@ -218,7 +218,7 @@ As recomendações seguintes são decisões de produto propostas, não condiçõ
 
 | Etapa | Destinos | Resultado concreto |
 |---|---|---|
-| Inicial — The AI Guy | YouTube + Facebook + TikTok + Kwai; Instagram opcional de apoio | Série autoral, contas/elegibilidade verificadas, variante correta por destino e desempenho acompanhado |
+| Inicial — AI Meow | YouTube + Facebook + TikTok + Kwai; Instagram opcional de apoio | Série autoral, contas/elegibilidade verificadas, variante correta por destino e desempenho acompanhado |
 | Expansão por consumo | Dailymotion; Spotify após abertura brasileira e formato adequado; Rumble ads se elegível | Adicionar somente após confirmar admissão, payout e regra IA |
 | Receita de fãs | Escolher um entre Ko-fi/Patreon/Substack/Fanvue ou outro que combine com a série | Biblioteca/benefício premium com conversão observada; evitar fragmentar a comunidade sem demanda |
 | Experimentação | Lives interativas, Snapchat se Snap Star compatível; mercados regionais | Produto e idioma próprios, elegibilidade comprovada, orçamento/custo observável |

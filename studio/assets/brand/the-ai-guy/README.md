@@ -1,6 +1,6 @@
 # The AI Guy
 
-Marca escolhida pelo proprietário para YouTube, Facebook, TikTok e Kwai.
+Proposta anterior, substituída pela identidade aprovada [AI Meow](../ai-meow/README.md).
 As contas estão em criação; URLs/IDs e elegibilidade financeira não estão verificados.
 
 - `avatar.png`: monograma AI em fundo azul escuro, para foto de perfil.
