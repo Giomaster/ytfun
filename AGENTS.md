@@ -146,6 +146,18 @@ Quality, required checks and authorization are constraints, not token-saving opt
   character performance, lighting/effects/sound, continuity and acceptance evidence.
   Define how the action happens; visual adjectives and a desired result are insufficient.
   Apply details relevant to the shot; do not invent interactions merely to fill the sheet.
+- In every video, detail the relevant components deeply in each generation prompt,
+  not only in the directing sheet. Identify the subjects/tools/objects that carry
+  the action or payoff and specify their observable identity, shape/scale, material,
+  position/orientation, initial/final states, contacts, movement and responses where
+  applicable. Preserve their identity and geometry across frames and adjacent shots.
+  Concentrate detail on those components while keeping the number of independently
+  acting components small. Other elements may form scenery or a background that is
+  easy to preserve frame by frame: stable appearance/layout and simple behavior,
+  without incidental choreography or interactions. A background element that affects
+  the action becomes relevant and needs its own direction; simplify or split the shot
+  if its complexity exceeds the available controls. Depth of relevant detail does
+  not require describing every decoration or adding more simultaneous actions.
 - Design compatible reference frames from that choreography. Check camera, scale,
   identity, tool orientation, cutting plane and the positions of resulting parts.
   Every change needs a possible continuous path. Correct incompatible references

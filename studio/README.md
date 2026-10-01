@@ -20,6 +20,11 @@ série precisa ser combinado antes de entrar em produção.
   referências bonitas e fluidez não aprovam uma ação incoerente. A ficha é orientação
   editorial e não uma etapa automática do servidor. Som não verbal pode ser planejado;
   o perfil silencioso implementado ainda descarta áudio.
+- Em todo vídeo, detalhar muito no prompt os componentes relevantes para a ação,
+  seus materiais, geometria, contatos, movimento e continuidade. Manter poucos
+  elementos com ações independentes; os demais podem compor uma paisagem ou fundo
+  estável e simples de preservar entre frames. Elementos que interagem com a ação
+  passam a exigir direção própria; simplificar ou dividir o plano quando necessário.
 - Validar cada conceito em piloto barato antes de investir em qualidade maior; usar modelos pagos quando o ganho justificar o custo. A direção editorial prioriza vídeos longos com unidades que rendam shorts completos, sem fala ou texto. O perfil de render implementado abaixo mantém seus limites atuais. Sem teto
   mensal fixo por padrão. Cada chamada guarda estimativa e fonte de preço;
   operação paga exige reconhecimento por chamada e habilitação no ambiente.

@@ -26,6 +26,28 @@ efeitos sem função; escolher de acordo com o material, gênero e intenção. O
 global do AI Meow permanece visual, sem exigir silêncio absoluto como escolha
 artística; o perfil técnico silencioso atual ainda descarta áudio.
 
+## Em todo vídeo: componentes relevantes muito detalhados, fundo estável
+
+Cada prompt de geração deve detalhar muito os componentes relevantes para a ação,
+a leitura visual e o desfecho; não deixar essa direção apenas na ficha. Para cada
+personagem, objeto ou ferramenta relevante, definir identidade/aparência, forma e
+escala, material, posição/orientação, estado inicial/final, contatos, trajetória,
+evolução do movimento e respostas pertinentes. Explicitar o que permanece constante
+entre frames e planos. Não inventar propriedades ou interações sem função na cena.
+
+Concentrar a profundidade nesses componentes e manter poucos elementos com ações
+independentes por plano. Outros componentes podem compor uma paisagem ou fundo,
+com aparência e disposição estáveis e comportamento simples de manter entre frames.
+O fundo pode ser visualmente bonito e rico, sem exigir coreografia própria,
+figurantes em movimento ou interações incidentais. Se um elemento do fundo passa
+a ser puxado, cortado, transformado ou usado pelo personagem, ele se torna relevante
+e precisa de direção; reduzir a complexidade ou dividir o plano quando necessário.
+
+Traduzir os detalhes relevantes em ações observáveis na estrutura aceita pelo
+modelo. Profundidade não é enumerar toda decoração nem acumular ações simultâneas;
+o roteiro completo continua separado do prompt. Conferir na revisão se os componentes
+principais obedecem à direção e se o fundo mantém identidade e disposição coerentes.
+
 ## Ficha por plano
 
 Preencher os campos pertinentes ao plano; marcar como não aplicável o que não fizer
@@ -35,6 +57,7 @@ parte da cena. A ficha não exige cortes, personagens ou efeitos em toda obra.
 | --- | --- |
 | Obra e exceções | Gênero, tom, linguagem visual/sonora, regras do universo e alcance de cada impossibilidade deliberada. |
 | Função narrativa | O que o espectador precisa perceber e qual é a ação principal. |
+| Componentes relevantes e fundo | Quais elementos conduzem a ação/desfecho e exigem detalhe profundo no prompt; quais compõem apenas cenário estável e simples de manter entre frames. |
 | Estado inicial e final | Objetos presentes, posições, orientações e transformação esperada. |
 | Câmera e composição | Posição, perspectiva, enquadramento, foco e movimento deliberado ou câmera fixa. |
 | Geometria | Posição/orientação, contatos e eixos de movimento; plano de corte e trajetória das partes quando aplicável. |

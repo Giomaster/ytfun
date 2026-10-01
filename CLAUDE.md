@@ -45,6 +45,15 @@ unless the work explicitly departs from them. Direct visual and auditory pleasur
 through rhythm, anticipation/payoff, textures, lighting and synchronized sound;
 do not confuse language-free with mute or assert unsupported sound production.
 
+In every video generation prompt, detail the relevant components deeply: observable
+identity, shape/scale, material, position/orientation, initial/final states, contact,
+movement and responses where applicable, with continuity across frames and shots.
+Keep few independently acting components. Other elements may be scenery or a simple
+background with stable appearance/layout and easy frame-to-frame continuity, without
+incidental choreography. Anything that interacts with the action becomes relevant
+and needs direction; simplify or split the shot when necessary. Concentrate detail
+on the action's components rather than cataloguing decorations or adding actions.
+
 Make reference frames physically compatible with that choreography. Correct
 incompatible geometry before spending; still-frame approval does not approve
 animation. Keep the full directing plan and the model-specific prompt distinct:
