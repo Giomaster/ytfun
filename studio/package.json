@@ -8,6 +8,7 @@
   "bin": { "ytfun-mcp": "src/mcp.mjs" },
   "scripts": {
     "start": "node src/mcp.mjs",
+    "inspect:kwai-har": "node scripts/inspect-kwai-har.mjs",
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {

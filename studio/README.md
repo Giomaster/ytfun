@@ -166,6 +166,14 @@ internacional; APIs do Kuaishou chinês não são tratadas como compatíveis.
 Métricas manuais aceitam as quatro plataformas, mantendo valores e fontes
 separados. Nenhuma elegibilidade de monetização é inferida da exportação.
 
+A investigação de uma integração própria para Kwai começa pelo
+[inventário sanitizado de capturas](docs/kwai-capture.md). O comando offline
+`pnpm inspect:kwai-har /private/location/capture.har --host observed.kwai.com`
+analisa apenas hosts exatos escolhidos e omite segredos e valores. O host no
+exemplo não é um endpoint confirmado. Essa ferramenta não captura tráfego,
+não envia requisições e não habilita publicação na fila. HARs brutos devem
+ficar em armazenamento temporário privado, fora do repositório e das mídias.
+
 ## Políticas atuais consideradas — 30/09/2026
 
 - YouTube permite monetização de conteúdo original/autêntico; produção repetida

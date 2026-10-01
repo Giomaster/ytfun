@@ -102,6 +102,12 @@ O Kwai apresenta ferramentas de criação e legendas em
 Programa de Receita de Anúncios na Central do Criador em
 [Creators — Earn](https://www.kwai.com/creators/earn).
 
+Uma integração própria está em investigação através do fluxo real da conta
+autorizada. O [inventário offline de HAR](kwai-capture.md) ajuda a documentar
+as requisições observadas com dados sanitizados; ainda não existe um contrato
+empírico de upload/publicação confirmado nem um publisher Kwai implementado.
+O comando não muda o estado de nenhuma entrega ou publicação.
+
 ## Contrato do pacote revisado
 
 `publicationPackage({ platform, plan, episode, createdAt })` é um construtor puro.
