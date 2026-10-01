@@ -195,13 +195,19 @@ export class Publisher {
     }
     const mappings = episode.render?.sceneAssets;
     const scenes = episode.scenes ?? [];
+    const silent = episode.audioMode === 'silent';
+    if (silent && (episode.render?.audioMode !== 'silent' || episode.render?.hasAudio !== false ||
+        ['captionsPath', 'captionsSha256', 'captionsTiming'].some(key => episode.render?.[key] !== undefined) ||
+        (Array.isArray(mappings) && mappings.some(mapping => mapping.audioAssetId !== undefined)))) reasons.push('Silent publication requires a reviewed render with zero audio and no captions.');
+    if (!silent && episode.render?.audioMode === 'silent') reasons.push('Render audio mode does not match the episode.');
     if (!Array.isArray(mappings) || !Array.isArray(scenes) || scenes.length === 0 || mappings.length !== scenes.length ||
         new Set(mappings?.map((mapping) => mapping.sceneId)).size !== scenes.length) {
       reasons.push('Render must map every scene to its generated visual and audio assets.');
     } else {
       for (const scene of scenes) {
         const mapping = mappings.find((item) => item.sceneId === scene.id);
-        for (const [assetId, allowedKinds] of [[mapping?.visualAssetId, ['image', 'video']], [mapping?.audioAssetId, ['audio']]]) {
+        const assets = [[mapping?.visualAssetId, ['image', 'video']], ...(!silent ? [[mapping?.audioAssetId, ['audio']]] : [])];
+        for (const [assetId, allowedKinds] of assets) {
           const asset = state.assets.find((item) => item.id === assetId);
           const license = asset?.provenance?.commercialLicense;
           let validLicense = false;

@@ -32,6 +32,20 @@ function requireKind(kind) {
   if (!KINDS.has(kind)) throw new Error('kind must be image, audio or video');
 }
 
+function audioMode(episode) {
+  const mode = episode.audioMode ?? 'narrated';
+  if (!['narrated', 'silent'].includes(mode)) throw new Error('audioMode must be narrated or silent');
+  return mode;
+}
+
+function requireProductionKind(episode, kind) {
+  if (audioMode(episode) === 'silent' && kind === 'audio') throw new Error('Silent episodes cannot generate or import audio assets');
+}
+
+function mediaDuration(probe, stream) {
+  return Number(stream.duration === undefined || stream.duration === 'N/A' ? probe.format?.duration : stream.duration);
+}
+
 function sceneContext(state, episodeId, sceneId) {
   const episode = state.episodes.find((item) => item.id === episodeId);
   if (!episode) throw new Error('Episode does not exist');
@@ -189,16 +203,17 @@ function captions(scenes) {
 }
 
 function fingerprint(episode, selected) {
-  return sha256(Buffer.from(JSON.stringify({ editorial: episodeReviewHash(episode), selected })));
+  return sha256(Buffer.from(JSON.stringify({ editorial: episodeReviewHash(episode), audioMode: audioMode(episode), selected })));
 }
 
 function selectSceneAssets(state, episode) {
+  const narrated = audioMode(episode) === 'narrated';
   return episode.scenes.map((scene) => {
     const matching = state.assets.filter((asset) => asset.episodeId === episode.id && asset.sceneId === scene.id);
     const visual = matching.findLast((asset) => asset.kind === 'video') ?? matching.findLast((asset) => asset.kind === 'image');
-    const audio = matching.findLast((asset) => asset.kind === 'audio');
-    if (!visual || !audio) throw new Error(`Scene ${scene.id} requires synthetic visual and narration audio assets`);
-    for (const asset of [visual, audio]) {
+    const audio = narrated ? matching.findLast((asset) => asset.kind === 'audio') : undefined;
+    if (!visual || (narrated && !audio)) throw new Error(`Scene ${scene.id} requires synthetic visual${narrated ? ' and narration audio' : ''} assets`);
+    for (const asset of [visual, ...(audio ? [audio] : [])]) {
       if (asset.synthetic !== true) throw new Error('Only attested synthetic assets can be rendered');
       evidence(asset.provenance?.commercialLicense);
     }
@@ -224,14 +239,16 @@ export class Production {
     const pricing = evidence({ url: pricingSourceUrl, notes: 'Caller-supplied estimate; zero does not prove the provider will not bill.' });
     if (!Number.isFinite(estimatedCostUsd) || estimatedCostUsd < 0) throw new Error('estimatedCostUsd must be an explicit nonnegative finite estimate');
     if (estimatedCostUsd > 0 && (acknowledgePaidCost !== true || this.env.YTFUN_PAID_GENERATION_ENABLED !== 'true')) throw new Error('Paid generation needs explicit per-call cost acknowledgment and YTFUN_PAID_GENERATION_ENABLED=true');
-    if (!this.env.HF_TOKEN) throw new Error('HF_TOKEN is required for cloud inference');
     const initial = await this.store.read();
     const context = sceneContext(initial, episodeId, sceneId);
+    requireProductionKind(context.episode, kind);
+    if (!this.env.HF_TOKEN) throw new Error('HF_TOKEN is required for cloud inference');
     const inputs = requiredText(prompt ?? (kind === 'audio' ? context.scene.narration : context.scene.visualPrompt), 'prompt');
     const id = randomUUID();
     await this.store.transaction((state) => {
       const { episode, project } = sceneContext(state, episodeId, sceneId);
       mutableEpisode(episode, state);
+      requireProductionKind(episode, kind);
       if (hasPendingGeneration(state, episodeId, sceneId, kind)) throw new Error('A previous generation is reserved or has an unknown charge outcome; reconcile it before retrying');
       assertBudget(state, project, estimatedCostUsd);
       state.spending.push({ id, projectId: project.id, episodeId, sceneId, kind, provider, model, estimatedCostUsd, pricingSourceUrl: pricing.url, priceNote: pricing.notes, status: 'reserved', createdAt: new Date().toISOString() });
@@ -252,6 +269,7 @@ export class Production {
       return await this.store.transaction((state) => {
         const { episode } = sceneContext(state, episodeId, sceneId);
         mutableEpisode(episode, state);
+        requireProductionKind(episode, kind);
         state.assets.push(asset);
         const reservation = state.spending.find((item) => item.id === id);
         if (!reservation || reservation.status !== 'reserved') throw new Error('Generation reservation changed during inference');
@@ -283,7 +301,9 @@ export class Production {
     const normalized = { provider: requiredText(provenance.provider, 'provenance.provider', 100), model: requiredText(provenance.model, 'provenance.model', 300), prompt: requiredText(provenance.prompt, 'provenance.prompt'), commercialLicense: evidence(provenance.commercialLicense) };
     if (typeof localPath !== 'string' || !isAbsolute(localPath)) throw new Error('localPath must be an absolute local file path');
     const state = await this.store.read();
-    mutableEpisode(sceneContext(state, episodeId, sceneId).episode, state);
+    const { episode } = sceneContext(state, episodeId, sceneId);
+    mutableEpisode(episode, state);
+    requireProductionKind(episode, kind);
     if (hasPendingGeneration(state, episodeId, sceneId, kind)) throw new Error('Reconcile the pending generation before replacing this asset');
     const actual = await realpath(localPath);
     const bytes = await boundedFile(actual);
@@ -292,6 +312,7 @@ export class Production {
       return await this.store.transaction((draft) => {
         const { episode } = sceneContext(draft, episodeId, sceneId);
         mutableEpisode(episode, draft);
+        requireProductionKind(episode, kind);
         if (hasPendingGeneration(draft, episodeId, sceneId, kind)) throw new Error('Generation started during asset registration');
         draft.assets.push(asset);
         invalidate(episode);
@@ -320,10 +341,12 @@ export class Production {
       mutableEpisode(episode, state);
       if (state.spending.some((item) => item.episodeId === episodeId && ['reserved', 'unknown'].includes(item.status))) throw new Error('Reconcile outstanding generation reservations before rendering');
       if (!Array.isArray(episode.scenes) || !episode.scenes.length || episode.scenes.length > 12) throw new Error('Rendering requires 1 to 12 scenes');
+      const mode = audioMode(episode);
       let durationSeconds = 0;
       for (const scene of episode.scenes) {
         if (!Number.isFinite(scene.durationSeconds) || scene.durationSeconds <= 0) throw new Error('Each scene needs a positive duration');
-        captionText(scene.narration);
+        if (mode === 'narrated') captionText(scene.narration);
+        else if (scene.narration !== undefined && scene.narration !== null && (typeof scene.narration !== 'string' || scene.narration.trim())) throw new Error('Silent episodes cannot contain narration');
         durationSeconds += scene.durationSeconds;
       }
       if (durationSeconds > 180) throw new Error('Rendered episodes cannot exceed 180 seconds');
@@ -331,7 +354,7 @@ export class Production {
       invalidate(episode);
       episode.status = 'rendering';
       episode.renderAttempt = { id: attemptId, status: 'rendering', startedAt: new Date().toISOString() };
-      return { episode, selected, fingerprint: fingerprint(episode, selected), durationSeconds };
+      return { episode, selected, fingerprint: fingerprint(episode, selected), durationSeconds, audioMode: mode };
     });
     let scratch;
     let finalPath;
@@ -341,34 +364,44 @@ export class Production {
       scratch = resolve(assets, `render-work-${attemptId}`);
       await mkdir(scratch, { recursive: false, mode: 0o700 });
       const clips = [];
+      const narrated = snapshot.audioMode === 'narrated';
       for (let index = 0; index < snapshot.episode.scenes.length; index += 1) {
         const scene = snapshot.episode.scenes[index];
         const { visual, audio } = snapshot.selected[index];
         const visualPath = await internalPath(this.store, visual.path);
-        const audioPath = await internalPath(this.store, audio.path);
-        if (sha256(await boundedFile(visualPath)) !== visual.sha256 || sha256(await boundedFile(audioPath)) !== audio.sha256) throw new Error('An asset changed on disk after registration');
-        const audioProbe = await this.probe(audioPath);
-        const audioStream = audioProbe.streams.find((stream) => stream.codec_type === 'audio');
-        const audioDuration = Number(audioStream?.duration ?? audioProbe.format?.duration);
-        if (!audioStream || !Number.isFinite(audioDuration) || audioDuration <= 0) throw new Error('Scene narration audio is empty or has no valid duration');
-        if (audioDuration > scene.durationSeconds + 0.05) throw new Error(`Scene ${scene.id} would truncate narration; increase its duration`);
+        const audioPath = audio ? await internalPath(this.store, audio.path) : undefined;
+        if (sha256(await boundedFile(visualPath)) !== visual.sha256 || (audio && sha256(await boundedFile(audioPath)) !== audio.sha256)) throw new Error('An asset changed on disk after registration');
+        if (narrated) {
+          const audioProbe = await this.probe(audioPath);
+          const audioStream = audioProbe.streams.find((stream) => stream.codec_type === 'audio');
+          const audioDuration = audioStream ? mediaDuration(audioProbe, audioStream) : NaN;
+          if (!audioStream || !Number.isFinite(audioDuration) || audioDuration <= 0) throw new Error('Scene narration audio is empty or has no valid duration');
+          if (audioDuration > scene.durationSeconds + 0.05) throw new Error(`Scene ${scene.id} would truncate narration; increase its duration`);
+        }
         const visualProbe = await this.probe(visualPath);
-        if (!visualProbe.streams.some((stream) => stream.codec_type === 'video')) throw new Error('Scene visual has no video/image stream');
+        const visualStream = visualProbe.streams.find((stream) => stream.codec_type === 'video');
+        if (!visualStream) throw new Error('Scene visual has no video/image stream');
+        if (!narrated && visual.kind === 'video') {
+          const visualDuration = mediaDuration(visualProbe, visualStream);
+          if (!Number.isFinite(visualDuration) || visualDuration <= 0) throw new Error(`Scene ${scene.id} video has no valid duration`);
+          if (visualDuration + 0.05 < scene.durationSeconds) throw new Error(`Scene ${scene.id} video is shorter than its planned duration; silent renders do not loop video`);
+        }
         const srtName = `scene-${index}.srt`;
-        await writeFile(resolve(scratch, srtName), captions([scene]), { mode: 0o600 });
+        if (narrated) await writeFile(resolve(scratch, srtName), captions([scene]), { mode: 0o600 });
         const clip = resolve(scratch, `clip-${index}.mp4`);
         const visualFilter = visual.kind === 'image'
           ? "scale=1200:2134:force_original_aspect_ratio=decrease,pad=1200:2134:(ow-iw)/2:(oh-ih)/2:color=black,zoompan=z='min(1.08,1+on*0.0003)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=1080x1920:fps=30,setsar=1"
           : 'scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,fps=30,setsar=1';
         const subtitleFilter = `subtitles=filename=${srtName}:force_style='FontSize=18,Alignment=2,MarginV=70,Outline=2'`;
-        await this.runner(this.env.FFMPEG_PATH || 'ffmpeg', ['-nostdin', '-v', 'error', '-y', ...(visual.kind === 'image' ? ['-loop', '1', '-framerate', '30'] : ['-stream_loop', '-1']), '-i', visualPath, '-i', audioPath, '-map', '0:v:0', '-map', '1:a:0', '-vf', `${visualFilter},${subtitleFilter}`, '-af', 'apad', '-t', String(scene.durationSeconds), '-r', '30', '-c:v', 'libx264', '-preset', 'medium', '-crf', '20', '-maxrate', '4M', '-bufsize', '8M', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2', '-movflags', '+faststart', clip], { cwd: scratch, timeoutMs: 600000 });
+        // Silent output selects only video, even when an imported clip contains sound.
+        await this.runner(this.env.FFMPEG_PATH || 'ffmpeg', ['-nostdin', '-v', 'error', '-y', ...(visual.kind === 'image' ? ['-loop', '1', '-framerate', '30'] : narrated ? ['-stream_loop', '-1'] : []), '-i', visualPath, ...(narrated ? ['-i', audioPath] : []), '-map', '0:v:0', ...(narrated ? ['-map', '1:a:0'] : ['-an', '-sn']), '-vf', narrated ? `${visualFilter},${subtitleFilter}` : visualFilter, ...(narrated ? ['-af', 'apad'] : []), '-t', String(scene.durationSeconds), '-r', '30', '-c:v', 'libx264', '-preset', 'medium', '-crf', '20', '-maxrate', '4M', '-bufsize', '8M', '-pix_fmt', 'yuv420p', ...(narrated ? ['-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2'] : []), '-movflags', '+faststart', clip], { cwd: scratch, timeoutMs: 600000 });
         clips.push(`file 'clip-${index}.mp4'`);
       }
       await writeFile(resolve(scratch, 'concat.txt'), `${clips.join('\n')}\n`, { mode: 0o600 });
       finalPath = resolve(assets, `render-${attemptId}.mp4`);
-      captionsPath = resolve(assets, `render-${attemptId}.srt`);
-      await this.runner(this.env.FFMPEG_PATH || 'ffmpeg', ['-nostdin', '-v', 'error', '-y', '-f', 'concat', '-safe', '1', '-i', 'concat.txt', '-map', '0:v:0', '-map', '0:a:0', '-c', 'copy', '-movflags', '+faststart', finalPath], { cwd: scratch, timeoutMs: 600000 });
-      await writeFile(captionsPath, captions(snapshot.episode.scenes), { flag: 'wx', mode: 0o600 });
+      if (narrated) captionsPath = resolve(assets, `render-${attemptId}.srt`);
+      await this.runner(this.env.FFMPEG_PATH || 'ffmpeg', ['-nostdin', '-v', 'error', '-y', '-f', 'concat', '-safe', '1', '-i', 'concat.txt', '-map', '0:v:0', ...(narrated ? ['-map', '0:a:0'] : ['-an', '-sn']), '-c', 'copy', '-movflags', '+faststart', finalPath], { cwd: scratch, timeoutMs: 600000 });
+      if (narrated) await writeFile(captionsPath, captions(snapshot.episode.scenes), { flag: 'wx', mode: 0o600 });
       const finalBytes = await boundedFile(finalPath);
       const finalProbe = await this.probe(finalPath);
       const videoStream = finalProbe.streams.find((stream) => stream.codec_type === 'video');
@@ -376,16 +409,20 @@ export class Production {
       const durationSeconds = Number(finalProbe.format?.duration);
       const [fpsNumerator, fpsDenominator = '1'] = String(videoStream?.avg_frame_rate ?? videoStream?.r_frame_rate ?? '').split('/');
       const framesPerSecond = Number(fpsNumerator) / Number(fpsDenominator);
-      if (!videoStream || !audioStream || videoStream.width !== 1080 || videoStream.height !== 1920 || !Number.isFinite(framesPerSecond) || Math.abs(framesPerSecond - 30) > 0.05 || !Number.isFinite(durationSeconds) || durationSeconds <= 0 || durationSeconds > 180 || Math.abs(durationSeconds - snapshot.durationSeconds) > 0.5) throw new Error('Final render failed resolution, frame rate, audio or duration validation');
-      const audioDuration = Number(audioStream.duration ?? finalProbe.format?.duration);
-      if (Math.abs(audioDuration - snapshot.durationSeconds) > 0.5) throw new Error('Final render dropped narration audio');
+      if (!videoStream || (narrated ? !audioStream : audioStream || finalProbe.streams.some((stream) => stream.codec_type === 'subtitle')) || videoStream.width !== 1080 || videoStream.height !== 1920 || !Number.isFinite(framesPerSecond) || Math.abs(framesPerSecond - 30) > 0.05 || !Number.isFinite(durationSeconds) || durationSeconds <= 0 || durationSeconds > 180 || Math.abs(durationSeconds - snapshot.durationSeconds) > 0.5) throw new Error('Final render failed resolution, frame rate, audio or duration validation');
+      const videoDuration = mediaDuration(finalProbe, videoStream);
+      if (!Number.isFinite(videoDuration) || Math.abs(videoDuration - snapshot.durationSeconds) > 0.5) throw new Error('Final render video duration does not match the planned scenes');
+      if (narrated) {
+        const audioDuration = mediaDuration(finalProbe, audioStream);
+        if (!Number.isFinite(audioDuration) || Math.abs(audioDuration - snapshot.durationSeconds) > 0.5) throw new Error('Final render dropped narration audio');
+      }
       // Recheck files after encoding as well as the editorial snapshot inside the commit.
       for (const { visual, audio } of snapshot.selected) {
-        for (const asset of [visual, audio]) {
+        for (const asset of [visual, ...(audio ? [audio] : [])]) {
           if (sha256(await boundedFile(await internalPath(this.store, asset.path))) !== asset.sha256) throw new Error('Source asset changed during render');
         }
       }
-      const render = { path: `assets/render-${attemptId}.mp4`, sha256: sha256(finalBytes), durationSeconds, width: videoStream.width, height: videoStream.height, framesPerSecond, format: 'mp4', captionsPath: `assets/render-${attemptId}.srt`, captionsSha256: sha256(await boundedFile(captionsPath)), captionsTiming: 'scene-approximate', sceneAssets: snapshot.selected.map(({ sceneId, visual, audio }) => ({ sceneId, visualAssetId: visual.id, audioAssetId: audio.id })), visualMethod: snapshot.selected.some(({ visual }) => visual.kind === 'image') ? 'includes-animated-images' : 'generated-video', synthetic: true, createdAt: new Date().toISOString() };
+      const render = { path: `assets/render-${attemptId}.mp4`, sha256: sha256(finalBytes), durationSeconds, width: videoStream.width, height: videoStream.height, framesPerSecond, format: 'mp4', audioMode: snapshot.audioMode, hasAudio: Boolean(audioStream), ...(narrated ? { captionsPath: `assets/render-${attemptId}.srt`, captionsSha256: sha256(await boundedFile(captionsPath)), captionsTiming: 'scene-approximate' } : {}), sceneAssets: snapshot.selected.map(({ sceneId, visual, audio }) => ({ sceneId, visualAssetId: visual.id, ...(audio ? { audioAssetId: audio.id } : {}) })), visualMethod: snapshot.selected.some(({ visual }) => visual.kind === 'image') ? 'includes-animated-images' : 'generated-video', synthetic: true, createdAt: new Date().toISOString() };
       return await this.store.transaction((state) => {
         const episode = state.episodes.find((item) => item.id === episodeId);
         if (!episode || episode.status !== 'rendering' || episode.renderAttempt?.id !== attemptId || fingerprint(episode, selectSceneAssets(state, episode)) !== snapshot.fingerprint) throw new Error('Episode or selected assets changed during rendering; render cannot be committed');

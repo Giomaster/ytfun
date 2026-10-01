@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { StudioStore } from '../src/store.mjs';
 import { Studio } from '../src/domain.mjs';
 import { Production } from '../src/production.mjs';
+import { ProductionJobs } from '../src/jobs.mjs';
 
 // Small signatures are intentional: these tests exercise contracts with a fake
 // inference client/process runner. They never perform inference or media encoding.
@@ -16,13 +17,13 @@ const license = { url: 'https://provider.example/model-license', notes: 'Commerc
 const provenance = { provider: 'studio-example', model: 'licensed-model', prompt: 'An original fictional clock city.', synthetic: true, commercialLicense: license };
 const env = { HF_TOKEN: 'fake-token', FFMPEG_PATH: 'fake-ffmpeg', FFPROBE_PATH: 'fake-ffprobe' };
 
-async function setup(t, { budgetMonthlyUsd = null, sceneCount = 1 } = {}) {
+async function setup(t, { budgetMonthlyUsd = null, sceneCount = 1, audioMode } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'ytfun-production-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const store = new StudioStore(directory);
   const studio = new Studio(store);
   const project = await studio.createProject({ title: 'Clock city', premise: 'A fictional miniature city', audience: 'Fantasy fans', language: 'pt-BR', budgetMonthlyUsd });
-  const episode = await studio.planEpisode({ projectId: project.id, title: 'The last clock wakes', hook: 'Time returns to a sleeping city.', synopsis: 'The clock wakes its inhabitants.', originalAngle: 'An original miniature clock-city mythology.', scenes: Array.from({ length: sceneCount }, (_, index) => ({ durationSeconds: 3, narration: `O relógio ${index + 1} acordou a cidade.`, visualPrompt: `An original tiny clock city, scene ${index + 1}` })), metadata: { description: 'An original AI-generated fictional episode.', hashtags: ['#FicçãoIA'] } });
+  const episode = await studio.planEpisode({ projectId: project.id, ...(audioMode ? { audioMode } : {}), title: 'The last clock wakes', hook: 'Time returns to a sleeping city.', synopsis: 'The clock wakes its inhabitants.', originalAngle: 'An original miniature clock-city mythology.', scenes: Array.from({ length: sceneCount }, (_, index) => ({ durationSeconds: 3, ...(audioMode === 'silent' ? {} : { narration: `O relógio ${index + 1} acordou a cidade.` }), visualPrompt: `An original tiny clock city, scene ${index + 1}` })), metadata: { description: 'An original AI-generated fictional episode.', hashtags: ['#FicçãoIA'] } });
   return { directory, store, studio, project, episode };
 }
 
@@ -30,7 +31,7 @@ function generation(episode, overrides = {}) {
   return { episodeId: episode.id, sceneId: episode.scenes[0].id, kind: 'image', model: 'example/licensed-model', provider: 'hf-inference', estimatedCostUsd: 0, pricingSourceUrl: 'https://provider.example/pricing', commercialLicense: license, ...overrides };
 }
 
-async function addSourceAssets(context, production, { alsoVideo = false } = {}) {
+async function addSourceAssets(context, production, { alsoVideo = false, includeAudio = context.episode.audioMode !== 'silent' } = {}) {
   const sourceImage = join(context.directory, 'source.png');
   const sourceAudio = join(context.directory, 'source.wav');
   const sourceVideo = join(context.directory, 'source.mp4');
@@ -41,14 +42,14 @@ async function addSourceAssets(context, production, { alsoVideo = false } = {}) 
   for (const scene of context.episode.scenes) {
     const base = { episodeId: context.episode.id, sceneId: scene.id, provenance };
     const image = await production.registerAsset({ ...base, kind: 'image', localPath: sourceImage });
-    const audio = await production.registerAsset({ ...base, kind: 'audio', localPath: sourceAudio });
+    const audio = includeAudio ? await production.registerAsset({ ...base, kind: 'audio', localPath: sourceAudio }) : null;
     const video = alsoVideo ? await production.registerAsset({ ...base, kind: 'video', localPath: sourceVideo }) : null;
     registered.push({ image, audio, video });
   }
   return registered;
 }
 
-function fakeRenderer(durationSeconds, { audioDuration = 2, onEncode } = {}) {
+function fakeRenderer(durationSeconds, { audioDuration = 2, finalHasAudio = true, sourceHasAudio = false, sourceVideoDuration = 3, onEncode } = {}) {
   const calls = [];
   const runner = async (command, args, options) => {
     calls.push({ command, args, options });
@@ -56,7 +57,12 @@ function fakeRenderer(durationSeconds, { audioDuration = 2, onEncode } = {}) {
     if (command === env.FFPROBE_PATH) {
       const final = /render-[^/]+\.mp4$/.test(path);
       const audio = /\.wav$/.test(path);
-      return { exitCode: 0, stdout: JSON.stringify({ format: { duration: String(final ? durationSeconds : audio ? audioDuration : 3) }, streams: audio ? [{ codec_type: 'audio', duration: String(audioDuration) }] : final ? [{ codec_type: 'video', width: 1080, height: 1920, avg_frame_rate: '30/1' }, { codec_type: 'audio', duration: String(durationSeconds) }] : [{ codec_type: 'video', width: 720, height: 1280 }] }) };
+      const streams = audio
+        ? [{ codec_type: 'audio', duration: String(audioDuration) }]
+        : final
+          ? [{ codec_type: 'video', width: 1080, height: 1920, avg_frame_rate: '30/1' }, ...(finalHasAudio ? [{ codec_type: 'audio', duration: String(durationSeconds) }] : [])]
+          : [{ codec_type: 'video', width: 720, height: 1280, duration: String(sourceVideoDuration) }, ...(sourceHasAudio && /\.mp4$/.test(path) ? [{ codec_type: 'audio', duration: String(sourceVideoDuration) }] : [])];
+      return { exitCode: 0, stdout: JSON.stringify({ format: { duration: String(final ? durationSeconds : audio ? audioDuration : sourceVideoDuration) }, streams }) };
     }
     assert.equal(command, env.FFMPEG_PATH);
     if (onEncode) await onEncode({ args, options, path });
@@ -255,12 +261,16 @@ test('render requires every visual and voice asset before reserving the episode'
 
 test('render composes vertical scenes with voice and approximate subtitles, prefers generated video, and requires later review', async (t) => {
   const context = await setup(t, { sceneCount: 2 });
+  // Persisted episodes from before audioMode existed still use narration.
+  await context.store.transaction((state) => { delete state.episodes[0].audioMode; });
   const fake = fakeRenderer(6);
   const production = new Production(context.store, { env, runner: fake.runner });
   const sources = await addSourceAssets(context, production, { alsoVideo: true });
   const render = await production.renderEpisode({ episodeId: context.episode.id });
   assert.equal(render.durationSeconds, 6);
   assert.equal(render.synthetic, true);
+  assert.equal(render.audioMode, 'narrated');
+  assert.equal(render.hasAudio, true);
   assert.equal(render.captionsTiming, 'scene-approximate');
   assert.equal(render.visualMethod, 'generated-video');
   assert.deepEqual(render.sceneAssets, context.episode.scenes.map((scene, index) => ({ sceneId: scene.id, visualAssetId: sources[index].video.id, audioAssetId: sources[index].audio.id })));
@@ -362,4 +372,192 @@ test('a mismatched final duration or missing output audio prevents render comple
     await assert.rejects(production.renderEpisode({ episodeId: context.episode.id }), /Final render failed/);
     assert.equal((await context.studio.getEpisode(context.episode.id)).render, null);
   }
+});
+
+test('silent generation and import reject audio before spending or requesting inference', async (t) => {
+  const context = await setup(t, { audioMode: 'silent' });
+  const production = new Production(context.store, { env: {}, inferenceClient: {
+    textToSpeech: async () => { assert.fail('Silent production must never request speech'); },
+  } });
+  await assert.rejects(production.generateAsset(generation(context.episode, { kind: 'audio', prompt: 'Speech must not be requested' })), /Silent episodes cannot generate or import audio/);
+  const path = join(context.directory, 'unwanted.wav');
+  await writeFile(path, WAV);
+  await assert.rejects(production.registerAsset({ episodeId: context.episode.id, sceneId: context.episode.scenes[0].id, kind: 'audio', localPath: path, provenance }), /Silent episodes cannot generate or import audio/);
+  const state = await context.store.read();
+  assert.equal(state.spending.length, 0);
+  assert.equal(state.assets.length, 0);
+  assert.equal(state.episodes[0].status, 'planned');
+});
+
+test('a narration generation cannot commit after switching to silent; its charge remains uncertain', async (t) => {
+  const context = await setup(t);
+  const production = new Production(context.store, { env, inferenceClient: {
+    textToSpeech: async () => {
+      await context.store.transaction((state) => {
+        state.episodes[0].audioMode = 'silent';
+        delete state.episodes[0].scenes[0].narration;
+      });
+      return new Blob([WAV], { type: 'audio/wav' });
+    },
+  } });
+  await assert.rejects(production.generateAsset(generation(context.episode, { kind: 'audio' })), /reconcile the provider outcome/);
+  const state = await context.store.read();
+  assert.equal(state.assets.length, 0);
+  assert.equal(state.spending[0].status, 'unknown');
+  assert.equal(state.episodes[0].audioMode, 'silent');
+  assert.deepEqual(await readdir(join(context.directory, 'assets')), []);
+});
+
+test('silent render still requires a visual, but never requires a voice asset', async (t) => {
+  const context = await setup(t, { audioMode: 'silent' });
+  const production = new Production(context.store, { env, runner: async () => { assert.fail('Missing visual must fail before encoding'); } });
+  await assert.rejects(production.renderEpisode({ episodeId: context.episode.id }), /requires synthetic visual assets/);
+  assert.equal((await context.studio.getEpisode(context.episode.id)).status, 'planned');
+});
+
+test('silent images and imported videos render without sound or generated captions, including embedded source audio', async (t) => {
+  for (const visualKind of ['image', 'video']) {
+    const context = await setup(t, { audioMode: 'silent', sceneCount: 2 });
+    const fake = fakeRenderer(6, { finalHasAudio: false, sourceHasAudio: true, onEncode: async ({ options }) => {
+      assert.ok((await readdir(options.cwd)).every((name) => !name.endsWith('.srt')));
+    } });
+    const production = new Production(context.store, { env, runner: fake.runner });
+    const sources = await addSourceAssets(context, production, { alsoVideo: visualKind === 'video' });
+    // An old unused audio record must neither be selected nor read in silent mode.
+    await context.store.transaction((state) => { state.assets.push({ id: 'unused-audio', episodeId: context.episode.id, sceneId: context.episode.scenes[0].id, kind: 'audio', path: 'assets/missing.wav', synthetic: false }); });
+    const render = await production.renderEpisode({ episodeId: context.episode.id });
+    assert.equal(render.audioMode, 'silent');
+    assert.equal(render.hasAudio, false);
+    assert.equal(render.durationSeconds, 6);
+    assert.equal(render.captionsPath, undefined);
+    assert.equal(render.captionsSha256, undefined);
+    assert.equal(render.captionsTiming, undefined);
+    assert.deepEqual(render.sceneAssets, context.episode.scenes.map((scene, index) => ({ sceneId: scene.id, visualAssetId: sources[index][visualKind].id })));
+    const encodes = fake.calls.filter((call) => call.command === env.FFMPEG_PATH);
+    assert.equal(encodes.length, 3);
+    for (const call of encodes) {
+      assert.ok(call.args.includes('-an'));
+      assert.ok(call.args.includes('-sn'));
+      assert.equal(call.args.filter((arg) => arg === '-i').length, 1);
+      assert.ok(!call.args.includes('1:a:0'));
+      assert.ok(!call.args.includes('0:a:0'));
+      assert.ok(!call.args.includes('-af'));
+      assert.ok(!call.args.includes('-c:a'));
+      assert.ok(!call.args.includes('-stream_loop'));
+      const visualFilter = call.args.indexOf('-vf');
+      if (visualFilter !== -1) assert.ok(!call.args[visualFilter + 1].includes('subtitles='));
+    }
+    assert.ok(!fake.calls.some((call) => call.command === env.FFPROBE_PATH && /\.wav$/.test(call.args.at(-1))));
+    assert.ok((await readdir(join(context.directory, 'assets'))).every((name) => !name.endsWith('.srt')));
+    const updated = await context.studio.getEpisode(context.episode.id);
+    assert.equal(updated.status, 'rendered');
+    assert.equal(updated.approval, null);
+  }
+});
+
+test('silent preflight rejects narration and unsupported modes before reserving a render', async (t) => {
+  for (const failure of ['narration', 'audioMode']) {
+    const context = await setup(t, { audioMode: 'silent' });
+    const production = new Production(context.store, { env, runner: async () => { assert.fail('Invalid silent contract must not invoke encoding'); } });
+    await addSourceAssets(context, production);
+    await context.store.transaction((state) => {
+      if (failure === 'narration') state.episodes[0].scenes[0].narration = 'Unwanted spoken language';
+      else state.episodes[0].audioMode = 'sound-design';
+    });
+    await assert.rejects(production.renderEpisode({ episodeId: context.episode.id }), failure === 'narration' ? /Silent episodes cannot contain narration/ : /audioMode must be narrated or silent/);
+    const episode = await context.studio.getEpisode(context.episode.id);
+    assert.equal(episode.status, 'planned');
+    assert.equal(episode.renderAttempt, undefined);
+  }
+});
+
+test('silent video preflight checks actual stream duration and refuses to loop an incomplete clip', async (t) => {
+  for (const duration of [2, 0, 'N/A']) {
+    const context = await setup(t, { audioMode: 'silent' });
+    const fake = fakeRenderer(3, { finalHasAudio: false, sourceVideoDuration: duration });
+    const runner = async (command, args, options) => {
+      const response = await fake.runner(command, args, options);
+      if (command === env.FFPROBE_PATH) {
+        const probe = JSON.parse(response.stdout);
+        // An audio/container duration cannot override a shorter video stream.
+        if (duration !== 'N/A') probe.format.duration = '10';
+        response.stdout = JSON.stringify(probe);
+      }
+      return response;
+    };
+    const production = new Production(context.store, { env, runner });
+    await addSourceAssets(context, production, { alsoVideo: true });
+    await assert.rejects(production.renderEpisode({ episodeId: context.episode.id }), duration === 2 ? /shorter than its planned duration/ : /video has no valid duration/);
+    assert.equal(fake.calls.filter((call) => call.command === env.FFMPEG_PATH).length, 0);
+    const episode = await context.studio.getEpisode(context.episode.id);
+    assert.equal(episode.render, null);
+    assert.equal(episode.renderAttempt.status, 'failed');
+  }
+});
+
+test('silent final validation rejects sound, subtitles, missing video and incorrect stream/container duration', async (t) => {
+  for (const failure of ['audio', 'subtitle', 'video', 'duration', 'videoDuration']) {
+    const context = await setup(t, { audioMode: 'silent' });
+    const fake = fakeRenderer(3, { finalHasAudio: false });
+    const runner = async (command, args, options) => {
+      const response = await fake.runner(command, args, options);
+      if (command === env.FFPROBE_PATH && /render-[^/]+\.mp4$/.test(args.at(-1))) {
+        const probe = JSON.parse(response.stdout);
+        if (failure === 'audio') probe.streams.push({ codec_type: 'audio' });
+        if (failure === 'subtitle') probe.streams.push({ codec_type: 'subtitle' });
+        if (failure === 'video') probe.streams = [];
+        if (failure === 'duration') probe.format.duration = '2';
+        if (failure === 'videoDuration') probe.streams[0].duration = '2';
+        response.stdout = JSON.stringify(probe);
+      }
+      return response;
+    };
+    const production = new Production(context.store, { env, runner });
+    await addSourceAssets(context, production);
+    await assert.rejects(production.renderEpisode({ episodeId: context.episode.id }), /Final render/);
+    const episode = await context.studio.getEpisode(context.episode.id);
+    assert.equal(episode.render, null);
+    assert.equal(episode.renderAttempt.status, 'failed');
+    assert.ok((await readdir(join(context.directory, 'assets'))).every((name) => !name.startsWith('render-')));
+  }
+});
+
+test('an audio mode change during encoding cannot commit a stale silent render', async (t) => {
+  const context = await setup(t, { audioMode: 'silent' });
+  let changed = false;
+  const fake = fakeRenderer(3, { finalHasAudio: false, onEncode: async () => {
+    if (changed) return;
+    changed = true;
+    await context.store.transaction((state) => { state.episodes[0].audioMode = 'narrated'; });
+  } });
+  const production = new Production(context.store, { env, runner: fake.runner });
+  await addSourceAssets(context, production);
+  await assert.rejects(production.renderEpisode({ episodeId: context.episode.id }));
+  const episode = await context.studio.getEpisode(context.episode.id);
+  assert.equal(episode.render, null);
+  assert.equal(episode.renderAttempt.status, 'failed');
+});
+
+test('persistent production jobs complete a silent video generation and render without a speech provider', async (t) => {
+  const context = await setup(t, { audioMode: 'silent' });
+  const received = [];
+  const fake = fakeRenderer(3, { finalHasAudio: false });
+  const production = new Production(context.store, { env, runner: fake.runner, inferenceClient: {
+    textToVideo: async (input) => { received.push(input); return new Blob([MP4], { type: 'video/mp4' }); },
+    textToSpeech: async () => { assert.fail('A silent job must never request speech'); },
+  } });
+  const jobs = new ProductionJobs(context.store, production);
+  const generationJob = await jobs.start({ action: 'generate', input: generation(context.episode, { kind: 'video' }) });
+  await jobs.running.get(generationJob.id);
+  assert.equal((await jobs.get(generationJob.id)).status, 'completed');
+  assert.equal(received.length, 1);
+  assert.equal(received[0].inputs, context.episode.scenes[0].visualPrompt);
+  const renderJob = await jobs.start({ action: 'render', input: { episodeId: context.episode.id } });
+  await jobs.running.get(renderJob.id);
+  const done = await jobs.get(renderJob.id);
+  assert.equal(done.status, 'completed');
+  assert.equal(done.result.audioMode, 'silent');
+  assert.equal(done.result.hasAudio, false);
+  assert.equal(done.result.captionsPath, undefined);
+  assert.equal((await context.store.read()).spending[0].status, 'completed');
 });

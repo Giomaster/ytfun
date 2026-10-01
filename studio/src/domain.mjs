@@ -19,6 +19,28 @@ function optionalText(value, name, maximum = 10000) {
   return value === undefined ? '' : text(value, name, maximum);
 }
 
+function audioMode(value) {
+  const mode = value ?? 'narrated';
+  if (!['narrated', 'silent'].includes(mode)) throw new Error('audioMode must be narrated or silent');
+  return mode;
+}
+
+function sceneNarration(value, mode) {
+  if (mode === 'narrated') return text(value, 'narration');
+  if (value !== undefined && (typeof value !== 'string' || value.trim())) throw new Error('Silent episodes cannot contain narration');
+  return '';
+}
+
+function storyText(episode) {
+  return episode.audioMode === 'silent'
+    ? [episode.originalAngle ?? '', ...(episode.scenes ?? []).map(scene => scene.visualPrompt)].join(' ')
+    : (episode.scenes ?? []).map(scene => scene.narration).join(' ');
+}
+
+function repeatedStory(left, right) {
+  return (left.audioMode ?? 'narrated') === (right.audioMode ?? 'narrated') && tokenOverlap(storyText(left), storyText(right)) > 0.85;
+}
+
 function description(value) {
   if (typeof value !== 'string' || value.length > 5000) throw new Error('metadata.description must be text of at most 5000 characters');
   return value.trim();
@@ -95,6 +117,7 @@ function canonicalJson(value) {
 export function episodeReviewHash(episode) {
   const editorial = {
     title: episode.title, hook: episode.hook, synopsis: episode.synopsis,
+    ...(episode.audioMode === undefined ? {} : { audioMode: episode.audioMode }),
     continuityNote: episode.continuityNote, originalAngle: episode.originalAngle,
     factualSources: episode.factualSources ?? [], scenes: episode.scenes,
     metadata: episode.metadata, trendIds: episode.trendIds,
@@ -103,6 +126,7 @@ export function episodeReviewHash(episode) {
       durationSeconds: episode.render.durationSeconds,
       width: episode.render.width, height: episode.render.height,
       framesPerSecond: episode.render.framesPerSecond, format: episode.render.format,
+      audioMode: episode.render.audioMode, hasAudio: episode.render.hasAudio,
       captionsPath: episode.render.captionsPath, captionsSha256: episode.render.captionsSha256,
       sceneAssets: episode.render.sceneAssets, synthetic: episode.render.synthetic,
     } : null,
@@ -168,9 +192,10 @@ async function episodeFindings(state, episode, directory) {
   if (!Array.isArray(episode.scenes) || !episode.scenes.length || episode.scenes.length > maximumScenes) { add('scenes_invalid', 'Episode must retain between 1 and 12 planned scenes.'); return findings; }
   try {
     if (new Set(episode.scenes.map((scene) => scene.id)).size !== episode.scenes.length) throw new Error('Scene IDs must be unique');
-    for (const scene of episode.scenes) { text(scene.id, 'scene.id', 100); number(scene.durationSeconds, 'durationSeconds', 1, 60); text(scene.narration, 'narration'); text(scene.visualPrompt, 'visualPrompt'); }
+    const mode = audioMode(episode.audioMode);
+    for (const scene of episode.scenes) { text(scene.id, 'scene.id', 100); number(scene.durationSeconds, 'durationSeconds', 1, 60); sceneNarration(scene.narration, mode); text(scene.visualPrompt, 'visualPrompt'); }
   } catch (error) { add('scene_script_invalid', error.message); }
-  const duplicates = state.episodes.filter((other) => other.id !== episode.id && (tokenOverlap(other.title, episode.title) > 0.85 || tokenOverlap((other.scenes ?? []).map((scene) => scene.narration).join(' '), episode.scenes.map((scene) => scene.narration).join(' ')) > 0.85));
+  const duplicates = state.episodes.filter((other) => other.id !== episode.id && (tokenOverlap(other.title, episode.title) > 0.85 || repeatedStory(other, episode)));
   if (duplicates.length) add('duplicate_episode', `Near duplicate episodes: ${duplicates.map((entry) => entry.id).join(', ')}`);
   if (!episode.originalAngle?.trim()) add('original_angle_missing', 'Describe the original narrative angle.');
   if (['rendering', 'publishing', 'processing', 'uploaded', 'scheduled', 'published'].includes(episode.status) || state.publications.some((publication) => publication.episodeId === episode.id && ['reserved', 'uploading', 'sending', 'unknown', 'processing', 'uploaded', 'scheduled', 'published'].includes(publication.status))) add('episode_busy', 'Publication has reserved or frozen this episode; approval cannot change until its outcome is reconciled.');
@@ -179,6 +204,11 @@ async function episodeFindings(state, episode, directory) {
     return findings;
   }
   if (episode.render.synthetic !== true) add('render_not_synthetic', 'The render must identify the content as AI generated.');
+  const silent = episode.audioMode === 'silent';
+  if (silent && (episode.render.audioMode !== 'silent' || episode.render.hasAudio !== false ||
+      ['captionsPath', 'captionsSha256', 'captionsTiming'].some(key => episode.render[key] !== undefined) ||
+      (Array.isArray(episode.render.sceneAssets) && episode.render.sceneAssets.some(mapping => mapping.audioAssetId !== undefined)))) add('silent_render_invalid', 'Silent renders must attest zero audio and contain no narration assets or captions.');
+  if (!silent && episode.render.audioMode === 'silent') add('audio_mode_mismatch', 'The render audio mode must match the planned episode.');
   try { await validateArtifactFile(directory, episode.render); } catch (error) { add('render_invalid', error.message); }
   if (episode.render.captionsPath) {
     try { await validateArtifactFile(directory, { path: episode.render.captionsPath, sha256: episode.render.captionsSha256 }); }
@@ -192,7 +222,8 @@ async function episodeFindings(state, episode, directory) {
   if (mapping.length !== episode.scenes.length || new Set(mapping.map((entry) => entry.sceneId)).size !== mapping.length || mapping.some((entry) => !sceneIds.has(entry.sceneId))) add('scene_mapping_invalid', 'Final render must map each planned scene exactly once.');
   for (const scene of episode.scenes) {
     const linked = mapping.find((entry) => entry.sceneId === scene.id);
-    for (const [field, allowed] of [['visualAssetId', ['image', 'video']], ['audioAssetId', ['audio']]]) {
+    const fields = [['visualAssetId', ['image', 'video']], ...(!silent ? [['audioAssetId', ['audio']]] : [])];
+    for (const [field, allowed] of fields) {
       const asset = state.assets.find((entry) => entry.id === linked?.[field]);
       if (!asset || asset.episodeId !== episode.id || asset.sceneId !== scene.id || !allowed.includes(asset.kind)) { add('scene_asset_invalid', `${scene.id}: ${field} needs a linked AI-generated ${allowed.join('/')} asset.`); continue; }
       try { licenseEvidence(asset); await validateArtifactFile(directory, asset); } catch (error) { add('asset_invalid', error.message); }
@@ -242,10 +273,11 @@ export class Studio {
 
   async planEpisode(input) {
     rejectClientId(input);
+    const mode = audioMode(input.audioMode);
     if (!Array.isArray(input.scenes) || !input.scenes.length || input.scenes.length > maximumScenes) throw new Error('scenes must contain between 1 and 12 scenes');
     const scenes = input.scenes.map((scene) => {
       rejectClientId(scene);
-      return { id: randomUUID(), durationSeconds: number(scene.durationSeconds, 'durationSeconds', 1, 60), narration: text(scene.narration, 'narration'), visualPrompt: text(scene.visualPrompt, 'visualPrompt') };
+      return { id: randomUUID(), durationSeconds: number(scene.durationSeconds, 'durationSeconds', 1, 60), narration: sceneNarration(scene.narration, mode), visualPrompt: text(scene.visualPrompt, 'visualPrompt') };
     });
     if (scenes.reduce((sum, scene) => sum + scene.durationSeconds, 0) > maximumDurationSeconds) throw new Error('Episode duration cannot exceed 180 seconds');
     const trendIds = input.trendIds ?? [];
@@ -265,7 +297,7 @@ export class Studio {
       id: randomUUID(), projectId: text(input.projectId, 'projectId', 100), title: text(input.title, 'title', 100),
       hook: text(input.hook, 'hook'), synopsis: text(input.synopsis, 'synopsis'),
       continuityNote: optionalText(input.continuityNote, 'continuityNote'), originalAngle: text(input.originalAngle, 'originalAngle'),
-      factualSources: validatedSources, scenes,
+      factualSources: validatedSources, scenes, audioMode: mode,
       metadata: { description: description(input.metadata?.description), hashtags: validatedHashtags },
       trendIds: [...trendIds], createdAt: new Date().toISOString(), status: 'planned', render: null, approval: null, metrics: [],
     };
@@ -280,7 +312,7 @@ export class Studio {
         if (!Number.isFinite(observedAt) || observedAt > Date.now() + futureToleranceMs || Date.now() - observedAt > maximumTrendAgeMs) throw new Error(`Trend evidence is stale or invalid (maximum age 7 days): ${id}`);
       }
       for (const previous of state.episodes) {
-        if (tokenOverlap(previous.title, episode.title) > 0.85 || tokenOverlap(previous.scenes.map((scene) => scene.narration).join(' '), scenes.map((scene) => scene.narration).join(' ')) > 0.85) throw new Error(`Near duplicate episode ${previous.id}: title or narration token overlap exceeds 0.85`);
+        if (tokenOverlap(previous.title, episode.title) > 0.85 || repeatedStory(previous, episode)) throw new Error(`Near duplicate episode ${previous.id}: title or ${mode === 'silent' ? 'visual story' : 'narration'} token overlap exceeds 0.85`);
       }
       state.episodes.push(episode);
       return episode;

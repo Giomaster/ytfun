@@ -29,6 +29,11 @@ test('stdio MCP negotiates, lists tools and persists a series across restarts', 
   assert.ok(!created.isError, JSON.stringify(created));
   const project = JSON.parse(created.content[0].text);
   assert.equal(project.budgetMonthlyUsd, null);
+  const silent = await client.callTool({ name: 'ytfun_episode_plan', arguments: { projectId: project.id, audioMode: 'silent', title: 'The kitten and the obsidian portal', hook: 'A violet light travels beneath a black stone.', synopsis: 'A cybernetic kitten discovers an impossible interior.', continuityNote: 'First original visual reveal.', originalAngle: 'A complete comic portal reveal without speech or text.', scenes: [{ durationSeconds: 5, visualPrompt: 'An original silver cartoon kitten beside an obsidian sphere on a violet sofa.' }], metadata: { description: 'Original AI fiction.', hashtags: ['#AIMeow'] } } });
+  assert.ok(!silent.isError, JSON.stringify(silent));
+  assert.equal(JSON.parse(silent.content[0].text).audioMode, 'silent');
+  assert.equal(JSON.parse(silent.content[0].text).scenes[0].narration, '');
+
   const invalid = await client.callTool({ name: 'ytfun_episode_get', arguments: { episodeId: '../../outside' } });
   assert.equal(invalid.isError, true);
   const resources = await client.listResources();

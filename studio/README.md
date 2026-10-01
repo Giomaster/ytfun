@@ -12,7 +12,7 @@ série precisa ser combinado antes de entrar em produção.
   [pesquisa de 75 plataformas/serviços](docs/monetization-landscape.md).
 - Qualquer formato feito inteiramente com IA: ficção, animação, humor, histórias,
   explicações factuais e novos experimentos.
-- Começar pelo menor custo possível, incluindo ferramentas gratuitas. Sem teto
+- Validar cada conceito em piloto barato antes de investir em qualidade maior; usar modelos pagos quando o ganho justificar o custo. A direção editorial prioriza vídeos longos com unidades que rendam shorts completos, sem fala ou texto. O perfil de render implementado abaixo mantém seus limites atuais. Sem teto
   mensal fixo por padrão. Cada chamada guarda estimativa e fonte de preço;
   operação paga exige reconhecimento por chamada e habilitação no ambiente.
 - Reaproveitar o ytfun sem incorporar automaticamente seu trabalho local ainda
@@ -25,14 +25,11 @@ série precisa ser combinado antes de entrar em produção.
 
 1. A IA lê projetos e episódios anteriores, pesquisa contexto e propõe a série.
 2. Após consenso, registra premissa, público, idioma e continuidade no projeto.
-3. Planeja episódio com ângulo próprio, hook, narrativa, cenas, voz e metadados.
+3. Planeja episódio com ângulo próprio, hook, narrativa, cenas, modo de áudio e metadados. `audioMode=narrated` exige narração; `audioMode=silent` permite cenas sem fala e sem texto, somente visuais.
 4. Gera imagem/voz/vídeo na inferência remota do Hugging Face ou importa assets
    originais de outros conectores. Provider, modelo, prompt, licença e hashes
    ficam ligados à cena. Fonte de tendência nunca vira footage para edição.
-5. FFmpeg monta 9:16, 1080×1920, 30 fps, voz em todas as cenas e legendas. Imagens
-   recebem movimento; cenas com vídeo usam a geração de vídeo. Voz maior que a
-   duração planejada bloqueia a edição para evitar truncamento. Máximo de 12
-   cenas e 180 segundos. Legendas têm timing aproximado por cena.
+5. FFmpeg monta 9:16, 1080×1920, 30 fps. No modo narrado, exige voz em todas as cenas e gera legendas com timing aproximado por cena. No modo silencioso, usa somente visuais, descarta áudio embutido e não gera SRT nem texto na tela; vídeo mais curto que a cena é bloqueado, sem repetição automática. Imagens recebem movimento simples. Voz maior que a duração planejada bloqueia a edição para evitar truncamento. Máximo de 12 cenas e 180 segundos. Esse perfil vertical ainda não implementa um master horizontal de longa duração nem derivação automática de shorts.
 6. A revisão real de originalidade, fatos e render fica vinculada aos hashes do
    episódio, arquivo final e proveniência. As verificações estruturais não
    substituem assistir ao vídeo ou confirmar fontes.

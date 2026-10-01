@@ -432,3 +432,27 @@ test('independent processes cannot reserve and upload the same reviewed episode 
   assert.equal((await readdir(f.directory)).filter((name) => name.endsWith('.upload-init')).length, 1);
   assert.equal((await f.store.read()).publications.length, 1);
 });
+
+
+test('silent publication preflight uses visual-only assets and rejects unexpected sound or captions', async t => {
+  const f = await fixture(t);
+  await f.store.transaction(state => {
+    const episode = state.episodes[0];
+    episode.audioMode = 'silent';
+    episode.scenes[0].narration = '';
+    episode.render.audioMode = 'silent';
+    episode.render.hasAudio = false;
+    delete episode.render.sceneAssets[0].audioAssetId;
+    state.assets = state.assets.filter(asset => asset.kind !== 'audio');
+    approve(episode, state.assets);
+  });
+  const publisher = new Publisher(f.store, { env: f.env, fetchImpl: () => { throw new Error('Preflight does not call a provider'); } });
+  const planArgs = { episodeId: f.episode.id, platform: 'youtube', privacy: 'private' };
+  assert.equal((await publisher.preflight(planArgs)).ready, true);
+  for (const changed of [{ hasAudio: true }, { captionsTiming: 'scene-approximate' }, { audioMode: 'narrated' }]) {
+    await f.store.transaction(state => { Object.assign(state.episodes[0].render, { audioMode: 'silent', hasAudio: false }); delete state.episodes[0].render.captionsTiming; Object.assign(state.episodes[0].render, changed); approve(state.episodes[0], state.assets); });
+    const plan = await publisher.preflight(planArgs);
+    assert.equal(plan.ready, false);
+    assert.ok(plan.reasons.some(reason => reason.includes('zero audio and no captions')));
+  }
+});

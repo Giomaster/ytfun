@@ -25,7 +25,7 @@ async function rendered(fixture, episode) {
   const sceneAssets = [];
   for (const scene of episode.scenes) {
     const linked = { sceneId: scene.id };
-    for (const kind of ['image', 'audio']) {
+    for (const kind of episode.audioMode === 'silent' ? ['image'] : ['image', 'audio']) {
       const id = randomUUID();
       const path = `assets/${id}.${kind === 'image' ? 'png' : 'wav'}`;
       await writeFile(join(fixture.directory, path), `synthetic-${kind}-${scene.id}`);
@@ -36,7 +36,7 @@ async function rendered(fixture, episode) {
   }
   const path = `assets/${episode.id}.mp4`;
   await writeFile(join(fixture.directory, path), 'render-fixture');
-  const render = { path, sha256: await fileSha256(join(fixture.directory, path)), durationSeconds: episode.scenes.reduce((sum, scene) => sum + scene.durationSeconds, 0), sceneAssets, synthetic: true, createdAt: new Date().toISOString() };
+  const render = { path, sha256: await fileSha256(join(fixture.directory, path)), durationSeconds: episode.scenes.reduce((sum, scene) => sum + scene.durationSeconds, 0), sceneAssets, synthetic: true, createdAt: new Date().toISOString(), ...(episode.audioMode === 'silent' ? { audioMode: 'silent', hasAudio: false } : {}) };
   await fixture.store.transaction((state) => {
     state.assets.push(...assets);
     Object.assign(state.episodes.find((entry) => entry.id === episode.id), { render, status: 'rendered' });
@@ -221,4 +221,47 @@ test('approval rejects traversal and symlinks outside the controlled assets dire
   await symlink(outside, join(f.directory, 'assets', 'escape.png'));
   await f.store.transaction((state) => { state.assets[0].path = 'assets/escape.png'; state.assets[0].sha256 = output.assets[0].sha256; });
   await assert.rejects(f.studio.approveEpisode({ episodeId: episode.id, review }), /escapes studio/);
+});
+
+
+test('silent plans omit narration while narrated plans retain their voice requirement', async t => {
+  const f = await fixture(t);
+  const silent = { audioMode: 'silent', scenes: [{ durationSeconds: 5, visualPrompt: 'A polished obsidian sphere reveals a spiral galaxy above a purple miniature sofa.' }] };
+  const episode = await f.studio.planEpisode(episodeInput(f.project.id, silent));
+  assert.equal(episode.audioMode, 'silent');
+  assert.equal(episode.scenes[0].narration, '');
+  await assert.rejects(f.studio.planEpisode(episodeInput(f.project.id, { ...silent, scenes: [{ ...silent.scenes[0], narration: 'A spoken line.' }] })), /cannot contain narration/);
+  await assert.rejects(f.studio.planEpisode(episodeInput(f.project.id, { audioMode: 'soundtrack' })), /audioMode/);
+  await assert.rejects(f.studio.planEpisode(episodeInput(f.project.id, { scenes: silent.scenes })), /narration/);
+});
+
+test('silent editorial review accepts visual-only mappings and rejects audio or captions', async t => {
+  const f = await fixture(t);
+  const episode = await f.studio.planEpisode(episodeInput(f.project.id, { audioMode: 'silent', scenes: [{ durationSeconds: 5, visualPrompt: 'An original cybernetic kitten hangs from a violet sofa as a tiny portal opens.' }] }));
+  await rendered(f, episode);
+  assert.equal((await f.studio.editorialReview(episode.id)).readyForApproval, true);
+  const approved = await f.studio.approveEpisode({ episodeId: episode.id, review });
+  assert.equal(approved.render.hasAudio, false);
+  assert.equal(approved.render.sceneAssets[0].audioAssetId, undefined);
+  const baseline = structuredClone(approved.render);
+  for (const changed of [{ hasAudio: true }, { audioMode: 'narrated' }, { captionsTiming: 'scene-approximate' }]) {
+    await f.store.transaction(state => { state.episodes[0].render = { ...baseline, ...changed }; });
+    const findings = await f.studio.editorialReview(episode.id);
+    assert.ok(findings.findings.some(item => item.code === 'silent_render_invalid'));
+  }
+});
+
+test('silent duplicate detection compares visual stories without treating empty narration as a duplicate', async t => {
+  const f = await fixture(t);
+  const input = episodeInput(f.project.id, { audioMode: 'silent', scenes: [{ durationSeconds: 5, visualPrompt: 'A golden pear opens to reveal a coral reef with tiny swimming fish.' }] });
+  await f.studio.planEpisode(input);
+  await assert.rejects(f.studio.planEpisode({ ...input, title: 'Another unrelated title' }), /visual story token overlap/);
+  const distinct = await f.studio.planEpisode({ ...input, title: 'The portal beneath the black stone', originalAngle: 'A comic kitten struggles against gravity in a miniature living room.', scenes: [{ durationSeconds: 5, visualPrompt: 'A dark obsidian cube forms a gravitational vortex that pulls a silver kitten and purple couch inward.' }] });
+  assert.equal(distinct.audioMode, 'silent');
+});
+
+test('review hashes bind planned audio mode and final stream attestation', () => {
+  const base = { title: 'Silent portal', scenes: [], audioMode: 'silent', render: { audioMode: 'silent', hasAudio: false } };
+  assert.notEqual(episodeReviewHash(base), episodeReviewHash({ ...base, audioMode: 'narrated' }));
+  assert.notEqual(episodeReviewHash(base), episodeReviewHash({ ...base, render: { ...base.render, hasAudio: true } }));
 });
