@@ -29,6 +29,12 @@ visual storytelling and optional original nonverbal sound, without speech or
 on-screen text unless the user requests a different direction. This media rule
 does not impose cheaper coding-agent models or permit local validation tests.
 
+For prompt-led pilots/retries, improve the video prompt, generate one clip and
+review it promptly. Honor requests to skip still-image generation: use direct
+text-to-video when supported or reuse the existing reference required by an
+image-to-video route. Do not insert new image generation or storyboards into
+that iteration; keep review/evidence focused on the actual action.
+
 ## Direct the scene before prompting
 
 Follow [Film direction before animation](AGENTS.md#film-direction-before-animation)
@@ -54,8 +60,14 @@ incidental choreography. Anything that interacts with the action becomes relevan
 and needs direction; simplify or split the shot when necessary. Concentrate detail
 on the action's components rather than cataloguing decorations or adding actions.
 
-Make reference frames physically compatible with that choreography. Correct
-incompatible geometry before spending; still-frame approval does not approve
+Whenever the video reveals an object's interior, the interior must be more visually
+impressive than the exterior. Direct the reveal's observable contrast, luminosity,
+depth, texture and motion so it delivers the strongest payoff, with a held ending.
+Preserve material behavior and support: no spontaneously flying shells or molten
+liquid stretching like gum unless the work explicitly calls for those properties.
+
+When using reference frames, make them physically compatible with that choreography.
+Correct incompatible geometry before spending; still-frame approval does not approve
 animation. Keep the full directing plan and the model-specific prompt distinct:
 use clear observable actions and supported controls, one main beat with linked
 consequences per short shot, and split independent choreography when needed.

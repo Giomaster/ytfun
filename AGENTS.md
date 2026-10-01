@@ -130,6 +130,12 @@ Quality, required checks and authorization are constraints, not token-saving opt
 - AI Meow videos should communicate through images, motion and optional original
   nonverbal sound, without spoken language or on-screen text. Do not generate
   narration or subtitles for these videos unless the user changes this direction.
+- For prompt-led pilots and retries, keep the cycle short: improve the video
+  prompt, generate one clip and review the action. Honor an explicit request to
+  skip still-image generation: use direct text-to-video when supported, or reuse
+  an existing reference when the chosen image-to-video route needs it. Do not
+  add new image generation or storyboards to that iteration. Review and record
+  enough evidence to catch material failures without unrelated setup or polishing.
 
 ## Film direction before animation
 
@@ -158,7 +164,7 @@ Quality, required checks and authorization are constraints, not token-saving opt
   the action becomes relevant and needs its own direction; simplify or split the shot
   if its complexity exceeds the available controls. Depth of relevant detail does
   not require describing every decoration or adding more simultaneous actions.
-- Design compatible reference frames from that choreography. Check camera, scale,
+- When using reference frames, design them from that choreography. Check camera, scale,
   identity, tool orientation, cutting plane and the positions of resulting parts.
   Every change needs a possible continuous path. Correct incompatible references
   before spending; do not hide the mismatch by adding instructions to the prompt.
@@ -181,6 +187,15 @@ Quality, required checks and authorization are constraints, not token-saving opt
   Language-free does not mean sound-free: original nonverbal effects, ambience and
   music may support the work when authorized and supported. Record sound plans even
   when the current silent renderer cannot implement them; do not claim audio exists.
+- Whenever a video reveals an object's interior, make the interior more visually
+  impressive than the exterior. The exterior builds anticipation; the opening must
+  deliver the strongest visual payoff. Specify what is revealed and how contrast,
+  luminosity, depth, material texture and motion make the reveal visibly stronger,
+  with a clear held ending. "Wow" adjectives alone do not define the result. Keep
+  the reveal focused on relevant components and preserve their material behavior:
+  supported shells/fragments retain weight, molten liquids flow downhill and pool,
+  and elastic stretching is used only for an intentionally elastic material.
+  Visual spectacle never excuses spontaneous flight or an incoherent transformation.
 - Plan beats at a complexity the selected model can deliver. Give a short shot
   one principal action with its causally linked development and reactions. Split
   independent choreography into additional shots with continuity and a complete

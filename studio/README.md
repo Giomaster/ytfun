@@ -25,6 +25,11 @@ série precisa ser combinado antes de entrar em produção.
   elementos com ações independentes; os demais podem compor uma paisagem ou fundo
   estável e simples de preservar entre frames. Elementos que interagem com a ação
   passam a exigir direção própria; simplificar ou dividir o plano quando necessário.
+- Quando houver revelação interna, o interior deve superar o exterior em impacto
+  visual, com contraste, luz, profundidade, textura ou movimento concretamente
+  dirigidos. Preservar o peso da casca e o comportamento dos materiais. Em rodadas
+  de ajuste de prompt sem novas imagens, gerar o vídeo diretamente ou reutilizar
+  a referência existente que a rota exigir; manter a revisão focada na ação.
 - Validar cada conceito em piloto barato antes de investir em qualidade maior; usar modelos pagos quando o ganho justificar o custo. A direção editorial prioriza vídeos longos com unidades que rendam shorts completos, sem fala ou texto. O perfil de render implementado abaixo mantém seus limites atuais. Sem teto
   mensal fixo por padrão. Cada chamada guarda estimativa e fonte de preço;
   operação paga exige reconhecimento por chamada e habilitação no ambiente.

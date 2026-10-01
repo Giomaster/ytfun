@@ -2,8 +2,8 @@
 
 Esta ficha orienta a produção humana/assistida por MCP. Não é uma etapa automática
 implementada no servidor, nem uma garantia de obediência do modelo. Preencher antes
-de criar referências e pagar pela animação; transformar depois em um prompt adequado
-ao modelo e aos controles disponíveis.
+de criar referências (quando utilizadas) e pagar pela animação; transformar depois
+em um prompt adequado ao modelo e aos controles disponíveis.
 
 ## Princípio geral: premissa absurda, execução convincente
 
@@ -48,6 +48,29 @@ modelo. Profundidade não é enumerar toda decoração nem acumular ações simu
 o roteiro completo continua separado do prompt. Conferir na revisão se os componentes
 principais obedecem à direção e se o fundo mantém identidade e disposição coerentes.
 
+## Revelações: o interior precisa superar o exterior
+
+Quando houver revelação interna, o exterior constrói a curiosidade e o interior
+entrega o maior impacto visual. Definir o conteúdo revelado, como a abertura o
+expõe e como contraste, luminosidade, profundidade, textura e movimento tornam
+o desfecho mais impressionante. Não basta pedir um interior "UAU": o prompt
+precisa descrever características visíveis e reservar tempo para apreciá-las.
+Manter poucos componentes relevantes e um fundo estável.
+
+O impacto respeita a execução: cascas e fragmentos conservam peso e apoio;
+líquidos viscosos escorrem para baixo, dobram e se acumulam, sem levantar a casca
+nem virar fios de chiclete. Estiramento elástico pertence a materiais elásticos
+ou a uma exceção criativa explícita. Rever tanto a superioridade visual do interior
+quanto a continuidade e resposta dos materiais.
+
+## Iteração rápida de prompt
+
+Quando o usuário pedir geração sem novas imagens, ajustar o prompt e gerar o vídeo
+diretamente pela rota compatível; uma rota image-to-video pode reutilizar a referência
+existente. Não inserir geração de imagens ou novos storyboards nessa rodada.
+Concentrar a revisão no corte/ação, material, revelação e fim; evitar preparação
+ou acabamento que não resolvam uma falha demonstrada.
+
 ## Ficha por plano
 
 Preencher os campos pertinentes ao plano; marcar como não aplicável o que não fizer
@@ -57,6 +80,7 @@ parte da cena. A ficha não exige cortes, personagens ou efeitos em toda obra.
 | --- | --- |
 | Obra e exceções | Gênero, tom, linguagem visual/sonora, regras do universo e alcance de cada impossibilidade deliberada. |
 | Função narrativa | O que o espectador precisa perceber e qual é a ação principal. |
+| Impacto da revelação | Quando houver interior, o que o torna mais impressionante que o exterior e como o payoff permanece legível no fim. |
 | Componentes relevantes e fundo | Quais elementos conduzem a ação/desfecho e exigem detalhe profundo no prompt; quais compõem apenas cenário estável e simples de manter entre frames. |
 | Estado inicial e final | Objetos presentes, posições, orientações e transformação esperada. |
 | Câmera e composição | Posição, perspectiva, enquadramento, foco e movimento deliberado ou câmera fixa. |
