@@ -120,6 +120,35 @@ Quality, required checks and authorization are constraints, not token-saving opt
   nonverbal sound, without spoken language or on-screen text. Do not generate
   narration or subtitles for these videos unless the user changes this direction.
 
+## Long-form videos and standalone shorts
+
+- Prioritize an original long-form video as the main production. Plan it from
+  the outline to also yield multiple distinct shorts; publish the complete video
+  and adapt its strongest segments for short-form platforms. Length must serve
+  the story rather than padding an idea to reach a duration or clip count.
+- Design several reusable narrative units before generating expensive assets.
+  Each potential short needs its own visual hook, enough context to understand
+  it, a clear development and an intentional ending. The long-form story must
+  remain coherent and rewarding as a whole.
+- Select clips at narrative boundaries instead of splitting the master into
+  equal time chunks. Give each short a complete visual payoff, held reaction,
+  resolved gag or deliberately constructed seamless loop. Preserve the frames
+  and sound needed for the ending to land; do not stop mid-action or rely on the
+  next clip to supply a missing conclusion. A continuation invitation may follow
+  a satisfying ending without replacing it.
+- Re-edit derived shorts when needed: tighten the opening, supply minimal visual
+  context, adjust pacing, reframe for the target aspect ratio and build a natural
+  ending. Account for both master and short-form framing during shot planning so
+  the subject and action survive adaptation. Keep the language-free direction.
+- Apply pilot-first production to this whole plan: validate the long-form
+  structure and the intended short segments cheaply before upgrading generation.
+  Reuse original approved assets where appropriate, while reviewing each final
+  long video and each short as its own deliverable.
+- Record each short's parent video, source scenes/time ranges and edit decisions.
+  Give it distinct metadata, review and publication records, and schedule all
+  formats through the same channel-wide cadence. Derive as many strong shorts as
+  the story supports; quality and complete endings determine the count.
+
 ## Studio contracts
 
 - `studio/` is an independent Node ESM MCP package; legacy CLI remains intact.
