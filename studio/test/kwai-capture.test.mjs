@@ -100,6 +100,40 @@ test('allowlist never expands to a subdomain or lookalike implicitly', () => {
   }
 });
 
+test('observed mobile hosts require exact selection and exclude siblings and spoofed destinations', () => {
+  const base = entry();
+  const allowedHosts = ['az2-api-akpro.kwaipros.com', 'kste.ksapisrv.com'];
+  const excludedHosts = [
+    'other.kwaipros.com', 'kwaipros.com',
+    'ksapisrv.com', 'other.ksapisrv.com', 'sub.kste.ksapisrv.com',
+    'az2-api-akpro.kwaipros.com.evil.example', 'kwaipros.com.evil.example',
+    'kste.ksapisrv.com.evil.example', 'notkwaipros.com', 'notkste.ksapisrv.com',
+    'foreign.example',
+  ];
+  const entries = [...allowedHosts, ...excludedHosts].map((host) =>
+    entry({ request: { ...base.request, url: `https://${host}/rest/video/upload` } }));
+  const result = inspectKwaiHar(har(entries), { allowedHosts });
+  assert.equal(result.selectedEntries, allowedHosts.length);
+  assert.equal(result.excludedEntries, excludedHosts.length);
+  assert.deepEqual(result.observations.map((observation) => observation.host), allowedHosts);
+  assert.equal(result.provesPublication, false);
+});
+
+test('configuration permits the observed kwaipros family and only the single ksapisrv host', () => {
+  const base = entry();
+  for (const host of ['kwaipros.com', 'az2-api-akpro.kwaipros.com', 'other.kwaipros.com', 'kste.ksapisrv.com']) {
+    const result = inspectKwaiHar(har([entry({ request: { ...base.request, url: `https://${host}/rest/video/upload` } })]), { allowedHosts: [host] });
+    assert.equal(result.selectedEntries, 1);
+  }
+  for (const host of [
+    'ksapisrv.com', 'other.ksapisrv.com', 'sub.kste.ksapisrv.com', 'notkste.ksapisrv.com',
+    'az2-api-akpro.kwaipros.com.evil.example', 'notkwaipros.com',
+    'kste.ksapisrv.com.evil.example', 'foreign.example',
+  ]) {
+    assert.throws(() => inspectKwaiHar(har(), { allowedHosts: [host] }), /Kwai capture inventory failed/);
+  }
+});
+
 test('malformed or unsafe selected entries fail without reflecting private input', () => {
   const base = entry();
   const variants = [

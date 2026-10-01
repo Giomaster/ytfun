@@ -43,10 +43,22 @@ node studio/scripts/inspect-kwai-har.mjs /private/location/capture.har --host ww
 `www.kwai.com` is an example of selecting the known public host, not an asserted
 upload endpoint. Additional observed Kwai/media hosts need their own repeated
 `--host` option. The supported domain families are `kwai.com`, `kwai.net`,
-`kwai-pro.com`, `cutmotions.com` and `kwaicdn.com`. Selecting a family does not
-include its subdomains. A newly observed family requires a reviewed change to
-the inspector before it can be included. This list does not assert that any
-family implements publishing.
+`kwai-pro.com`, `kwaipros.com`, `cutmotions.com` and `kwaicdn.com`. The separate
+host `kste.ksapisrv.com` is also permitted; the `ksapisrv.com` family and its
+other hosts are not permitted. Selection still matches only the exact configured
+hostname, including for the supported families. A newly observed family or
+single host requires a reviewed change to the inspector before it can be
+included. This list does not assert that any family implements publishing.
+
+A mobile CONNECT capture observed destinations `az2-api-akpro.kwaipros.com`
+and `kste.ksapisrv.com`. The Kwai APK's `networkSecurityConfig` also declares
+`kwaipros.com`. These observations justify accepting those destinations for
+explicit offline inspection. They do not prove a publication route or
+unambiguous attribution of captured traffic to a specific app/account. CONNECT
+destinations alone do not expose the HTTP routes, methods or payloads inside a
+TLS connection; the inspector still requires the actual supported HTTP entries
+in a HAR. No endpoint, request signature or publisher behavior is inferred from
+these hostnames.
 
 The command prints a JSON inventory to stdout only after the whole capture has
 been parsed and validated. It never prints the input filename. Failure prints a

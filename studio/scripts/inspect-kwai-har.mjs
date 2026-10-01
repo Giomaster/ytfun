@@ -14,7 +14,8 @@ export const CAPTURE_LIMITS = Object.freeze({
   jsonBodyDepth: 4,
 });
 
-const HOST_FAMILIES = ['kwai.com', 'kwai.net', 'kwai-pro.com', 'cutmotions.com', 'kwaicdn.com'];
+const HOST_FAMILIES = ['kwai.com', 'kwai.net', 'kwai-pro.com', 'kwaipros.com', 'cutmotions.com', 'kwaicdn.com'];
+const EXACT_HOSTS = new Set(['kste.ksapisrv.com']);
 const METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']);
 // Only this fixed vocabulary can survive into output. A plausible-looking
 // account name, opaque identifier or credential must never become a path label.
@@ -61,7 +62,7 @@ function normalizeHosts(hosts) {
     const normalized = host.toLowerCase();
     requireValid(/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(normalized));
     requireValid(normalized.split('.').every((label) => label.length > 0 && label.length <= 63 && !label.startsWith('-') && !label.endsWith('-')));
-    requireValid(HOST_FAMILIES.some((family) => normalized === family || normalized.endsWith(`.${family}`)));
+    requireValid(EXACT_HOSTS.has(normalized) || HOST_FAMILIES.some((family) => normalized === family || normalized.endsWith(`.${family}`)));
     return normalized;
   }));
 }
