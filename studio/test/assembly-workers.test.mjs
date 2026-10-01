@@ -142,7 +142,7 @@ test('remote assembly uses 96 exact original videos/WAVs and publishes only veri
     await writeFile(join(c.directory, 'studio/batches/render-launch.json'), JSON.stringify(launch(changed)));
     const env = { ...c.env, AI_MEOW_RENDER_PACKET: packAssemblyPacket(changed).encoded };
     let recoveryCalls = 0;
-    await assert.rejects(runRenderWorker({ env, artifact, fetchImpl: ownedFetch(changed), recover: async () => {
+    await assert.rejects(runRenderWorker({ env, artifact, fetchImpl: ownedFetch(changed, value => { if (value.workflow_run) value.digest = `sha256:${sha('original-audio-archive')}`; }), recover: async () => {
       recoveryCalls++;
       return outcome === 'pending' ? { remoteStatus: 'IN_PROGRESS' } : { remoteStatus: 'COMPLETED', blob: new Blob([mp4('a different unregistered source')]) };
     }, runner: async () => assert.fail('Pending or mismatched sources must not start any media command') }), /Remote original assembly failed/);
