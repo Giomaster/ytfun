@@ -6,7 +6,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { StudioStore } from './store.mjs';
 import { Studio } from './domain.mjs';
-import { Production } from './production.mjs';
+import { Production, videoParametersSchema } from './production.mjs';
 import { Publisher } from './publishing.mjs';
 import { Research } from './research.mjs';
 import { ProductionJobs } from './jobs.mjs';
@@ -22,6 +22,7 @@ const platform = z.enum(['youtube', 'facebook', 'tiktok', 'kwai']);
 const metadata = z.object({ description: z.string().max(5000), hashtags: z.array(z.string().trim().min(1).max(60).regex(/^#[\p{L}\p{N}_]+$/u)).max(8) });
 const generationSchema = {
   episodeId: id, sceneId: id, kind, model: z.string().trim().min(1).max(200), provider: z.string().trim().min(1).max(100), prompt: text.optional(), estimatedCostUsd: z.number().finite().nonnegative(), pricingSourceUrl: url, commercialLicense: license, acknowledgePaidCost: z.boolean().default(false),
+  videoParameters: videoParametersSchema.optional(),
 };
 
 export function createServer({ directory = process.env.YTFUN_STUDIO_DIR, env = process.env, fetchImpl = fetch, store, studio, production, publisher, research, youtubeLifecycle } = {}) {

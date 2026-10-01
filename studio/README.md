@@ -128,6 +128,16 @@ intervalo mínimo de 12 horas e até 3 uploads por janela de 24 horas. O publish
 aplica a regra mais restritiva dos projetos que compartilham o mesmo canal, conta
 reservas/futuros e não faz afirmações sobre uma frequência oficial antispam.
 
+Geração de vídeo aceita `videoParameters` opcional na ferramenta direta e no job.
+O subconjunto explícito admite resolução 480p/580p/720p, proporção 16:9/9:16,
+81–121 quadros inteiros, 16 fps, 1–40 passos, seed de 0 a 2³²−1, interpolador
+`none`, zero quadros interpolados e expansão de prompt booleana. Sem parâmetros,
+os defaults atuais do provedor ficam intactos. Parâmetros usados ficam na reserva
+e na proveniência; a estimativa e a autorização de custo continuam explícitas.
+O retry automático de geração do SDK fica desativado; uma falha após a reserva
+continua `unknown` e exige reconciliação antes de outra chamada.
+Os nomes seguem a [API Wan 2.2 do fal.ai](https://fal.ai/models/fal-ai/wan/v2.2-a14b/text-to-video/api), encaminhados pelo SDK Hugging Face; isso não garante suporte de outros modelos/provedores nem um preço fixo.
+
 YouTube precisa de OAuth válido e `YOUTUBE_CHANNEL_ID`.
 Escopos: `youtube.upload` e `youtube.readonly`; métricas pedem
 `yt-analytics.readonly`. A autenticação histórica do ytfun pode ser reaproveitada

@@ -3,6 +3,7 @@ import { mkdir, open, realpath, rm, writeFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { spawn } from 'node:child_process';
+import { z } from 'zod';
 import { episodeReviewHash } from './domain.mjs';
 
 const MAX_ASSET_BYTES = 100 * 1024 * 1024;
@@ -14,6 +15,28 @@ const MIME_EXTENSIONS = {
   audio: { 'audio/wav': '.wav', 'audio/x-wav': '.wav', 'audio/mpeg': '.mp3', 'audio/ogg': '.ogg', 'audio/flac': '.flac', 'audio/mp4': '.m4a' },
   video: { 'video/mp4': '.mp4', 'video/webm': '.webm' },
 };
+
+// Explicit pilot controls, a bounded subset of the Wan 2.2 fal API. No defaults:
+// omitting parameters preserves the provider's existing generation behavior.
+export const videoParametersSchema = z.strictObject({
+  resolution: z.enum(['480p', '580p', '720p']).optional(),
+  aspect_ratio: z.enum(['16:9', '9:16']).optional(),
+  num_frames: z.number().int().min(81).max(121).optional(),
+  frames_per_second: z.literal(16).optional(),
+  num_inference_steps: z.number().int().min(1).max(40).optional(),
+  seed: z.number().int().min(0).max(4_294_967_295).optional(),
+  interpolator_model: z.literal('none').optional(),
+  num_interpolated_frames: z.literal(0).optional(),
+  enable_prompt_expansion: z.boolean().optional(),
+});
+
+function videoParametersFor(kind, value) {
+  if (value === undefined) return undefined;
+  if (kind !== 'video') throw new Error('videoParameters is allowed only for video generation');
+  const parsed = videoParametersSchema.safeParse(value);
+  if (!parsed.success) throw new Error('videoParameters contains unsupported values or fields');
+  return parsed.data;
+}
 
 function requiredText(value, name, max = 20000) {
   if (typeof value !== 'string' || !value.trim() || value.length > max) throw new Error(`${name} must be nonempty text (maximum ${max} characters)`);
@@ -230,8 +253,9 @@ export class Production {
     this.runner = runner;
   }
 
-  async generateAsset({ episodeId, sceneId, kind, model, provider, prompt, estimatedCostUsd, pricingSourceUrl, commercialLicense, acknowledgePaidCost = false }) {
+  async generateAsset({ episodeId, sceneId, kind, model, provider, prompt, videoParameters, estimatedCostUsd, pricingSourceUrl, commercialLicense, acknowledgePaidCost = false }) {
     requireKind(kind);
+    const parameters = videoParametersFor(kind, videoParameters);
     model = requiredText(model, 'model', 300);
     provider = requiredText(provider, 'provider', 100);
     if (provider === 'auto') throw new Error('Choose an explicit provider so the cost and license evidence refer to the actual service');
@@ -251,7 +275,7 @@ export class Production {
       requireProductionKind(episode, kind);
       if (hasPendingGeneration(state, episodeId, sceneId, kind)) throw new Error('A previous generation is reserved or has an unknown charge outcome; reconcile it before retrying');
       assertBudget(state, project, estimatedCostUsd);
-      state.spending.push({ id, projectId: project.id, episodeId, sceneId, kind, provider, model, estimatedCostUsd, pricingSourceUrl: pricing.url, priceNote: pricing.notes, status: 'reserved', createdAt: new Date().toISOString() });
+      state.spending.push({ id, projectId: project.id, episodeId, sceneId, kind, provider, model, ...(parameters === undefined ? {} : { videoParameters: { ...parameters } }), estimatedCostUsd, pricingSourceUrl: pricing.url, priceNote: pricing.notes, status: 'reserved', createdAt: new Date().toISOString() });
       invalidate(episode);
     });
     let asset;
@@ -259,13 +283,15 @@ export class Production {
       const client = this.inferenceClient ?? new (await import('@huggingface/inference')).InferenceClient(this.env.HF_TOKEN);
       const method = { image: 'textToImage', audio: 'textToSpeech', video: 'textToVideo' }[kind];
       // Official SDK textToVideo/textToSpeech return Blob; textToImage is forced to Blob.
-      const output = await client[method]({ model, provider, inputs }, kind === 'image' ? { outputType: 'blob' } : undefined);
+      // A 503 may have an ambiguous charge outcome; disable the SDK's recursive retry.
+      const options = { retry_on_error: false, ...(kind === 'image' ? { outputType: 'blob' } : {}) };
+      const output = await client[method]({ model, provider, inputs, ...(parameters === undefined ? {} : { parameters: { ...parameters } }) }, options);
       if (!(output instanceof Blob) || output.size === 0 || output.size > MAX_ASSET_BYTES) throw new Error('Inference response must be a nonempty Blob no larger than 100 MiB');
       const extension = MIME_EXTENSIONS[kind][output.type.toLowerCase().split(';')[0]];
       if (!extension) throw new Error(`Unsupported ${kind} response MIME type`);
       const bytes = Buffer.from(await output.arrayBuffer());
       if (detectType(bytes, kind) !== extension) throw new Error('Inference response MIME type does not match its file header');
-      asset = await saveAsset(this.store, bytes, extension, { episodeId, sceneId, kind, provenance: { provider, model, prompt: inputs, commercialLicense: license } });
+      asset = await saveAsset(this.store, bytes, extension, { episodeId, sceneId, kind, provenance: { provider, model, prompt: inputs, ...(parameters === undefined ? {} : { videoParameters: { ...parameters } }), commercialLicense: license } });
       return await this.store.transaction((state) => {
         const { episode } = sceneContext(state, episodeId, sceneId);
         mutableEpisode(episode, state);

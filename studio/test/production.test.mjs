@@ -7,6 +7,7 @@ import { StudioStore } from '../src/store.mjs';
 import { Studio } from '../src/domain.mjs';
 import { Production } from '../src/production.mjs';
 import { ProductionJobs } from '../src/jobs.mjs';
+import { InferenceClient } from '@huggingface/inference';
 
 // Small signatures are intentional: these tests exercise contracts with a fake
 // inference client/process runner. They never perform inference or media encoding.
@@ -16,6 +17,7 @@ const MP4 = Buffer.from([0, 0, 0, 24, ...Buffer.from('ftypisom000000000000')]);
 const license = { url: 'https://provider.example/model-license', notes: 'Commercial generation permitted for this model; all inputs are synthetic or licensed.' };
 const provenance = { provider: 'studio-example', model: 'licensed-model', prompt: 'An original fictional clock city.', synthetic: true, commercialLicense: license };
 const env = { HF_TOKEN: 'fake-token', FFMPEG_PATH: 'fake-ffmpeg', FFPROBE_PATH: 'fake-ffprobe' };
+const pilotVideoParameters = { resolution: '480p', aspect_ratio: '16:9', num_frames: 81, frames_per_second: 16, num_inference_steps: 27, seed: 20261001, interpolator_model: 'none', num_interpolated_frames: 0, enable_prompt_expansion: false };
 
 async function setup(t, { budgetMonthlyUsd = null, sceneCount = 1, audioMode } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'ytfun-production-'));
@@ -83,7 +85,7 @@ test('free-first generation reserves before cloud inference and stores licensing
     return new Blob([PNG], { type: 'image/png' });
   } } });
   const asset = await production.generateAsset(generation(context.episode));
-  assert.deepEqual(received, { args: { model: 'example/licensed-model', provider: 'hf-inference', inputs: context.episode.scenes[0].visualPrompt }, options: { outputType: 'blob' } });
+  assert.deepEqual(received, { args: { model: 'example/licensed-model', provider: 'hf-inference', inputs: context.episode.scenes[0].visualPrompt }, options: { retry_on_error: false, outputType: 'blob' } });
   assert.equal(asset.synthetic, true);
   assert.deepEqual(asset.provenance.commercialLicense, license);
   assert.match(asset.sha256, /^[a-f0-9]{64}$/);
@@ -112,6 +114,110 @@ test('positive costs need both a per-call acknowledgment and the operator switch
   assert.equal(requests, 1);
 });
 
+test('explicit video pilot parameters reach the SDK and survive in reservation and provenance', async (t) => {
+  const context = await setup(t, { audioMode: 'silent' });
+  let received;
+  const production = new Production(context.store, { env: { ...env, YTFUN_PAID_GENERATION_ENABLED: 'true' }, inferenceClient: { textToVideo: async (args, options) => {
+    received = { args: structuredClone(args), options };
+    const state = await context.store.read();
+    assert.equal(state.spending[0].status, 'reserved');
+    assert.deepEqual(state.spending[0].videoParameters, pilotVideoParameters);
+    // SDK mutation must not rewrite the reserved intent or asset provenance.
+    args.parameters.seed = 7;
+    return new Blob([MP4], { type: 'video/mp4' });
+  } } });
+  const asset = await production.generateAsset(generation(context.episode, { kind: 'video', provider: 'fal-ai', videoParameters: pilotVideoParameters, estimatedCostUsd: 0.2, acknowledgePaidCost: true }));
+  assert.deepEqual(received, { args: { model: 'example/licensed-model', provider: 'fal-ai', inputs: context.episode.scenes[0].visualPrompt, parameters: pilotVideoParameters }, options: { retry_on_error: false } });
+  assert.deepEqual(asset.provenance.videoParameters, pilotVideoParameters);
+  assert.deepEqual(pilotVideoParameters.seed, 20261001);
+  const state = await context.store.read();
+  assert.deepEqual(state.assets[0].provenance.videoParameters, pilotVideoParameters);
+  assert.deepEqual(state.spending[0].videoParameters, pilotVideoParameters);
+  assert.equal(state.spending[0].estimatedCostUsd, 0.2);
+  assert.equal(state.spending[0].status, 'completed');
+  assert.doesNotMatch(JSON.stringify(state), /fake-token/);
+});
+
+test('video parameters reject non-video kinds and unsupported values before reservation or inference', async (t) => {
+  const context = await setup(t);
+  let requests = 0;
+  const request = async () => { requests += 1; assert.fail('Invalid parameters cannot reach inference'); };
+  const production = new Production(context.store, { env, inferenceClient: { textToImage: request, textToSpeech: request, textToVideo: request } });
+  for (const kind of ['image', 'audio']) {
+    await assert.rejects(production.generateAsset(generation(context.episode, { kind, videoParameters: {} })), /only for video/);
+  }
+  for (const videoParameters of [null, [], { resolution: '1080p' }, { aspect_ratio: '1:1' }, { num_frames: 80 }, { num_frames: 122 }, { num_frames: 81.5 }, { frames_per_second: 15 }, { num_inference_steps: 0 }, { num_inference_steps: 41 }, { seed: -1 }, { seed: 4_294_967_296 }, { interpolator_model: 'film' }, { num_interpolated_frames: 1 }, { enable_prompt_expansion: 'false' }, { authorization: 'not-a-real-secret' }, { enable_safety_checker: false }]) {
+    await assert.rejects(production.generateAsset(generation(context.episode, { kind: 'video', videoParameters })), error => {
+      assert.match(error.message, /unsupported values or fields/);
+      assert.doesNotMatch(error.message, /not-a-real-secret/);
+      return true;
+    });
+  }
+  assert.equal(requests, 0);
+  const state = await context.store.read();
+  assert.equal(state.spending.length, 0);
+  assert.equal(state.assets.length, 0);
+});
+
+test('omitting video parameters preserves the prior SDK call and does not record invented defaults', async (t) => {
+  const context = await setup(t);
+  let received;
+  const production = new Production(context.store, { env, inferenceClient: { textToVideo: async args => {
+    received = args;
+    return new Blob([MP4], { type: 'video/mp4' });
+  } } });
+  const asset = await production.generateAsset(generation(context.episode, { kind: 'video' }));
+  assert.deepEqual(received, { model: 'example/licensed-model', provider: 'hf-inference', inputs: context.episode.scenes[0].visualPrompt });
+  assert.equal(Object.hasOwn(asset.provenance, 'videoParameters'), false);
+  assert.equal(Object.hasOwn((await context.store.read()).spending[0], 'videoParameters'), false);
+});
+
+test('asynchronous generation jobs forward partial parameters without adding omitted defaults', async (t) => {
+  const context = await setup(t, { audioMode: 'silent' });
+  const parameters = { resolution: '480p', seed: 0, enable_prompt_expansion: false };
+  const production = new Production(context.store, { env, inferenceClient: { textToVideo: async args => {
+    assert.deepEqual(args.parameters, parameters);
+    return new Blob([MP4], { type: 'video/mp4' });
+  } } });
+  const jobs = new ProductionJobs(context.store, production);
+  const job = await jobs.start({ action: 'generate', input: generation(context.episode, { kind: 'video', videoParameters: parameters }) });
+  await jobs.running.get(job.id);
+  const done = await jobs.get(job.id);
+  assert.equal(done.status, 'completed');
+  assert.deepEqual(done.result.provenance.videoParameters, parameters);
+  assert.deepEqual((await context.store.read()).spending[0].videoParameters, parameters);
+});
+
+test('the real SDK submits a paid video only once after 503 and preserves unknown billing', async (t) => {
+  const context = await setup(t, { audioMode: 'silent' });
+  let submissions = 0;
+  const client = new InferenceClient('hf_fake_ci_only', { retry_on_error: true, fetch: async (url, init) => {
+    if (new URL(url).hostname === 'huggingface.co') {
+      assert.match(new URL(url).pathname, /^\/api\/models\/ci-only\/wan-503-contract$/);
+      return Response.json({ inferenceProviderMapping: { 'fal-ai': { providerId: 'fal-ai/wan/v2.2-a14b/text-to-video', status: 'live', task: 'text-to-video' } } });
+    }
+    assert.equal(init.method, 'POST');
+    submissions += 1;
+    // Bound the regression even if a future SDK starts retrying again.
+    if (submissions > 1) throw new Error('A second submission is forbidden');
+    const payload = JSON.parse(init.body);
+    for (const [key, value] of Object.entries(pilotVideoParameters)) assert.deepEqual(payload[key], value);
+    return Response.json({ error: 'Ambiguous failure with fake-provider-secret' }, { status: 503 });
+  } });
+  const production = new Production(context.store, { env: { ...env, YTFUN_PAID_GENERATION_ENABLED: 'true' }, inferenceClient: client });
+  const input = generation(context.episode, { kind: 'video', provider: 'fal-ai', model: 'ci-only/wan-503-contract', videoParameters: pilotVideoParameters, estimatedCostUsd: 0.2, acknowledgePaidCost: true });
+  await assert.rejects(production.generateAsset(input), /Generation failed after reservation/);
+  assert.equal(submissions, 1);
+  const state = await context.store.read();
+  assert.equal(state.spending.length, 1);
+  assert.equal(state.spending[0].status, 'unknown');
+  assert.deepEqual(state.spending[0].videoParameters, pilotVideoParameters);
+  assert.equal(state.assets.length, 0);
+  assert.doesNotMatch(JSON.stringify(state), /hf_fake_ci_only|fake-provider-secret/);
+  await assert.rejects(production.generateAsset(input), /unknown charge outcome/);
+  assert.equal(submissions, 1);
+});
+
 test('a caller may set an optional ceiling; pending and completed estimates count toward it', async (t) => {
   const context = await setup(t, { budgetMonthlyUsd: 0.3, sceneCount: 2 });
   let requests = 0;
@@ -125,7 +231,7 @@ test('a caller may set an optional ceiling; pending and completed estimates coun
 test('failed cloud calls keep an unknown billing outcome and block blind retry or rendering', async (t) => {
   const context = await setup(t);
   let requests = 0;
-  const production = new Production(context.store, { env, inferenceClient: { textToImage: async () => { requests += 1; throw new Error('Provider transport failed: Authorization Bearer secret-provider-token'); } } });
+  const production = new Production(context.store, { env, inferenceClient: { textToImage: async (_args, options) => { assert.equal(options.retry_on_error, false); requests += 1; throw new Error('Provider transport failed: Authorization Bearer secret-provider-token'); } } });
   await assert.rejects(production.generateAsset(generation(context.episode)), (error) => {
     assert.match(error.message, /Generation failed after reservation/);
     assert.doesNotMatch(error.message, /secret-provider-token|Authorization|transport failed/);

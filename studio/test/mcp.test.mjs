@@ -25,6 +25,14 @@ test('stdio MCP negotiates, lists tools and persists a series across restarts', 
   assert.ok(tools.tools.some(tool => tool.name === 'ytfun_facebook_publish'));
   assert.ok(tools.tools.some(tool => tool.name === 'ytfun_kwai_export'));
   assert.ok(tools.tools.some(tool => tool.name === 'ytfun_delivery_enqueue'));
+  const videoSchema = tools.tools.find(tool => tool.name === 'ytfun_asset_generate').inputSchema.properties.videoParameters;
+  assert.equal(videoSchema.additionalProperties, false);
+  assert.deepEqual(videoSchema.properties.resolution.enum, ['480p', '580p', '720p']);
+  assert.equal(videoSchema.properties.num_frames.minimum, 81);
+  assert.equal(videoSchema.properties.num_frames.maximum, 121);
+  assert.equal(videoSchema.properties.frames_per_second.const, 16);
+  const jobSchema = tools.tools.find(tool => tool.name === 'ytfun_production_job_start').inputSchema;
+  assert.match(JSON.stringify(jobSchema), /"videoParameters"/);
   const created = await client.callTool({ name: 'ytfun_project_create', arguments: { title: 'Arquivo das cidades impossíveis', premise: 'Uma cidade imaginária diferente por episódio.', audience: 'Pessoas interessadas em ficção especulativa.', language: 'pt-BR' } });
   assert.ok(!created.isError, JSON.stringify(created));
   const project = JSON.parse(created.content[0].text);
