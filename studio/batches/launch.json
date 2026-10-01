@@ -1,10 +1,12 @@
 {
-  "batchId": "eccf1652-05f4-4d52-b1b5-805e8acbb41a",
-  "packetSha256": "f24cb149ba078ca0a657a7fdd540975c4c74482f2421e65679efb81d951209f4",
+  "batchId": "7d1d96bd-3db5-4b65-b1b5-7190d47cf497",
+  "packetSha256": "e03395a95e4f489b556f7fc4d932e379e0e64cc2b4b584cded6b8c29c681238e",
   "sceneIndices": [
-    5,
+    6,
+    7,
     18,
-    19,
-    20
+    50,
+    51,
+    82
   ]
 }
