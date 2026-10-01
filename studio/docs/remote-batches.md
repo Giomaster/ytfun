@@ -29,5 +29,12 @@ committing a synthetic asset and completing the matching spending reservation.
 It does not approve media or publish anything. Human-authorized editorial review,
 remote assembly registration and platform publication remain separate stages.
 
+A terminal owned Actions job can release an unsubmitted reservation only when the
+verified provider step was skipped (`releaseUnsubmitted`). Failed or interrupted
+provider steps cannot clear the charge barrier. Quality retakes require an exact
+asset hash, observed rejection findings (`rejectAsset`) and changed direction via
+`promptOverrides` plus `replaceRejectedAssetIds`. The original asset and charge
+remain in the record; rejection never erases spending or implies a refund.
+
 All tests run in GitHub Actions. Local media-production actions are not test runs,
 but long rendering and batch generation belong on the remote worker.

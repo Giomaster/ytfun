@@ -135,3 +135,40 @@ test('CLI remains alive while the SDK-style polling timer is unreferenced', asyn
   const result = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', source], { timeout: 5000 });
   assert.equal(result.stdout.trim(), 'provider-result-persisted');
 });
+
+test('only an owned terminal job whose provider step was skipped releases an unsubmitted reservation', async t => {
+  const { store, service, input, sceneId } = await fixture(t); const packet = await service.reserve(input);
+  const commitSha = 'c'.repeat(40); await service.bindRun({ batchId: packet.id, runId: '42', commitSha, packetSha256: packetHash(packet) });
+  const job = { id: 77, run_id: 42, head_sha: commitSha, name: 'sphere (1)', status: 'completed', conclusion: 'cancelled', steps: [{ name: 'Run actions/github-script@v7', status: 'completed', conclusion: 'skipped' }] };
+  let proof = job;
+  const checked = new RemoteBatch(store, { repository: 'owner/repo', githubToken: 'private-token', fetchImpl: async (url, options) => {
+    assert.equal(url, 'https://api.github.com/repos/owner/repo/actions/jobs/77');
+    assert.equal(options.redirect, 'error'); return Response.json(proof);
+  } });
+  for (const invalid of [{ ...job, status: 'in_progress' }, { ...job, head_sha: 'd'.repeat(40) }, { ...job, run_id: 43 }, { ...job, name: 'sphere (2)' }, { ...job, steps: [{ ...job.steps[0], conclusion: 'failure' }] }]) {
+    proof = invalid; await assert.rejects(checked.releaseUnsubmitted({ batchId: packet.id, sceneId, jobId: 77 }), /does not prove/);
+    assert.equal((await store.read()).spending[0].status, 'reserved');
+  }
+  proof = job; const evidence = await checked.releaseUnsubmitted({ batchId: packet.id, sceneId, jobId: 77 });
+  assert.equal(evidence.providerStep, 'skipped'); assert.equal((await store.read()).spending[0].actualCostUsd, 0);
+  const next = await service.reserve(input); assert.notEqual(next.id, packet.id);
+});
+
+test('quality retakes require exact observed rejection and changed direction while retaining the first charge', async t => {
+  const { store, service, input, sceneId } = await fixture(t); const packet = await service.reserve(input);
+  const assetId = randomUUID(); const sha256 = 'e'.repeat(64);
+  await store.transaction(state => {
+    const spending = state.spending.find(x => x.id === packet.scenes[0].reservationId); Object.assign(spending, { status: 'completed', assetId });
+    state.assets.push({ id: assetId, episodeId: input.episodeId, sceneId, kind: 'video', synthetic: true, sha256, provenance: { prompt: packet.scenes[0].prompt } });
+  });
+  const changed = { ...input, promptOverrides: { [sceneId]: 'A large three-dimensional brass mechanism visibly moving inside the opened sphere.' }, replaceRejectedAssetIds: { [sceneId]: assetId } };
+  await assert.rejects(service.reserve(changed), /explicitly rejected/);
+  await assert.rejects(service.rejectAsset({ episodeId: input.episodeId, assetId, sha256: 'f'.repeat(64), reviewedBy: 'Reviewer', findings: 'Observed flat interior without the requested mechanism.' }), /Exact completed/);
+  await service.rejectAsset({ episodeId: input.episodeId, assetId, sha256, reviewedBy: 'Reviewer', findings: 'Observed flat interior without the requested mechanism.' });
+  await assert.rejects(service.reserve({ ...changed, promptOverrides: {} }), /corrected direction/);
+  await assert.rejects(service.reserve({ ...changed, replaceRejectedAssetIds: { [sceneId]: randomUUID() } }), /explicitly rejected/);
+  const retake = await service.reserve(changed);
+  assert.equal(retake.scenes[0].replacesRejectedAssetId, assetId); assert.equal(retake.scenes[0].seed, packet.scenes[0].seed + 1000);
+  const state = await store.read(); assert.equal(state.spending.length, 2); assert.equal(state.spending[0].status, 'completed'); assert.equal(state.assets.at(-1).id, assetId);
+  await assert.rejects(service.reserve(changed), /reconciled/);
+});
