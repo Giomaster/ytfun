@@ -1,9 +1,8 @@
 {
-  "batchId": "3c1f4460-ed2c-4592-aac7-6827b8a3f8d0",
-  "packetSha256": "976dc9c8aa5450dfc7b6724252e07233f08872b23798cbc7b28d2a139269d7d2",
+  "batchId": "7c7a078b-5876-45a5-acb2-3007552b503a",
+  "packetSha256": "e83ca80b3556078f7193a1a2e956f1763783668b9754de84ce7f60e75b3bf024",
   "sceneIndices": [
     33,
-    49,
-    81
+    49
   ]
 }
