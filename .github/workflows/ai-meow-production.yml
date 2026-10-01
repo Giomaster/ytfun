@@ -43,7 +43,8 @@ jobs:
           cache-dependency-path: studio/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile --ignore-scripts
         working-directory: studio
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+      - name: Ensure media tools
+        run: command -v ffmpeg >/dev/null || (timeout 90s sudo apt-get update -qq && timeout 90s sudo apt-get install -y -qq ffmpeg)
       - uses: actions/github-script@v7
         env:
           AI_MEOW_BATCH_PACKET: ${{ secrets.AI_MEOW_BATCH_PACKET }}

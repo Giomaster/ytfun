@@ -52,8 +52,17 @@ export async function assertNoPreviousSubmission({ repository, artifactName, tok
   if (!Array.isArray(data.artifacts) || data.artifacts.some(x => x.name === artifactName) || data.total_count !== 0) throw new Error('Prior reservation exists. Reconcile its queue receipt; never resubmit automatically');
 }
 
+// The HF SDK deliberately unrefs its polling timer. A CLI/JS Action must retain
+// a referenced handle until the requested production operation has persisted.
+export async function withInferenceLiveness(operation) {
+  const keepAlive = setInterval(() => {}, 1000);
+  try { return await operation(); } finally { clearInterval(keepAlive); }
+}
+
 /** One bounded provider submission per matrix job. Checkpoints commit before POST and before polling. */
-export async function runWorker({ env = process.env, artifact = new DefaultArtifactClient(), client, fetchImpl = fetch, runner = command } = {}) {
+export async function runWorker(options = {}) { return withInferenceLiveness(() => worker(options)); }
+
+async function worker({ env = process.env, artifact = new DefaultArtifactClient(), client, fetchImpl = fetch, runner = command } = {}) {
   if (env.GITHUB_ACTIONS !== 'true' || env.GITHUB_RUN_ATTEMPT !== '1' || env.YTFUN_BATCH_PAID_ENABLED !== 'true' || !env.HF_TOKEN) throw new Error('Fresh authorized remote production run is required');
   const launch = JSON.parse(await readFile(join(env.GITHUB_WORKSPACE, 'studio/batches/launch.json'), 'utf8'));
   const packet = unpackPacket(env.AI_MEOW_BATCH_PACKET, launch.packetSha256);

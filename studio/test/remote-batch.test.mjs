@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { randomUUID } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { StudioStore } from '../src/store.mjs';
 import { RemoteBatch, BATCH_MODEL, BATCH_ESTIMATE, hash, packetHash, validatePacket, sourceUrl } from '../src/remote-batch.mjs';
 import { unpackPacket, assertNoPreviousSubmission, runWorker } from '../scripts/remote-batch-worker.mjs';
@@ -125,4 +127,11 @@ test('receipt persistence failure prevents polling and cannot trigger a replacem
   await assert.rejects(runWorker(setup), error => /reconciliation/.test(error.message) && !error.message.includes('private-provider-secret'));
   assert.equal(setup.posts(), 1);
   assert.deepEqual(setup.events, ['upload-reserved', 'POST', 'upload-receipt', 'upload-attention']);
+});
+
+test('CLI remains alive while the SDK-style polling timer is unreferenced', async () => {
+  const module = new URL('../scripts/remote-batch-worker.mjs', import.meta.url).href;
+  const source = `import { withInferenceLiveness } from ${JSON.stringify(module)}; await withInferenceLiveness(() => new Promise(resolve => { const timer = setTimeout(resolve, 100); timer.unref(); })); console.log('provider-result-persisted');`;
+  const result = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', source], { timeout: 5000 });
+  assert.equal(result.stdout.trim(), 'provider-result-persisted');
 });
