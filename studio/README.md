@@ -41,6 +41,13 @@ série precisa ser combinado antes de entrar em produção.
 
 ## Fluxo implementado
 
+A conexão autenticada por HTTP para conversas na cloud está descrita em
+[cloud-mcp.md](docs/cloud-mcp.md). Ela mantém chaves dos providers no servidor,
+valida dono/cliente/audiência e separa leitura, produção e publicação. Hospedagem,
+conexão no ChatGPT e transferência do publicador são etapas operacionais
+separadas; o transporte novo não habilita uma auditoria YouTube nem converte
+exportação TikTok em publicação.
+
 1. A IA lê projetos e episódios anteriores, pesquisa contexto e propõe a série.
 2. Após consenso, registra premissa, público, idioma e continuidade no projeto.
 3. Planeja episódio com ângulo próprio, hook, narrativa, cenas, formato, modo de áudio e metadados. `format=short` é o padrão: até 12 cenas/180 s. `format=long` permite até 120 cenas/900 s. `audioMode=narrated` exige narração; `silent` usa somente visuais; `nonverbal` exige áudio original por cena sem narração ou legendas. O gerador de voz não atende `nonverbal`; importar efeitos originais com evidência de autoria/licença.

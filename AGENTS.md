@@ -322,6 +322,13 @@ Quality, required checks and authorization are constraints, not token-saving opt
 - These local thread automations require the Mac/Codex to be available. Label
   operation times as local plans until a provider confirms a scheduled publication.
   Record missing runs and resume safely, without claiming continuous remote service.
+- Cloud conversations use the authenticated HTTP contract in
+  `studio/docs/cloud-mcp.md`. Keep provider credentials server-side and validate
+  the MCP grant's signature, issuer, exact resource audience, owner, client and
+  scopes. Only one host may write the filesystem store. Transfer a platform's
+  ownership only after its old worker stops, receipts/data reconcile and its
+  cloud connection and actual publishing route are verified. Hosting an MCP does
+  not complete YouTube audit or TikTok publishing; never run duplicate publishers.
 
 ## YouTube regular videos: monetization from the outline
 

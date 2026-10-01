@@ -124,6 +124,11 @@ are accepted, while originality, correct account, truthful review and actual rec
 remain required. Record an unavailable audio audition honestly instead of inventing
 human acceptance. Share production/browsers safely; no duplicate cost or catch-up
 bursts. Local thread automation depends on the Mac/Codex being available.
+Cloud operation follows [the authenticated MCP migration contract](studio/docs/cloud-mcp.md):
+provider keys stay on the server; verify the owner/client/resource/scopes and
+transfer publisher ownership only after stopping the old worker and reconciling
+receipts and the real remote route. A connected transport is not proof of an
+approved YouTube audit or TikTok automatic publication.
 
 ## YouTube regular videos: monetization from the outline
 

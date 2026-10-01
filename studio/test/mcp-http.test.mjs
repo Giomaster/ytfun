@@ -1,0 +1,149 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, rm, writeFile, chmod, symlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { generateKeyPair, exportJWK, SignJWT, createLocalJWKSet } from 'jose';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { cloudAuthConfiguration, createCloudTokenVerifier } from '../src/mcp-auth.mjs';
+import { createCloudApp, loadCloudEnvironment } from '../src/mcp-http.mjs';
+import { StudioStore } from '../src/store.mjs';
+
+const configuration = {
+  YTFUN_MCP_RESOURCE_URL: 'https://studio.example.com/mcp',
+  YTFUN_MCP_ISSUER: 'https://cognito-idp.us-east-1.amazonaws.com/us-east-1_example',
+  YTFUN_MCP_AUTHORIZATION_ENDPOINT: 'https://owner.auth.us-east-1.amazoncognito.com/oauth2/authorize',
+  YTFUN_MCP_TOKEN_ENDPOINT: 'https://owner.auth.us-east-1.amazoncognito.com/oauth2/token',
+  YTFUN_MCP_CLIENT_IDS: 'owner-client', YTFUN_MCP_OWNER_SUBJECTS: 'owner-subject',
+};
+
+async function keys() {
+  const pair = await generateKeyPair('RS256');
+  const publicKey = await exportJWK(pair.publicKey);
+  publicKey.kid = 'ci-key';
+  const sign = (overrides = {}) => new SignJWT({ token_use: 'access', client_id: 'owner-client',
+    scope: 'ytfun/read ytfun/write ytfun/publish', ...overrides })
+    .setProtectedHeader({ alg: 'RS256', kid: 'ci-key' }).setIssuer(configuration.YTFUN_MCP_ISSUER)
+    .setSubject('owner-subject').setAudience(configuration.YTFUN_MCP_RESOURCE_URL)
+    .setIssuedAt().setExpirationTime('5m').sign(pair.privateKey);
+  return { ...pair, keySet: createLocalJWKSet({ keys: [publicKey] }), sign };
+}
+
+test('cloud authentication requires explicit HTTPS resource, registered client and owner', () => {
+  const config = cloudAuthConfiguration(configuration);
+  assert.equal(config.resource.href, configuration.YTFUN_MCP_RESOURCE_URL);
+  assert.deepEqual(config.metadata.code_challenge_methods_supported, ['S256']);
+  for (const [key, value] of [['YTFUN_MCP_OWNER_SUBJECTS', ''], ['YTFUN_MCP_CLIENT_IDS', ''],
+    ['YTFUN_MCP_RESOURCE_URL', 'http://studio.example.com/mcp'], ['YTFUN_MCP_RESOURCE_URL', 'https://secret@studio.example.com/mcp'],
+    ['YTFUN_MCP_RESOURCE_URL', 'https://studio.example.com/mcp?secret=oops'], ['YTFUN_MCP_RESOURCE_URL', 'https://studio.example.com/']]) {
+    assert.throws(() => cloudAuthConfiguration({ ...configuration, [key]: value }));
+  }
+});
+
+test('Cognito verifier rejects ID tokens, other owners/clients, missing resource binding and expired grants', async () => {
+  const config = cloudAuthConfiguration(configuration);
+  const { keySet, privateKey, sign } = await keys();
+  const verifier = createCloudTokenVerifier(config, { keySet });
+  const valid = await verifier.verifyAccessToken(await sign());
+  assert.equal(valid.extra.subject, 'owner-subject');
+  assert.equal(valid.resource.href, configuration.YTFUN_MCP_RESOURCE_URL);
+  const wrongTokens = [await sign({ token_use: 'id' }), await sign({ client_id: 'another-client' }),
+    await new SignJWT({ token_use: 'access', client_id: 'owner-client', scope: 'ytfun/read' })
+      .setProtectedHeader({ alg: 'RS256', kid: 'ci-key' }).setIssuer(config.issuer).setSubject('another-owner')
+      .setAudience(config.resource.href).setIssuedAt().setExpirationTime('5m').sign(privateKey),
+    await new SignJWT({ token_use: 'access', client_id: 'owner-client', scope: 'ytfun/read' })
+      .setProtectedHeader({ alg: 'RS256', kid: 'ci-key' }).setIssuer(config.issuer).setSubject('owner-subject')
+      .setAudience('owner-client').setIssuedAt().setExpirationTime('5m').sign(privateKey),
+    await new SignJWT({ token_use: 'access', client_id: 'owner-client', scope: 'ytfun/read' })
+      .setProtectedHeader({ alg: 'RS256', kid: 'ci-key' }).setIssuer('https://wrong.example.com').setSubject('owner-subject')
+      .setAudience(config.resource.href).setIssuedAt().setExpirationTime('5m').sign(privateKey),
+    await new SignJWT({ token_use: 'access', client_id: 'owner-client', scope: 'ytfun/read' })
+      .setProtectedHeader({ alg: 'RS256', kid: 'ci-key' }).setIssuer(config.issuer).setSubject('owner-subject')
+      .setAudience(config.resource.href).setIssuedAt().setExpirationTime(1).sign(privateKey),
+    'private-provider-token-never-return-this', 'x'.repeat(16_385)];
+  for (const token of wrongTokens) await assert.rejects(verifier.verifyAccessToken(token), error => {
+    assert.equal(error.errorCode, 'invalid_token');
+    assert.ok(!error.message.includes(token)); return true;
+  });
+});
+
+test('HTTP cloud transport negotiates OAuth and isolates read/write/publish grants on the real studio', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'ytfun-cloud-ci-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const env = { ...configuration, YTFUN_STUDIO_DIR: directory, HF_TOKEN: 'private-provider-secret',
+    FACEBOOK_PAGE_ACCESS_TOKEN: 'private-facebook-secret', FACEBOOK_PAGE_ID: 'authorized-page',
+    YOUTUBE_CHANNEL_ID: 'authorized-channel', TIKTOK_ACCOUNT_ID: 'authorized-tiktok' };
+  const config = cloudAuthConfiguration(env);
+  const { keySet, sign } = await keys();
+  const verifier = createCloudTokenVerifier(config, { keySet });
+  const lifecycle = { maintain: async () => {}, fetch: globalThis.fetch, starts: 0, stops: 0,
+    start() { this.starts++; }, stop() { this.stops++; } };
+  const { app, store } = createCloudApp({ env, config, verifier, lifecycle });
+  const listener = await new Promise(resolve => { const server = app.listen(0, '127.0.0.1', () => resolve(server)); });
+  t.after(() => new Promise(resolve => listener.close(resolve)));
+  const base = new URL(`http://127.0.0.1:${listener.address().port}`);
+  const anonymous = await fetch(new URL('/mcp', base), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+  assert.equal(anonymous.status, 401);
+  assert.match(anonymous.headers.get('www-authenticate'), /oauth-protected-resource\/mcp/);
+  assert.deepEqual((await store.read()).projects, []);
+  const discovery = await fetch(new URL('/.well-known/oauth-protected-resource/mcp', base));
+  assert.equal((await discovery.json()).resource, config.resource.href);
+  const clientFor = async scopes => {
+    const client = new Client({ name: 'ci-cloud-client', version: '1.0.0' });
+    await client.connect(new StreamableHTTPClientTransport(new URL('/mcp', base), {
+      requestInit: { headers: { Authorization: `Bearer ${await sign({ scope: scopes })}` } },
+    }));
+    t.after(() => client.close()); return client;
+  };
+  const read = await clientFor('ytfun/read');
+  const tools = await read.listTools();
+  assert.equal(tools.tools.length, 39);
+  assert.deepEqual(tools.tools.find(x => x.name === 'ytfun_facebook_publish')._meta.securitySchemes,
+    [{ type: 'oauth2', scopes: ['ytfun/publish'] }]);
+  const profile = await read.callTool({ name: 'ytfun_cloud_profile', arguments: {} });
+  assert.ok(!profile.isError);
+  assert.ok(!JSON.stringify(profile).includes('private-provider-secret'));
+  assert.ok(!JSON.stringify(profile).includes('private-facebook-secret'));
+  const identity = JSON.parse(profile.content[0].text);
+  assert.equal(identity.publishing.tiktok.automaticPosting, false);
+  assert.equal(identity.publishing.youtube.apiAuditConfirmed, false);
+  const project = { title: 'AI Meow', premise: 'Original impossible material reveals', audience: 'Global', language: 'nonverbal' };
+  const rejected = await read.callTool({ name: 'ytfun_project_create', arguments: project });
+  assert.equal(rejected.isError, true);
+  assert.match(rejected._meta['mcp/www_authenticate'][0], /ytfun\/write/);
+  assert.equal((await store.read()).projects.length, 0);
+  const writer = await clientFor('ytfun/read ytfun/write');
+  const created = await writer.callTool({ name: 'ytfun_project_create', arguments: project });
+  assert.ok(!created.isError, JSON.stringify(created));
+  const publish = await writer.callTool({ name: 'ytfun_facebook_publish', arguments: {
+    episodeId: JSON.parse(created.content[0].text).id, expectedReviewHash: 'a'.repeat(64), privacy: 'public', execute: true,
+  } });
+  assert.equal(publish.isError, true);
+  assert.match(publish._meta['mcp/www_authenticate'][0], /ytfun\/publish/);
+  const listed = await read.callTool({ name: 'ytfun_project_list', arguments: {} });
+  assert.equal(JSON.parse(listed.content[0].text).length, 1);
+  assert.equal((await store.read()).publications.length, 0);
+  assert.equal(lifecycle.starts, 0); assert.equal(lifecycle.stops, 0);
+  const hostileOrigin = await fetch(new URL('/mcp', base), { method: 'POST',
+    headers: { Authorization: `Bearer ${await sign()}`, Origin: 'https://untrusted.example.com', 'Content-Type': 'application/json' }, body: '{}' });
+  assert.equal(hostileOrigin.status, 403);
+});
+
+test('cloud startup rejects a competing delivery worker and unsafe private environment files', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'ytfun-cloud-env-ci-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const env = { ...configuration, YTFUN_STUDIO_DIR: directory, YTFUN_DELIVERY_WORKER_ENABLED: 'true' };
+  assert.throws(() => createCloudApp({ env }), /background delivery worker/);
+  const filename = join(directory, 'private.env');
+  await writeFile(filename, 'HF_TOKEN=private-value\n', { mode: 0o600 });
+  const loaded = await loadCloudEnvironment(filename, {});
+  assert.equal(loaded.HF_TOKEN, 'private-value'); assert.equal(loaded.YTFUN_PRIVATE_ENV_FILE, filename);
+  await chmod(filename, 0o644);
+  await assert.rejects(loadCloudEnvironment(filename), /0600/);
+  await chmod(filename, 0o600);
+  const linked = join(directory, 'linked.env');
+  await symlink(filename, linked);
+  await assert.rejects(loadCloudEnvironment(linked));
+  await assert.rejects(loadCloudEnvironment('relative.env'));
+});
