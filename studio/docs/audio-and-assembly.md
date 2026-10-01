@@ -1,0 +1,126 @@
+# Áudio original e montagem remota do volume de 96 cenas
+
+Os novos workers são produção explícita, sem inferência, envio a redes ou alteração
+do store canônico. Cada lançamento exige um packet privado gzip/base64 com menos
+de 48 KiB, vinculado pelo SHA-256 canônico ao arquivo público `launch`. Os workflows
+rodam somente quando esses arquivos mudam na branch `codex/ai-original-studio`.
+Não há workflow_dispatch, chamadas pagas, POST ao provider ou nova imagem.
+Os testes usam mocks somente no GitHub CI; não executar áudio/render no laptop.
+
+## Áudio
+
+`studio/scripts/assembly-packets.mjs` exporta `packAssemblyPacket`, `packetHash`
+e `canonicalJson`. Não escrever o conteúdo `encoded` em logs, comentários ou
+arquivos públicos; ele é o valor do secret `AI_MEOW_AUDIO_PACKET`.
+
+```js
+const packet = {
+  schemaVersion: 1, type: "audio", id: "<UUID do lote de áudio>",
+  episodeId: "<UUID do master>",
+  scenes: [ // exatamente 96, na ordem 1–96
+    { index: 1, sceneId: "<UUID da cena>", title: "Original scene title",
+      genre: "elemental", seed: 20261001, durationSeconds: 7.5 },
+  ],
+};
+const { encoded, packetSha256 } = packAssemblyPacket(packet);
+const launch = { schemaVersion: 1, type: "audio", batchId: packet.id,
+  episodeId: packet.episodeId, packetSha256 };
+```
+
+O controller instala o secret e faz push de `studio/batches/audio-launch.json`
+com esse `launch`. `AI Meow Original Audio` gera WAVs estéreo PCM16, 48 kHz,
+exatos 7,5 s, em `audio/001.wav`…`audio/096.wav`. Síntese é procedural, determinística
+por seed/título/gênero, sem samples externos, voz, modelos ou downloads. Seis
+famílias variam contato, resistência, fratura/impacto, revelação e assentamento;
+picos são limitados, DC corrigido e o final termina em silêncio. Os cues são uma
+direção inicial: sincronismo, prazer sonoro e ausência de fala exigem ouvir os
+arquivos reais junto do vídeo.
+
+Artifact: `ai-meow-audio-<packet.id>`, retenção de sete dias, com os 96 WAVs e
+`audio-manifest.json`: identidade de lote/episódio/packet, repository/run/commit,
+spec e cada sceneId/index/título/gênero/seed/duração/path/SHA/tamanho/síntese.
+O retorno do worker informa artifactId e hash canônico desse recibo. Os campos
+são dados autorais do conteúdo; nenhum token, prompt ou dado de conta é incluído.
+
+Baixe/verifique o artifact e importe cada WAV por `Production.registerAsset`
+como áudio original da cena, com evidência verdadeira de autoria/termos. Use
+`audioMode: "nonverbal"`. Não copie registros do store à mão. Só então exporte
+o manifesto atual com `Production.exportRenderManifest`.
+
+## Montagem
+
+Secret `AI_MEOW_RENDER_PACKET`, preparado pelo mesmo helper:
+
+```js
+const packet = {
+  schemaVersion: 1, type: "render", id: "<UUID do lote de montagem>",
+  episodeId: "<UUID do master>", manifest, // objeto exportado inteiro, sem alterações
+  visuals: [ // exatamente 96, vinculados aos visual.assetId/SHA do manifesto
+    { assetId: "<UUID>", sha256: "<SHA original>", remoteRequest: {
+      provider: "fal-ai", transport: "huggingface-router",
+      requestId: "<ID real já persistido>",
+      responsePath: "/fal-ai/<rota>/requests/<mesmo ID>/response",
+    } },
+  ],
+  audioArtifact: {
+    artifactId: 123, runId: 456, repository: "Giomaster/ytfun",
+    commitSha: "<commit real do workflow de áudio>", batchId: "<UUID do áudio>",
+    packetSha256: "<hash do packet de áudio>",
+    manifestSha256: "<hash canônico do audio-manifest.json>",
+  },
+};
+const { encoded, packetSha256 } = packAssemblyPacket(packet);
+const launch = { schemaVersion: 1, type: "render", batchId: packet.id,
+  episodeId: packet.episodeId, packetSha256 };
+```
+
+`remoteRequest` contém apenas os quatro campos mostrados; remova os demais campos
+do recibo original ao preparar o packet. Não inventar IDs, atualizar hashes para
+aceitar arquivos diferentes nem trocar resultados do provider. Os 96 vídeos
+precisam ser distintos, completos e já registrados como fontes originais.
+
+O controller instala o secret e faz push de `studio/batches/render-launch.json`.
+`AI Meow Remote Assembly` verifica a identidade do artifact/run de áudio: mesmo
+repositório, commit/ID/nome, branch, workflow correto e execução concluída com
+sucesso. O download usa `@actions/artifact` fixado em 2.3.2 com `findBy` e token
+`actions:read`. Confere o recibo autorizado e o WAV/SHA de cada cena contra o
+asset de áudio importado no manifesto. [API oficial de artifacts](https://github.com/actions/toolkit/tree/main/packages/artifact).
+
+Cada vídeo é recuperado por `recoverFalVideo`, somente GET, usando o recibo
+fal-ai/HF original. Se ainda estiver pendente, hash divergir ou duração for menor
+que a cena, a montagem falha; não submete, repete ou cancela inferência. Downloads
+de vídeo mantêm o cap de 100 MiB e o áudio próprio substitui qualquer som embutido.
+
+O worker monta 96 MP4s de 7,5 s, 1080×1920/30 fps, H.264 yuv420p, CRF20 com
+maxrate 2,2 Mbps/bufsize 4,4 Mbps, preset fast/quatro threads, AAC 128 kbps
+estéreo/48 kHz, sem loop, fala ou
+texto inserido. Reúne os vídeos na ordem com cópia de streams de vídeo e codifica
+o áudio a partir dos WAVs originais, evitando acumular priming de AAC por unidade.
+Gera oito compilações de 12 cenas/90 s e o master de 720 s. Perfil, áudio, duração,
+hash e tamanho são conferidos por ffprobe e leitura dos arquivos; master deve
+caber em 220 MiB, sem reencoding automático se exceder. A ausência semântica de
+fala/texto não é provada por ffprobe e precisa de revisão real.
+
+O job de montagem tem limite total de 180 minutos. Não há medida prévia de sua
+velocidade ou garantia de conclusão nesse prazo. O recibo guarda tempos reais de
+recuperação, encoding por unidade, montagem e elapsed do worker antes do upload,
+para avaliar a primeira execução de produção remota. Essas medidas não incluem
+preparação do runner ou upload do artifact e não são benchmarks locais.
+
+Artifact `ai-meow-render-<packet.id>`, sete dias, contém `master.mp4`,
+`shorts/001.mp4`…`096.mp4`, `compilations/01.mp4`…`08.mp4` e
+`render-manifest.json` com hashes/metadados/proveniência de fontes e ranges.
+Não inclui queue paths/IDs, URLs assinadas, prompts, credenciais ou fontes privadas.
+Os ranges são limites planejados de cenas, não uma análise de movimento por frame.
+
+Baixe/verifique os arquivos e registre o master por
+`Production.registerRemoteRender({ episodeId, localPath, manifest, provenance })`
+usando o manifesto original exato. Derive os shorts/compilações com
+`Studio.deriveShort`, exporte seus manifestos remapeados e registre os respectivos
+MP4s com proveniência verdadeira da montagem. Isso requer um master renderizado
+válido; não contornar o estado com patches. Cada entrega precisa de revisão e
+aprovação próprias, cadência e limites da rede. Nenhum artifact confirma publicação.
+
+Logs dos helpers só informam contagens, IDs/hash de artifacts e estado. Falhas são
+genéricas; stderr, packets e tokens não são persistidos. Fluxos recusam reruns da
+mesma execução; use um lançamento novo somente após identificar o motivo da falha.
