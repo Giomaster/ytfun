@@ -220,9 +220,11 @@ Quality, required checks and authorization are constraints, not token-saving opt
 
 ## Long-form videos and standalone shorts
 
-- Prioritize an original long-form video as the main production. Plan it from
-  the outline to also yield multiple distinct shorts; publish the complete video
-  and adapt its strongest segments for short-form platforms. Length must serve
+- Plan an original long-form video as the main production, with multiple distinct
+  complete shorts from the outline. During a channel's initial audience-building
+  stage, prioritize the strongest standalone shorts in the release queue before
+  the master and compilations. Production order and release order are separate.
+  Length must serve
   the story rather than padding an idea to reach a duration or clip count.
 - Design several reusable narrative units before generating expensive assets.
   Each potential short needs its own visual hook, enough context to understand
@@ -246,6 +248,24 @@ Quality, required checks and authorization are constraints, not token-saving opt
   Give it distinct metadata, review and publication records, and schedule all
   formats through the same channel-wide cadence. Derive as many strong shorts as
   the story supports; quality and complete endings determine the count.
+
+## Audience first and gradual releases
+
+- The first AI Meow releases aim to earn attention, engagement and returning
+  viewers. Revenue-oriented formats come after evidence about what the audience
+  enjoys; views alone are not proof of monetization eligibility or income.
+- Extract the maximum number of worthwhile, distinct, complete stories from the
+  approved collection. Do not multiply near-identical uploads, arbitrary cuts,
+  reordered duplicates or unfinished endings to inflate the queue.
+- For this launch, allow at most one new publication per channel per day and at
+  least 24 hours between publications. Count shorts, compilations, the master
+  and reserved sends together. Never compensate for missed days with a burst.
+  This is an internal editorial limit, not a guarantee against platform flags.
+- Lead with the best reviewed standalone reveals, vary the material and payoff,
+  and keep a dated queue with exact asset hashes, destinations and receipts.
+  Review available retention, completion, shares, follows and returning-viewer
+  signals before changing the mix or cadence. Report missing analytics honestly;
+  never invent results or promise viral distribution.
 
 ## Studio contracts
 

@@ -86,3 +86,14 @@ the master into time chunks that stop mid-action. Validate both formats in the
 cheap pilot, reuse original assets and record each short's parent/source ranges.
 Review and schedule the long video and every short separately, respecting the
 shared channel cadence. Produce as many worthwhile shorts as the story supports.
+
+## Audience first and gradual releases
+
+Follow [Audience first and gradual releases](AGENTS.md#audience-first-and-gradual-releases).
+Initial AI Meow releases prioritize engagement and audience growth: publish the
+strongest complete standalone shorts before the master and compilations while
+retaining long-form production. Maximize distinct worthwhile stories, never
+duplicate uploads or arbitrary cuts. Keep at most one new publication per channel
+per day with at least 24 hours between sends, counting every format and reservation.
+Do not catch up with bursts. Use observed audience response to guide later formats
+and cadence; this editorial limit is not a platform guarantee or revenue promise.
