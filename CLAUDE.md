@@ -97,3 +97,13 @@ duplicate uploads or arbitrary cuts. Keep at most one new publication per channe
 per day with at least 24 hours between sends, counting every format and reservation.
 Do not catch up with bursts. Use observed audience response to guide later formats
 and cadence; this editorial limit is not a platform guarantee or revenue promise.
+
+## YouTube regular videos: monetization from the outline
+
+Follow [YouTube regular videos: monetization from the outline](AGENTS.md#youtube-regular-videos-monetization-from-the-outline).
+Every regular YouTube video is planned for monetization from the first release;
+Shorts keep their audience-growth priority. Preserve the useful 12-minute master,
+cohesive chapter progression, materially distinct reveals and natural completed
+boundaries for possible ads. Prefer eight useful minutes when the story supports
+it, without padding. Verify YPP and actual ad settings separately. Vertical
+90-second compilations are Shorts on YouTube, not regular mid-roll videos.

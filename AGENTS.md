@@ -252,8 +252,9 @@ Quality, required checks and authorization are constraints, not token-saving opt
 ## Audience first and gradual releases
 
 - The first AI Meow releases aim to earn attention, engagement and returning
-  viewers. Revenue-oriented formats come after evidence about what the audience
-  enjoys; views alone are not proof of monetization eligibility or income.
+  viewers. Use audience evidence to improve later formats. YouTube regular videos
+  must already be planned for monetization from the first release; Shorts retain
+  their audience-growth priority. Views alone are not proof of eligibility or income.
 - Extract the maximum number of worthwhile, distinct, complete stories from the
   approved collection. Do not multiply near-identical uploads, arbitrary cuts,
   reordered duplicates or unfinished endings to inflate the queue.
@@ -266,6 +267,34 @@ Quality, required checks and authorization are constraints, not token-saving opt
   Review available retention, completion, shares, follows and returning-viewer
   signals before changing the mix or cadence. Report missing analytics honestly;
   never invent results or promise viral distribution.
+
+## YouTube regular videos: monetization from the outline
+
+- Every YouTube regular video must be designed for future monetization from its
+  first outline, even while the channel is building its audience. Shorts are the
+  exception to this revenue-first format requirement. Never confuse planning a
+  monetizable work with an approved YPP channel, enabled ads or confirmed revenue.
+- Prefer a useful duration of at least eight minutes when the story supports it,
+  so an eligible monetized video can support mid-rolls. Keep the authorized
+  12-minute master; never add repeated footage, static padding or unfinished
+  scenes to reach an ad threshold. Eight minutes is a mid-roll condition, not a
+  minimum for all monetization or an approval guarantee.
+- Plan cohesive chapters, materially different reveals and a clear progression.
+  Provide entertainment value and an identifiable creative direction throughout;
+  changing only colors, titles or clip order is not a distinct work. Review the
+  whole channel's repetition as well as each video's source ownership. Do not
+  claim an AI-generated collection is monetization-safe simply because it is original.
+- Mark potential ad breaks only at completed reveals or chapter transitions,
+  with a natural visual/audio pause. Never interrupt a cut or unresolved payoff.
+  Verify channel eligibility and actual Studio settings before reporting ads enabled.
+- Classify the actual YouTube upload correctly: current vertical or square videos
+  up to three minutes are Shorts. The planned vertical 90-second compilations are
+  therefore Shorts on YouTube, not regular videos with mid-rolls.
+- Primary policy references, verified 2026-10-01:
+  https://support.google.com/youtube/answer/6175006?hl=en (mid-rolls),
+  https://support.google.com/youtube/answer/1311392?hl=en (originality and repetition),
+  https://support.google.com/youtube/answer/15424877?hl=en-GB (Shorts classification).
+  Recheck live policies and account evidence before consequential release changes.
 
 ## Studio contracts
 
