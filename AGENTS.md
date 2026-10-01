@@ -131,6 +131,66 @@ Quality, required checks and authorization are constraints, not token-saving opt
   nonverbal sound, without spoken language or on-screen text. Do not generate
   narration or subtitles for these videos unless the user changes this direction.
 
+## Film direction before animation
+
+- Apply these defaults across entertainment genres and formats, not only AI Meow's
+  current scene. Establish each work's style/world bible: genre, tone, visual and
+  sonic language, realistic physical grounding, impossible premises and any explicit
+  creative exceptions. Scope exceptions to the relevant work/shot/behavior; an absurd
+  premise is not permission for unrelated incoherence. Follow a clearly instructed
+  exception without imposing the default it overrides. The intended contrast is
+  inventive impossibility presented with convincing execution.
+- Work as a film director before choosing a generation prompt. Use the shot sheet
+  in `studio/docs/video-direction.md`: narrative purpose, initial/final states,
+  camera and spatial geometry, materials, contacts and forces, ordered action,
+  character performance, lighting/effects/sound, continuity and acceptance evidence.
+  Define how the action happens; visual adjectives and a desired result are insufficient.
+  Apply details relevant to the shot; do not invent interactions merely to fill the sheet.
+- Design compatible reference frames from that choreography. Check camera, scale,
+  identity, tool orientation, cutting plane and the positions of resulting parts.
+  Every change needs a possible continuous path. Correct incompatible references
+  before spending; do not hide the mismatch by adding instructions to the prompt.
+  Approval of still images establishes appearance, not successful animation.
+- Specify contact and material response: where a tool touches, which edge acts,
+  resistance/deformation, how force affects speed, when rupture begins and how
+  parts separate. Distinguish object orientation from direction of travel. Use
+  unambiguous spatial descriptions and retain the original object's shape/identity.
+- Make effects and acting consequences of the same action. Light, sparks, particles,
+  sound and character reactions must have triggers, direction, intensity and timing.
+  By default respect gravity, inertia, weight, friction, support, contact, material
+  response and coherent force/light propagation. Apply a documented fictional
+  departure consistently rather than silently changing the rules mid-action.
+  Explosions, floating objects, transformations or disappearances may be deliberate
+  storytelling choices; do not invent them as substitutes for the directed action.
+- Direct the sensory experience deliberately: readable composition and silhouettes,
+  satisfying rhythm/anticipation/payoff, tactile material detail, coherent lighting,
+  and sound texture/dynamics synchronized with action. Choose cues appropriate to
+  material, scale, genre and tone instead of adding sparks or loud effects everywhere.
+  Language-free does not mean sound-free: original nonverbal effects, ambience and
+  music may support the work when authorized and supported. Record sound plans even
+  when the current silent renderer cannot implement them; do not claim audio exists.
+- Plan beats at a complexity the selected model can deliver. Give a short shot
+  one principal action with its causally linked development and reactions. Split
+  independent choreography into additional shots with continuity and a complete
+  final payoff. Preserve enough time for contact, transformation and settling;
+  do not compress a whole multi-step sequence into a few seconds to reduce cost.
+- Keep the full directing sheet separate from the model-specific prompt. Translate
+  the relevant details into concrete observable actions in priority order, using
+  supported controls/reference conditioning and a few critical exclusions.
+  More words or exact timestamps do not guarantee obedience. Resolve ambiguity,
+  conflicting states and excess simultaneous actions rather than accumulating rules.
+- Review the actual start, contact, transformation, reaction and ending. Check
+  temporal order, stable geometry/identity, coherent forces, motion and effects,
+  absence of invented mechanisms/text, and continuity with adjacent shots.
+  Smooth playback or a beautiful final frame cannot compensate for an incoherent action.
+- Diagnose before a paid retry. Record observed defects separately from hypotheses;
+  verify source files/hashes/order, integration, supported controls and the model's
+  conditioning behavior as well as the prompt/direction. Do not infer that improved
+  frame cadence proves the model or transport obeyed the scene. Identify a concrete
+  correction, its visual success criterion and cost before the next representative
+  transition. Never finance the rest or publish a rejected attempt. Actual media
+  review is production work; all software tests still run only in GitHub Actions.
+
 ## Long-form videos and standalone shorts
 
 - Prioritize an original long-form video as the main production. Plan it from

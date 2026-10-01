@@ -29,6 +29,31 @@ visual storytelling and optional original nonverbal sound, without speech or
 on-screen text unless the user requests a different direction. This media rule
 does not impose cheaper coding-agent models or permit local validation tests.
 
+## Direct the scene before prompting
+
+Follow [Film direction before animation](AGENTS.md#film-direction-before-animation)
+and complete the [shot sheet](studio/docs/video-direction.md) before generation.
+These are general entertainment defaults across genres. Define each work's world,
+tone, visual/sonic language and impossible premises; honor clearly instructed
+exceptions with explicit scope. Present the absurd with convincing execution,
+keeping the surrounding physical/material behavior coherent.
+Define camera/geometry, initial and final states, material resistance, contact and
+forces, progressive rupture/transformation, character performance, causal light,
+appropriate particles/nonverbal sound, continuity and the complete ending. Effects
+follow their causes; gravity, inertia, weight, friction and support remain grounded
+unless the work explicitly departs from them. Direct visual and auditory pleasure
+through rhythm, anticipation/payoff, textures, lighting and synchronized sound;
+do not confuse language-free with mute or assert unsupported sound production.
+
+Make reference frames physically compatible with that choreography. Correct
+incompatible geometry before spending; still-frame approval does not approve
+animation. Keep the full directing plan and the model-specific prompt distinct:
+use clear observable actions and supported controls, one main beat with linked
+consequences per short shot, and split independent choreography when needed.
+Review the actual sequence and record defects versus hypotheses before paying
+again; check references, integration and conditioning as well as direction.
+Fluid motion alone does not establish coherent physics or prompt obedience.
+
 ## Long-form first, with complete shorts
 
 Follow [Long-form videos and standalone shorts](AGENTS.md#long-form-videos-and-standalone-shorts).

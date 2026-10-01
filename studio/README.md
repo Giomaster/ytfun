@@ -12,6 +12,14 @@ série precisa ser combinado antes de entrar em produção.
   [pesquisa de 75 plataformas/serviços](docs/monetization-landscape.md).
 - Qualquer formato feito inteiramente com IA: ficção, animação, humor, histórias,
   explicações factuais e novos experimentos.
+- Direção de cinema para qualquer gênero: premissas absurdas com execução
+  convincente, materiais/forças/reação coerentes e prazer visual/sonoro deliberado.
+  A [ficha de direção por plano](docs/video-direction.md) estabelece estados,
+  câmera/geometria, contatos, resistência, transformação, efeitos, atuação e
+  continuidade antes dos prompts. Exceções criativas têm alcance explícito;
+  referências bonitas e fluidez não aprovam uma ação incoerente. A ficha é orientação
+  editorial e não uma etapa automática do servidor. Som não verbal pode ser planejado;
+  o perfil silencioso implementado ainda descarta áudio.
 - Validar cada conceito em piloto barato antes de investir em qualidade maior; usar modelos pagos quando o ganho justificar o custo. A direção editorial prioriza vídeos longos com unidades que rendam shorts completos, sem fala ou texto. O perfil de render implementado abaixo mantém seus limites atuais. Sem teto
   mensal fixo por padrão. Cada chamada guarda estimativa e fonte de preço;
   operação paga exige reconhecimento por chamada e habilitação no ambiente.
