@@ -4,8 +4,12 @@
   "private": true,
   "type": "module",
   "description": "MCP studio for original AI series, production and verified publishing.",
-  "engines": { "node": ">=22" },
-  "bin": { "ytfun-mcp": "src/mcp.mjs" },
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "ytfun-mcp": "src/mcp.mjs"
+  },
   "scripts": {
     "start": "node src/mcp.mjs",
     "setup:youtube-auth": "node scripts/youtube-oauth-setup.mjs",
@@ -13,6 +17,7 @@
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
+    "@actions/artifact": "2.3.2",
     "@huggingface/inference": "4.13.30",
     "@modelcontextprotocol/sdk": "1.31.0",
     "google-auth-library": "11.1.0",

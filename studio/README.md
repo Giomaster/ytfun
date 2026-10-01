@@ -30,7 +30,7 @@ série precisa ser combinado antes de entrar em produção.
   dirigidos. Preservar o peso da casca e o comportamento dos materiais. Em rodadas
   de ajuste de prompt sem novas imagens, gerar o vídeo diretamente ou reutilizar
   a referência existente que a rota exigir; manter a revisão focada na ação.
-- Validar cada conceito em piloto barato antes de investir em qualidade maior; usar modelos pagos quando o ganho justificar o custo. A direção editorial prioriza vídeos longos com unidades que rendam shorts completos, sem fala ou texto. O perfil de render implementado abaixo mantém seus limites atuais. Sem teto
+- Validar cada conceito em piloto barato antes de investir em qualidade maior; usar modelos pagos quando o ganho justificar o custo. A direção editorial prioriza vídeos longos com unidades que rendam shorts completos, sem fala ou texto. O formato longo é explícito e mantém o canvas vertical. Sem teto
   mensal fixo por padrão. Cada chamada guarda estimativa e fonte de preço;
   operação paga exige reconhecimento por chamada e habilitação no ambiente.
 - Reaproveitar o ytfun sem incorporar automaticamente seu trabalho local ainda
@@ -43,11 +43,11 @@ série precisa ser combinado antes de entrar em produção.
 
 1. A IA lê projetos e episódios anteriores, pesquisa contexto e propõe a série.
 2. Após consenso, registra premissa, público, idioma e continuidade no projeto.
-3. Planeja episódio com ângulo próprio, hook, narrativa, cenas, modo de áudio e metadados. `audioMode=narrated` exige narração; `audioMode=silent` permite cenas sem fala e sem texto, somente visuais.
+3. Planeja episódio com ângulo próprio, hook, narrativa, cenas, formato, modo de áudio e metadados. `format=short` é o padrão: até 12 cenas/180 s. `format=long` permite até 120 cenas/900 s. `audioMode=narrated` exige narração; `silent` usa somente visuais; `nonverbal` exige áudio original por cena sem narração ou legendas. O gerador de voz não atende `nonverbal`; importar efeitos originais com evidência de autoria/licença.
 4. Gera imagem/voz/vídeo na inferência remota do Hugging Face ou importa assets
    originais de outros conectores. Provider, modelo, prompt, licença e hashes
    ficam ligados à cena. Fonte de tendência nunca vira footage para edição.
-5. FFmpeg monta 9:16, 1080×1920, 30 fps. No modo narrado, exige voz em todas as cenas e gera legendas com timing aproximado por cena. No modo silencioso, usa somente visuais, descarta áudio embutido e não gera SRT nem texto na tela; vídeo mais curto que a cena é bloqueado, sem repetição automática. Imagens recebem movimento simples. Voz maior que a duração planejada bloqueia a edição para evitar truncamento. Máximo de 12 cenas e 180 segundos. Esse perfil vertical ainda não implementa um master horizontal de longa duração nem derivação automática de shorts.
+5. FFmpeg monta 9:16, 1080×1920, 30 fps em worker remoto. No modo narrado, exige voz e gera legendas com timing aproximado por cena. `silent` descarta áudio embutido e não gera SRT; `nonverbal` usa áudio original por cena sem legendas. Nos modos sem fala, vídeo mais curto que a cena é bloqueado, sem repetição automática. Imagens recebem movimento simples; áudio maior que a cena é bloqueado para evitar truncamento. Master longo aceita até 512 MiB; render curto e cada asset de origem mantêm 100 MiB. A montagem externa pode ser registrada por manifesto exato e ffprobe independente. [Contrato remoto e limites](docs/long-form-production.md).
 6. A revisão real de originalidade, fatos e render fica vinculada aos hashes do
    episódio, arquivo final e proveniência. As verificações estruturais não
    substituem assistir ao vídeo ou confirmar fontes.
@@ -58,6 +58,15 @@ série precisa ser combinado antes de entrar em produção.
    para publicação pelo criador em um fluxo permitido.
 8. Métricas observadas e estimativas de custo orientam o próximo experimento.
    Métricas das plataformas ficam separadas; ausência de dado não vira zero.
+
+Um short pode ser derivado de cenas escolhidas de um master longo válido e já
+renderizado. A operação copia/remapeia os registros dos assets originais e
+preserva proveniência, hashes, lineage e intervalos da timeline planejada; não
+corta o MP4, não inventa uma nova geração e não aprova o resultado. O short fica
+`planned`, precisa de render e revisão próprios. Cenas repetidas, títulos repetidos
+e outras histórias quase iguais continuam bloqueados; apenas a reutilização
+documentada entre pai e filho é legítima. Mudanças no pai invalidam a derivação
+para revisão e entrega. A seleção deve ter hook, desenvolvimento e final completo.
 
 ## Inicialização do MCP
 
@@ -91,9 +100,12 @@ usa variáveis do processo e não lê `.env` automaticamente. Nunca coloque toke
 em prompts, nos projetos ou nos assets. Configuração específica de cada host,
 credenciais, auditorias e deployment ainda dependem do ambiente de operação.
 
-Para edição, o worker precisa de FFmpeg/ffprobe com libx264 e libass. Preferir um
-worker remoto adequado à produção. Nenhum teste/render de validação deve rodar
-no laptop; a regra do proprietário manda executar testes no GitHub Actions.
+Para edição, o worker remoto precisa de FFmpeg/ffprobe com libx264 e libass.
+Render não deve rodar no laptop; a regra do proprietário manda executar testes
+somente no GitHub Actions. Manifesto e registro remoto são APIs de produção:
+hashes/ffprobe não comprovam semanticamente a montagem nem substituem assistir
+e ouvir o vídeo. Operações com muitas fontes podem exceder um minuto; manter o
+worker vivo e ajustar o timeout do cliente.
 
 ## Ferramentas
 
@@ -103,8 +115,8 @@ no laptop; a regra do proprietário manda executar testes no GitHub Actions.
 | Projetos | `ytfun_project_create`, `ytfun_project_insights` |
 | Pesquisa de audiência | `ytfun_trend_discover` (YouTube oficial), `ytfun_trend_record` (outros conectores/evidência) |
 | Ferramentas de produção | `ytfun_production_models` (catálogo Hugging Face; sem sinal de audiência) |
-| Roteiro | `ytfun_episode_plan`, `ytfun_episode_get` |
-| Assets e edição | `ytfun_asset_generate`, `ytfun_asset_import`, `ytfun_episode_render` |
+| Roteiro | `ytfun_episode_plan`, `ytfun_episode_get`, `ytfun_episode_derive_short` |
+| Assets e edição | `ytfun_asset_generate`, `ytfun_asset_import`, `ytfun_episode_render`, `ytfun_episode_render_manifest`, `ytfun_episode_render_register` |
 | Produção demorada | `ytfun_production_job_start`, `ytfun_production_job_get`, `ytfun_production_job_reconcile` |
 | Revisão | `ytfun_episode_review`, `ytfun_episode_approve` |
 | Distribuição | `ytfun_distribution_capabilities`, `ytfun_publish_plan`, `ytfun_youtube_publish`, `ytfun_youtube_publication_sync`, `ytfun_facebook_publish`, `ytfun_facebook_publication_sync`, `ytfun_tiktok_export`, `ytfun_kwai_export` |

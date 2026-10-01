@@ -3,7 +3,7 @@ import { createReadStream } from 'node:fs';
 import { mkdir, realpath, rename, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { episodeAssetHash, episodeReviewHash } from './domain.mjs';
+import { episodeAssetHash, episodeReviewHash, validateEpisodeDerivation } from './domain.mjs';
 import { YouTubeAuth, YOUTUBE_UPLOAD_SCOPE, YOUTUBE_READONLY_SCOPE } from './oauth.mjs';
 import { FacebookReels, validateFacebookReel } from './facebook.mjs';
 import { distributionCapabilities, publicationPackage } from './distribution.mjs';
@@ -182,6 +182,8 @@ export class Publisher {
     if (episode.approval?.assetReviewHash !== episodeAssetHash(episode, state.assets)) {
       reasons.push('Generated asset fingerprints or license evidence changed after editorial review.');
     }
+    try { await validateEpisodeDerivation(state, episode, this.store.directory); }
+    catch { reasons.push('Derived source lineage is missing, invalid or changed; re-review the original source and this short before delivery.'); }
     if (!nonempty(episode.originalAngle)) reasons.push('Episode requires its own original creative angle.');
     if (episode.render?.synthetic !== true || !Number.isFinite(episode.render?.durationSeconds) || episode.render.durationSeconds <= 0) {
       reasons.push('Episode requires a completed synthetic render with a valid duration.');
@@ -200,6 +202,8 @@ export class Publisher {
         ['captionsPath', 'captionsSha256', 'captionsTiming'].some(key => episode.render?.[key] !== undefined) ||
         (Array.isArray(mappings) && mappings.some(mapping => mapping.audioAssetId !== undefined)))) reasons.push('Silent publication requires a reviewed render with zero audio and no captions.');
     if (!silent && episode.render?.audioMode === 'silent') reasons.push('Render audio mode does not match the episode.');
+    if (episode.audioMode === 'nonverbal' && (episode.render?.audioMode !== 'nonverbal' || episode.render?.hasAudio !== true ||
+        ['captionsPath', 'captionsSha256', 'captionsTiming'].some(key => episode.render?.[key] !== undefined))) reasons.push('Nonverbal publication requires original audio and no narration captions.');
     if (!Array.isArray(mappings) || !Array.isArray(scenes) || scenes.length === 0 || mappings.length !== scenes.length ||
         new Set(mappings?.map((mapping) => mapping.sceneId)).size !== scenes.length) {
       reasons.push('Render must map every scene to its generated visual and audio assets.');

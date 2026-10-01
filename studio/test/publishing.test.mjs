@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
-import { episodeAssetHash, episodeReviewHash } from '../src/domain.mjs';
+import { Studio, episodeAssetHash, episodeReviewHash } from '../src/domain.mjs';
 import { Publisher } from '../src/publishing.mjs';
 import { StudioStore } from '../src/store.mjs';
 
@@ -454,5 +454,56 @@ test('silent publication preflight uses visual-only assets and rejects unexpecte
     const plan = await publisher.preflight(planArgs);
     assert.equal(plan.ready, false);
     assert.ok(plan.reasons.some(reason => reason.includes('zero audio and no captions')));
+  }
+});
+
+test('derived source changes after initial preflight block upload reservation and creator exports', async t => {
+  const f = await fixture(t);
+  const studio = new Studio(f.store);
+  const parent = await studio.planEpisode({ projectId: f.project.id, format: 'long', title: 'A mineral opens into a living constellation', hook: 'Crystal facets reveal a breathing cosmos.', synopsis: 'A complete original cosmic reveal.', originalAngle: 'A tactile mineral universe with a quiet resolved ending.', scenes: [{ durationSeconds: 10, narration: 'A mineral opens into a tiny breathing cosmos that settles into a luminous constellation.', visualPrompt: 'An original mineral shell reveals a quiet luminous cosmos and rests on its supports.' }], metadata: { description: 'Original synthetic cosmic reveal.', hashtags: ['#AIMeow'] } });
+  await f.store.transaction(state => {
+    const assets = f.assets.map(asset => ({ ...structuredClone(asset), id: `parent-${asset.id}`, episodeId: parent.id, sceneId: parent.scenes[0].id }));
+    state.assets.push(...assets);
+    Object.assign(state.episodes.find(episode => episode.id === parent.id), { status: 'rendered', render: { ...structuredClone(f.episode.render), durationSeconds: 10, sceneAssets: [{ sceneId: parent.scenes[0].id, visualAssetId: assets[0].id, audioAssetId: assets[1].id }] } });
+  });
+  const short = await studio.deriveShort({ parentEpisodeId: parent.id, sceneIds: [parent.scenes[0].id], title: 'A tiny cosmos inside one crystal', hook: 'The crystal contains a sky.', synopsis: 'A complete standalone constellation reveal.', originalAngle: 'A miniature cosmic transformation with its own ending.', metadata: { description: 'Original synthetic short derived from its own master.', hashtags: ['#AIMeow'] } });
+  await f.store.transaction(state => {
+    const visual = state.assets.find(asset => asset.episodeId === short.id && asset.kind === 'image');
+    const audio = state.assets.find(asset => asset.episodeId === short.id && asset.kind === 'audio');
+    Object.assign(state.episodes.find(episode => episode.id === short.id), { status: 'rendered', render: { ...structuredClone(f.episode.render), durationSeconds: 10, sceneAssets: [{ sceneId: short.scenes[0].id, visualAssetId: visual.id, audioAssetId: audio.id }] } });
+  });
+  const approved = await studio.approveEpisode({ episodeId: short.id, review: f.episode.approval.review });
+  const network = successfulFetch();
+  const publisher = new Publisher(f.store, { env: f.env, fetchImpl: async (url, options) => {
+    if (String(url).includes('/youtube/v3/channels?')) await f.store.transaction(state => { state.episodes.find(episode => episode.id === parent.id).metadata.description = 'A revised master snapshot after the short was reviewed.'; });
+    return network.fetchImpl(url, options);
+  } });
+  assert.equal((await publisher.preflight({ episodeId: short.id, platform: 'youtube', privacy: 'private' })).ready, true);
+  await assert.rejects(publisher.publishYouTube({ episodeId: short.id, privacy: 'private', madeForKids: false, execute: true, expectedReviewHash: approved.approval.reviewHash }), /Derived source lineage/);
+  assert.equal(network.calls.filter(call => call.options?.method === 'POST' || call.options?.method === 'PUT').length, 0);
+  assert.equal((await f.store.read()).publications.length, 0);
+  const blocked = await publisher.preflight({ episodeId: short.id, platform: 'youtube', privacy: 'private' });
+  assert.equal(blocked.ready, false);
+  assert.ok(blocked.reasons.some(reason => /Derived source lineage/.test(reason)));
+  await assert.rejects(publisher.exportTikTok({ episodeId: short.id, expectedReviewHash: approved.approval.reviewHash }), /Derived source lineage/);
+});
+
+test('nonverbal delivery requires original audio and rejects narration captions despite a fresh hash', async t => {
+  const f = await fixture(t);
+  await f.store.transaction(state => {
+    const episode = state.episodes[0];
+    episode.audioMode = 'nonverbal';
+    episode.scenes[0].narration = '';
+    Object.assign(episode.render, { audioMode: 'nonverbal', hasAudio: true });
+    approve(episode, state.assets);
+  });
+  const publisher = new Publisher(f.store, { env: f.env, fetchImpl: () => { throw new Error('Preflight does not call a provider'); } });
+  const input = { episodeId: f.episode.id, platform: 'youtube', privacy: 'private' };
+  assert.equal((await publisher.preflight(input)).ready, true);
+  for (const mutation of [{ hasAudio: false }, { captionsTiming: 'scene-approximate' }, { audioMode: 'narrated' }]) {
+    await f.store.transaction(state => { Object.assign(state.episodes[0].render, { audioMode: 'nonverbal', hasAudio: true }); delete state.episodes[0].render.captionsTiming; Object.assign(state.episodes[0].render, mutation); approve(state.episodes[0], state.assets); });
+    const plan = await publisher.preflight(input);
+    assert.equal(plan.ready, false);
+    assert.ok(plan.reasons.some(reason => /Nonverbal publication/.test(reason)));
   }
 });

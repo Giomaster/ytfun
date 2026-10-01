@@ -36,6 +36,14 @@ function validateState(state) {
       ids.add(item.id);
     }
   }
+  if (state.productionBatches !== undefined) {
+    if (!Array.isArray(state.productionBatches)) throw new Error('Invalid production batch collection');
+    const ids = new Set();
+    for (const batch of state.productionBatches) {
+      if (!batch || typeof batch.id !== 'string' || ids.has(batch.id) || !['reserved', 'running', 'completed', 'attention'].includes(batch.status) || batch.packet?.id !== batch.id || !/^[a-f0-9]{64}$/.test(batch.packetSha256)) throw new Error('Invalid production batch record');
+      ids.add(batch.id);
+    }
+  }
 }
 
 export class StudioStore {

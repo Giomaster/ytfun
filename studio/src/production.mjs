@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { spawn } from 'node:child_process';
 import { z } from 'zod';
-import { episodeReviewHash } from './domain.mjs';
+import { episodeLimits, episodeReviewHash } from './domain.mjs';
 import { falQueueReceiptFetch } from './fal-queue-receipt.mjs';
 import { recoverFalVideo } from './fal-queue-recovery.mjs';
 
@@ -99,12 +99,14 @@ function requireKind(kind) {
 
 function audioMode(episode) {
   const mode = episode.audioMode ?? 'narrated';
-  if (!['narrated', 'silent'].includes(mode)) throw new Error('audioMode must be narrated or silent');
+  if (!['narrated', 'silent', 'nonverbal'].includes(mode)) throw new Error('audioMode must be narrated or silent or nonverbal');
   return mode;
 }
 
-function requireProductionKind(episode, kind) {
-  if (audioMode(episode) === 'silent' && kind === 'audio') throw new Error('Silent episodes cannot generate or import audio assets');
+function requireProductionKind(episode, kind, generation = false) {
+  const mode = audioMode(episode);
+  if (mode === 'silent' && kind === 'audio') throw new Error('Silent episodes cannot generate or import audio assets');
+  if (mode === 'nonverbal' && kind === 'audio' && generation) throw new Error('Nonverbal episodes cannot use text-to-speech generation; import original nonverbal audio');
 }
 
 function mediaDuration(probe, stream) {
@@ -167,7 +169,7 @@ function detectType(bytes, kind) {
 }
 
 async function boundedFile(path, maximum = MAX_ASSET_BYTES) {
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const info = await handle.stat();
     if (!info.isFile() || info.size <= 0 || info.size > maximum) throw new Error(`Asset must be a regular nonempty file no larger than ${maximum} bytes`);
@@ -184,6 +186,36 @@ async function boundedFile(path, maximum = MAX_ASSET_BYTES) {
     return Buffer.concat(chunks, length);
   } finally {
     await handle.close();
+  }
+}
+
+// Final masters may exceed the per-source cap. Stream them in bounded chunks
+// rather than allocating up to 512 MiB for a long-form copy/hash.
+async function renderFileDigest(path, maximum, copyTo) {
+  const input = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  let output;
+  try {
+    const info = await input.stat();
+    if (!info.isFile() || info.size <= 0 || info.size > maximum) throw new Error(`Render must be a regular nonempty file no larger than ${maximum} bytes`);
+    if (copyTo) output = await open(copyTo, 'wx', 0o600);
+    const hash = createHash('sha256');
+    const chunk = Buffer.allocUnsafe(1024 * 1024);
+    let length = 0;
+    while (length <= maximum) {
+      const { bytesRead } = await input.read(chunk, 0, Math.min(chunk.length, maximum - length + 1), null);
+      if (!bytesRead) break;
+      const bytes = chunk.subarray(0, bytesRead);
+      if (length === 0 && detectType(bytes, 'video') !== '.mp4') throw new Error('Final render must be MP4');
+      length += bytesRead;
+      if (length > maximum) throw new Error('Render exceeds the size limit');
+      hash.update(bytes);
+      if (output) await output.writeFile(bytes);
+    }
+    if (length !== info.size) throw new Error('Render changed while reading');
+    return { sha256: hash.digest('hex'), sizeBytes: length };
+  } finally {
+    await input.close();
+    if (output) await output.close();
   }
 }
 
@@ -320,13 +352,79 @@ function fingerprint(episode, selected) {
   return sha256(Buffer.from(JSON.stringify({ editorial: episodeReviewHash(episode), audioMode: audioMode(episode), selected })));
 }
 
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
+  return JSON.stringify(value);
+}
+
+function renderPlan(state, episode) {
+  const limits = episodeLimits(episode);
+  if (!Array.isArray(episode.scenes) || !episode.scenes.length || episode.scenes.length > limits.maxScenes) throw new Error(`Rendering requires 1 to ${limits.maxScenes} scenes`);
+  if (new Set(episode.scenes.map(scene => scene.id)).size !== episode.scenes.length) throw new Error('Scene IDs must be unique');
+  const mode = audioMode(episode);
+  let durationSeconds = 0;
+  for (const scene of episode.scenes) {
+    if (!Number.isFinite(scene.durationSeconds) || scene.durationSeconds < 1 || scene.durationSeconds > 60) throw new Error('Each scene needs a duration between 1 and 60 seconds');
+    if (mode === 'narrated') captionText(scene.narration);
+    else if (scene.narration !== undefined && scene.narration !== null && (typeof scene.narration !== 'string' || scene.narration.trim())) throw new Error(`${mode === 'silent' ? 'Silent' : 'Nonverbal'} episodes cannot contain narration`);
+    durationSeconds += scene.durationSeconds;
+  }
+  if (durationSeconds > limits.maxDurationSeconds) throw new Error(`Rendered episodes cannot exceed ${limits.maxDurationSeconds} seconds`);
+  return { selected: selectSceneAssets(state, episode), limits, durationSeconds, audioMode: mode };
+}
+
+function renderManifest(episode, plan) {
+  const descriptor = asset => {
+    if (!/^[a-f0-9]{64}$/.test(asset.sha256 ?? '')) throw new Error('Render sources require a recorded SHA-256');
+    return { assetId: asset.id, path: asset.path, kind: asset.kind, sha256: asset.sha256, provenanceSha256: sha256(Buffer.from(canonicalJson(asset.provenance))) };
+  };
+  // A previous render/approval is deliberately excluded: this manifest binds
+  // the new assembly to the current script, metadata and exact source selection.
+  const editorial = { ...episode, render: null };
+  return {
+    schemaVersion: 1, episodeId: episode.id, format: plan.limits.format,
+    audioMode: plan.audioMode, durationSeconds: plan.durationSeconds,
+    maxRenderBytes: plan.limits.maxRenderBytes, width: 1080, height: 1920, framesPerSecond: 30,
+    editorialSha256: episodeReviewHash(editorial), snapshotSha256: fingerprint(editorial, plan.selected),
+    scenes: episode.scenes.map((scene, index) => ({
+      sceneId: scene.id, durationSeconds: scene.durationSeconds,
+      scriptSha256: sha256(Buffer.from(canonicalJson(scene))),
+      visual: descriptor(plan.selected[index].visual),
+      ...(plan.selected[index].audio ? { audio: descriptor(plan.selected[index].audio) } : {}),
+    })),
+  };
+}
+
+async function verifyRenderSources(store, selected) {
+  for (const { visual, audio } of selected) {
+    for (const asset of [visual, ...(audio ? [audio] : [])]) {
+      if (sha256(await boundedFile(await internalPath(store, asset.path))) !== asset.sha256) throw new Error('Source asset changed during render');
+    }
+  }
+}
+
+function validateFinalProbe(probe, snapshot) {
+  const withAudio = snapshot.audioMode !== 'silent';
+  const videoStream = probe.streams.find(stream => stream.codec_type === 'video');
+  const audioStream = probe.streams.find(stream => stream.codec_type === 'audio');
+  const durationSeconds = Number(probe.format?.duration);
+  const [numerator, denominator = '1'] = String(videoStream?.avg_frame_rate ?? videoStream?.r_frame_rate ?? '').split('/');
+  const framesPerSecond = Number(numerator) / Number(denominator);
+  if (!videoStream || (withAudio ? !audioStream : audioStream) || (snapshot.audioMode !== 'narrated' && probe.streams.some(stream => stream.codec_type === 'subtitle')) || videoStream.width !== 1080 || videoStream.height !== 1920 || !Number.isFinite(framesPerSecond) || Math.abs(framesPerSecond - 30) > 0.05 || !Number.isFinite(durationSeconds) || durationSeconds <= 0 || durationSeconds > snapshot.limits.maxDurationSeconds || Math.abs(durationSeconds - snapshot.durationSeconds) > 0.5) throw new Error('Final render failed resolution, frame rate, audio or duration validation');
+  if (!Number.isFinite(mediaDuration(probe, videoStream)) || Math.abs(mediaDuration(probe, videoStream) - snapshot.durationSeconds) > 0.5) throw new Error('Final render video duration does not match the planned scenes');
+  if (withAudio && (!Number.isFinite(mediaDuration(probe, audioStream)) || Math.abs(mediaDuration(probe, audioStream) - snapshot.durationSeconds) > 0.5)) throw new Error(`Final render dropped ${snapshot.audioMode === 'narrated' ? 'narration' : 'nonverbal'} audio`);
+  return { durationSeconds, width: videoStream.width, height: videoStream.height, framesPerSecond, hasAudio: Boolean(audioStream) };
+}
+
 function selectSceneAssets(state, episode) {
-  const narrated = audioMode(episode) === 'narrated';
+  const mode = audioMode(episode);
+  const withAudio = mode !== 'silent';
   return episode.scenes.map((scene) => {
     const matching = state.assets.filter((asset) => asset.episodeId === episode.id && asset.sceneId === scene.id);
     const visual = matching.findLast((asset) => asset.kind === 'video') ?? matching.findLast((asset) => asset.kind === 'image');
-    const audio = narrated ? matching.findLast((asset) => asset.kind === 'audio') : undefined;
-    if (!visual || (narrated && !audio)) throw new Error(`Scene ${scene.id} requires synthetic visual${narrated ? ' and narration audio' : ''} assets`);
+    const audio = withAudio ? matching.findLast((asset) => asset.kind === 'audio') : undefined;
+    if (!visual || (withAudio && !audio)) throw new Error(`Scene ${scene.id} requires synthetic visual${withAudio ? ` and ${mode === 'narrated' ? 'narration' : 'nonverbal'} audio` : ''} assets`);
     for (const asset of [visual, ...(audio ? [audio] : [])]) {
       if (asset.synthetic !== true) throw new Error('Only attested synthetic assets can be rendered');
       evidence(asset.provenance?.commercialLicense);
@@ -360,7 +458,7 @@ export class Production {
     if (!Number.isFinite(estimatedCostUsd) || estimatedCostUsd < 0) throw new Error('estimatedCostUsd must be an explicit nonnegative finite estimate');
     const initial = await this.store.read();
     const context = sceneContext(initial, episodeId, sceneId);
-    requireProductionKind(context.episode, kind);
+    requireProductionKind(context.episode, kind, true);
     if (!this.env.HF_TOKEN) throw new Error('HF_TOKEN is required for cloud inference');
     const inputs = requiredText(prompt ?? (kind === 'audio' ? context.scene.narration : context.scene.visualPrompt), 'prompt');
     const reference = await loadReferenceImage(this.store, initial, episodeId, sceneId, referenceImageAssetId);
@@ -374,7 +472,7 @@ export class Production {
     await this.store.transaction((state) => {
       const { episode, project } = sceneContext(state, episodeId, sceneId);
       mutableEpisode(episode, state);
-      requireProductionKind(episode, kind);
+      requireProductionKind(episode, kind, true);
       assertReferenceUnchanged(state, episodeId, sceneId, reference);
       assertReferenceUnchanged(state, episodeId, sceneId, endReference);
       if (productionJobId !== undefined && !state.productionJobs?.some(job => job.id === productionJobId && job.action === 'generate' && job.episodeId === episodeId && job.status === 'running')) throw new Error('Generation job is not the active owner of this episode request');
@@ -409,7 +507,7 @@ export class Production {
       return await this.store.transaction((state) => {
         const { episode } = sceneContext(state, episodeId, sceneId);
         mutableEpisode(episode, state);
-        requireProductionKind(episode, kind);
+        requireProductionKind(episode, kind, true);
         assertReferenceUnchanged(state, episodeId, sceneId, reference);
         assertReferenceUnchanged(state, episodeId, sceneId, endReference);
         state.assets.push(asset);
@@ -592,6 +690,100 @@ export class Production {
     return parsed;
   }
 
+  async exportRenderManifest({ episodeId }) {
+    const state = await this.store.read();
+    const episode = state.episodes.find(item => item.id === episodeId);
+    if (!episode) throw new Error('Episode does not exist');
+    mutableEpisode(episode, state);
+    if (state.spending.some(item => item.episodeId === episodeId && ['reserved', 'unknown'].includes(item.status))) throw new Error('Reconcile outstanding generation reservations before rendering');
+    const plan = renderPlan(state, episode);
+    const manifest = renderManifest(episode, plan);
+    await verifyRenderSources(this.store, plan.selected);
+    // Export is read-only. Refuse a race rather than returning a stale plan.
+    const current = await this.store.read();
+    const latest = current.episodes.find(item => item.id === episodeId);
+    if (!latest) throw new Error('Episode changed during manifest export');
+    mutableEpisode(latest, current);
+    if (current.spending.some(item => item.episodeId === episodeId && ['reserved', 'unknown'].includes(item.status)) || canonicalJson(renderManifest(latest, renderPlan(current, latest))) !== canonicalJson(manifest)) throw new Error('Episode or selected assets changed during manifest export');
+    return manifest;
+  }
+
+  async registerRemoteRender({ episodeId, localPath, manifest, provenance }) {
+    if (typeof localPath !== 'string' || !isAbsolute(localPath)) throw new Error('localPath must be an absolute local file path');
+    if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) throw new Error('A previously exported render manifest is required');
+    if (provenance?.synthetic !== true) throw new Error('provenance.synthetic=true must attest original assembly from the exact manifest sources');
+    const normalized = { provider: requiredText(provenance.provider, 'provenance.provider', 100), model: requiredText(provenance.model, 'provenance.model', 300), prompt: requiredText(provenance.prompt, 'provenance.prompt'), commercialLicense: evidence(provenance.commercialLicense) };
+    const attemptId = randomUUID();
+    const snapshot = await this.store.transaction(state => {
+      const episode = state.episodes.find(item => item.id === episodeId);
+      if (!episode) throw new Error('Episode does not exist');
+      mutableEpisode(episode, state);
+      if (state.spending.some(item => item.episodeId === episodeId && ['reserved', 'unknown'].includes(item.status))) throw new Error('Reconcile outstanding generation reservations before rendering');
+      const plan = renderPlan(state, episode);
+      const expected = renderManifest(episode, plan);
+      if (canonicalJson(manifest) !== canonicalJson(expected)) throw new Error('Remote render manifest does not match the current episode and source assets');
+      invalidate(episode);
+      episode.status = 'rendering';
+      episode.renderAttempt = { id: attemptId, status: 'rendering', method: 'remote-registration', manifestSha256: sha256(Buffer.from(canonicalJson(expected))), startedAt: new Date().toISOString() };
+      return { episode, ...plan, manifest: expected, fingerprint: fingerprint(episode, plan.selected) };
+    });
+    let finalPath;
+    let captionsPath;
+    try {
+      await verifyRenderSources(this.store, snapshot.selected);
+      const { assets } = await assetRoot(this.store);
+      finalPath = resolve(assets, `render-${attemptId}.mp4`);
+      const digest = await renderFileDigest(await realpath(localPath), snapshot.limits.maxRenderBytes, finalPath);
+      const probe = await this.probe(finalPath);
+      const metadata = validateFinalProbe(probe, snapshot);
+      // A remote master contains only the planned streams. Narrated sidecars
+      // describe the scene timing; burned-in caption presence needs real review.
+      if (probe.streams.length !== (snapshot.audioMode === 'silent' ? 1 : 2)) throw new Error('Remote render contains unplanned streams');
+      if (snapshot.audioMode === 'narrated') {
+        captionsPath = resolve(assets, `render-${attemptId}.srt`);
+        await writeFile(captionsPath, captions(snapshot.episode.scenes), { flag: 'wx', mode: 0o600 });
+      }
+      const parents = snapshot.manifest.scenes.flatMap(scene => [scene.visual, ...(scene.audio ? [scene.audio] : [])]).map(({ assetId, sha256, provenanceSha256 }) => ({ assetId, sha256, provenanceSha256 }));
+      const render = {
+        path: `assets/render-${attemptId}.mp4`, ...digest, ...metadata,
+        format: 'mp4', audioMode: snapshot.audioMode, synthetic: true,
+        ...(captionsPath ? { captionsPath: `assets/render-${attemptId}.srt`, captionsSha256: sha256(await boundedFile(captionsPath)), captionsTiming: 'scene-approximate' } : {}),
+        sceneAssets: snapshot.selected.map(({ sceneId, visual, audio }) => ({ sceneId, visualAssetId: visual.id, ...(audio ? { audioAssetId: audio.id } : {}) })),
+        visualMethod: 'remote-assembly',
+        provenance: { ...normalized, assembly: 'remote', manifestSha256: sha256(Buffer.from(canonicalJson(snapshot.manifest))), snapshotSha256: snapshot.manifest.snapshotSha256, parents },
+        createdAt: new Date().toISOString(),
+      };
+      return await this.store.transaction(async state => {
+        const episode = state.episodes.find(item => item.id === episodeId);
+        if (!episode || episode.status !== 'rendering' || episode.renderAttempt?.id !== attemptId || fingerprint(episode, selectSceneAssets(state, episode)) !== snapshot.fingerprint) throw new Error('Episode or selected assets changed during rendering');
+        if (state.projects.find(item => item.id === episode.projectId)?.status !== 'active' || state.publications.some(item => item.episodeId === episodeId && PUBLICATION_FREEZE_STATUSES.has(item.status)) || state.spending.some(item => item.episodeId === episodeId && ['reserved', 'unknown'].includes(item.status))) throw new Error('Episode production was frozen during rendering');
+        await verifyRenderSources(this.store, snapshot.selected);
+        if ((await renderFileDigest(finalPath, snapshot.limits.maxRenderBytes)).sha256 !== digest.sha256) throw new Error('Remote render changed during verification');
+        episode.render = render;
+        episode.approval = null;
+        episode.status = 'rendered';
+        episode.renderAttempt.status = 'completed';
+        episode.renderAttempt.completedAt = new Date().toISOString();
+        return render;
+      });
+    } catch {
+      if (finalPath) await rm(finalPath, { force: true }).catch(() => {});
+      if (captionsPath) await rm(captionsPath, { force: true }).catch(() => {});
+      const message = 'Remote render registration failed; no render was approved. Re-export the current manifest and verify the source files and MP4.';
+      await this.store.transaction(state => {
+        const episode = state.episodes.find(item => item.id === episodeId);
+        if (episode?.renderAttempt?.id === attemptId) {
+          episode.status = 'planned';
+          episode.approval = null;
+          episode.render = null;
+          episode.renderAttempt.status = 'failed';
+          episode.renderError = message;
+        }
+      }).catch(() => {});
+      throw new Error(message);
+    }
+  }
+
   async renderEpisode({ episodeId }) {
     const attemptId = randomUUID();
     const snapshot = await this.store.transaction((state) => {
@@ -599,21 +791,11 @@ export class Production {
       if (!episode) throw new Error('Episode does not exist');
       mutableEpisode(episode, state);
       if (state.spending.some((item) => item.episodeId === episodeId && ['reserved', 'unknown'].includes(item.status))) throw new Error('Reconcile outstanding generation reservations before rendering');
-      if (!Array.isArray(episode.scenes) || !episode.scenes.length || episode.scenes.length > 12) throw new Error('Rendering requires 1 to 12 scenes');
-      const mode = audioMode(episode);
-      let durationSeconds = 0;
-      for (const scene of episode.scenes) {
-        if (!Number.isFinite(scene.durationSeconds) || scene.durationSeconds <= 0) throw new Error('Each scene needs a positive duration');
-        if (mode === 'narrated') captionText(scene.narration);
-        else if (scene.narration !== undefined && scene.narration !== null && (typeof scene.narration !== 'string' || scene.narration.trim())) throw new Error('Silent episodes cannot contain narration');
-        durationSeconds += scene.durationSeconds;
-      }
-      if (durationSeconds > 180) throw new Error('Rendered episodes cannot exceed 180 seconds');
-      const selected = selectSceneAssets(state, episode);
+      const plan = renderPlan(state, episode);
       invalidate(episode);
       episode.status = 'rendering';
       episode.renderAttempt = { id: attemptId, status: 'rendering', startedAt: new Date().toISOString() };
-      return { episode, selected, fingerprint: fingerprint(episode, selected), durationSeconds, audioMode: mode };
+      return { episode, ...plan, fingerprint: fingerprint(episode, plan.selected) };
     });
     let scratch;
     let finalPath;
@@ -624,18 +806,19 @@ export class Production {
       await mkdir(scratch, { recursive: false, mode: 0o700 });
       const clips = [];
       const narrated = snapshot.audioMode === 'narrated';
+      const withAudio = snapshot.audioMode !== 'silent';
       for (let index = 0; index < snapshot.episode.scenes.length; index += 1) {
         const scene = snapshot.episode.scenes[index];
         const { visual, audio } = snapshot.selected[index];
         const visualPath = await internalPath(this.store, visual.path);
         const audioPath = audio ? await internalPath(this.store, audio.path) : undefined;
         if (sha256(await boundedFile(visualPath)) !== visual.sha256 || (audio && sha256(await boundedFile(audioPath)) !== audio.sha256)) throw new Error('An asset changed on disk after registration');
-        if (narrated) {
+        if (withAudio) {
           const audioProbe = await this.probe(audioPath);
           const audioStream = audioProbe.streams.find((stream) => stream.codec_type === 'audio');
           const audioDuration = audioStream ? mediaDuration(audioProbe, audioStream) : NaN;
-          if (!audioStream || !Number.isFinite(audioDuration) || audioDuration <= 0) throw new Error('Scene narration audio is empty or has no valid duration');
-          if (audioDuration > scene.durationSeconds + 0.05) throw new Error(`Scene ${scene.id} would truncate narration; increase its duration`);
+          if (!audioStream || !Number.isFinite(audioDuration) || audioDuration <= 0) throw new Error(`Scene ${narrated ? 'narration' : 'nonverbal'} audio is empty or has no valid duration`);
+          if (audioDuration > scene.durationSeconds + 0.05) throw new Error(`Scene ${scene.id} would truncate ${narrated ? 'narration' : 'nonverbal audio'}; increase its duration`);
         }
         const visualProbe = await this.probe(visualPath);
         const visualStream = visualProbe.streams.find((stream) => stream.codec_type === 'video');
@@ -643,7 +826,7 @@ export class Production {
         if (!narrated && visual.kind === 'video') {
           const visualDuration = mediaDuration(visualProbe, visualStream);
           if (!Number.isFinite(visualDuration) || visualDuration <= 0) throw new Error(`Scene ${scene.id} video has no valid duration`);
-          if (visualDuration + 0.05 < scene.durationSeconds) throw new Error(`Scene ${scene.id} video is shorter than its planned duration; silent renders do not loop video`);
+          if (visualDuration + 0.05 < scene.durationSeconds) throw new Error(`Scene ${scene.id} video is shorter than its planned duration; ${snapshot.audioMode} renders do not loop video`);
         }
         const srtName = `scene-${index}.srt`;
         if (narrated) await writeFile(resolve(scratch, srtName), captions([scene]), { mode: 0o600 });
@@ -652,36 +835,25 @@ export class Production {
           ? "scale=1200:2134:force_original_aspect_ratio=decrease,pad=1200:2134:(ow-iw)/2:(oh-ih)/2:color=black,zoompan=z='min(1.08,1+on*0.0003)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=1080x1920:fps=30,setsar=1"
           : 'scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,fps=30,setsar=1';
         const subtitleFilter = `subtitles=filename=${srtName}:force_style='FontSize=18,Alignment=2,MarginV=70,Outline=2'`;
-        // Silent output selects only video, even when an imported clip contains sound.
-        await this.runner(this.env.FFMPEG_PATH || 'ffmpeg', ['-nostdin', '-v', 'error', '-y', ...(visual.kind === 'image' ? ['-loop', '1', '-framerate', '30'] : narrated ? ['-stream_loop', '-1'] : []), '-i', visualPath, ...(narrated ? ['-i', audioPath] : []), '-map', '0:v:0', ...(narrated ? ['-map', '1:a:0'] : ['-an', '-sn']), '-vf', narrated ? `${visualFilter},${subtitleFilter}` : visualFilter, ...(narrated ? ['-af', 'apad'] : []), '-t', String(scene.durationSeconds), '-r', '30', '-c:v', 'libx264', '-preset', 'medium', '-crf', '20', '-maxrate', '4M', '-bufsize', '8M', '-pix_fmt', 'yuv420p', ...(narrated ? ['-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2'] : []), '-movflags', '+faststart', clip], { cwd: scratch, timeoutMs: 600000 });
+        // Select only the planned audio source; embedded visual sound is ignored.
+        await this.runner(this.env.FFMPEG_PATH || 'ffmpeg', ['-nostdin', '-v', 'error', '-y', ...(visual.kind === 'image' ? ['-loop', '1', '-framerate', '30'] : narrated ? ['-stream_loop', '-1'] : []), '-i', visualPath, ...(withAudio ? ['-i', audioPath] : []), '-map', '0:v:0', ...(withAudio ? ['-map', '1:a:0', ...(!narrated ? ['-sn'] : [])] : ['-an', '-sn']), '-vf', narrated ? `${visualFilter},${subtitleFilter}` : visualFilter, ...(withAudio ? ['-af', 'apad'] : []), '-t', String(scene.durationSeconds), '-r', '30', '-c:v', 'libx264', '-preset', 'medium', '-crf', '20', '-maxrate', '4M', '-bufsize', '8M', '-pix_fmt', 'yuv420p', ...(withAudio ? ['-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2'] : []), '-movflags', '+faststart', clip], { cwd: scratch, timeoutMs: 600000 });
         clips.push(`file 'clip-${index}.mp4'`);
       }
       await writeFile(resolve(scratch, 'concat.txt'), `${clips.join('\n')}\n`, { mode: 0o600 });
       finalPath = resolve(assets, `render-${attemptId}.mp4`);
       if (narrated) captionsPath = resolve(assets, `render-${attemptId}.srt`);
-      await this.runner(this.env.FFMPEG_PATH || 'ffmpeg', ['-nostdin', '-v', 'error', '-y', '-f', 'concat', '-safe', '1', '-i', 'concat.txt', '-map', '0:v:0', ...(narrated ? ['-map', '0:a:0'] : ['-an', '-sn']), '-c', 'copy', '-movflags', '+faststart', finalPath], { cwd: scratch, timeoutMs: 600000 });
+      await this.runner(this.env.FFMPEG_PATH || 'ffmpeg', ['-nostdin', '-v', 'error', '-y', '-f', 'concat', '-safe', '1', '-i', 'concat.txt', '-map', '0:v:0', ...(withAudio ? ['-map', '0:a:0', ...(!narrated ? ['-sn'] : [])] : ['-an', '-sn']), '-c', 'copy', '-movflags', '+faststart', finalPath], { cwd: scratch, timeoutMs: 600000 });
       if (narrated) await writeFile(captionsPath, captions(snapshot.episode.scenes), { flag: 'wx', mode: 0o600 });
-      const finalBytes = await boundedFile(finalPath);
+      const digest = await renderFileDigest(finalPath, snapshot.limits.maxRenderBytes);
       const finalProbe = await this.probe(finalPath);
-      const videoStream = finalProbe.streams.find((stream) => stream.codec_type === 'video');
-      const audioStream = finalProbe.streams.find((stream) => stream.codec_type === 'audio');
-      const durationSeconds = Number(finalProbe.format?.duration);
-      const [fpsNumerator, fpsDenominator = '1'] = String(videoStream?.avg_frame_rate ?? videoStream?.r_frame_rate ?? '').split('/');
-      const framesPerSecond = Number(fpsNumerator) / Number(fpsDenominator);
-      if (!videoStream || (narrated ? !audioStream : audioStream || finalProbe.streams.some((stream) => stream.codec_type === 'subtitle')) || videoStream.width !== 1080 || videoStream.height !== 1920 || !Number.isFinite(framesPerSecond) || Math.abs(framesPerSecond - 30) > 0.05 || !Number.isFinite(durationSeconds) || durationSeconds <= 0 || durationSeconds > 180 || Math.abs(durationSeconds - snapshot.durationSeconds) > 0.5) throw new Error('Final render failed resolution, frame rate, audio or duration validation');
-      const videoDuration = mediaDuration(finalProbe, videoStream);
-      if (!Number.isFinite(videoDuration) || Math.abs(videoDuration - snapshot.durationSeconds) > 0.5) throw new Error('Final render video duration does not match the planned scenes');
-      if (narrated) {
-        const audioDuration = mediaDuration(finalProbe, audioStream);
-        if (!Number.isFinite(audioDuration) || Math.abs(audioDuration - snapshot.durationSeconds) > 0.5) throw new Error('Final render dropped narration audio');
-      }
+      const metadata = validateFinalProbe(finalProbe, snapshot);
       // Recheck files after encoding as well as the editorial snapshot inside the commit.
       for (const { visual, audio } of snapshot.selected) {
         for (const asset of [visual, ...(audio ? [audio] : [])]) {
           if (sha256(await boundedFile(await internalPath(this.store, asset.path))) !== asset.sha256) throw new Error('Source asset changed during render');
         }
       }
-      const render = { path: `assets/render-${attemptId}.mp4`, sha256: sha256(finalBytes), durationSeconds, width: videoStream.width, height: videoStream.height, framesPerSecond, format: 'mp4', audioMode: snapshot.audioMode, hasAudio: Boolean(audioStream), ...(narrated ? { captionsPath: `assets/render-${attemptId}.srt`, captionsSha256: sha256(await boundedFile(captionsPath)), captionsTiming: 'scene-approximate' } : {}), sceneAssets: snapshot.selected.map(({ sceneId, visual, audio }) => ({ sceneId, visualAssetId: visual.id, ...(audio ? { audioAssetId: audio.id } : {}) })), visualMethod: snapshot.selected.some(({ visual }) => visual.kind === 'image') ? 'includes-animated-images' : 'generated-video', synthetic: true, createdAt: new Date().toISOString() };
+      const render = { path: `assets/render-${attemptId}.mp4`, ...digest, ...metadata, format: 'mp4', audioMode: snapshot.audioMode, ...(narrated ? { captionsPath: `assets/render-${attemptId}.srt`, captionsSha256: sha256(await boundedFile(captionsPath)), captionsTiming: 'scene-approximate' } : {}), sceneAssets: snapshot.selected.map(({ sceneId, visual, audio }) => ({ sceneId, visualAssetId: visual.id, ...(audio ? { audioAssetId: audio.id } : {}) })), visualMethod: snapshot.selected.some(({ visual }) => visual.kind === 'image') ? 'includes-animated-images' : 'generated-video', synthetic: true, createdAt: new Date().toISOString() };
       return await this.store.transaction((state) => {
         const episode = state.episodes.find((item) => item.id === episodeId);
         if (!episode || episode.status !== 'rendering' || episode.renderAttempt?.id !== attemptId || fingerprint(episode, selectSceneAssets(state, episode)) !== snapshot.fingerprint) throw new Error('Episode or selected assets changed during rendering; render cannot be committed');

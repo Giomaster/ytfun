@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, stat, truncate, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { StudioStore } from '../src/store.mjs';
@@ -8,7 +8,7 @@ import { Studio } from '../src/domain.mjs';
 import { Production } from '../src/production.mjs';
 import { ProductionJobs } from '../src/jobs.mjs';
 import { InferenceClient } from '@huggingface/inference';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 // Small signatures are intentional: these tests exercise contracts with a fake
 // inference client/process runner. They never perform inference or media encoding.
@@ -22,13 +22,13 @@ const pilotVideoParameters = { resolution: '480p', aspect_ratio: '16:9', num_fra
 const filmVideoParameters = { ...pilotVideoParameters, resolution: '720p', aspect_ratio: '9:16', interpolator_model: 'film', num_interpolated_frames: 1, adjust_fps_for_interpolation: true };
 const END_PNG = Buffer.concat([PNG, Buffer.from('original final frame')]);
 
-async function setup(t, { budgetMonthlyUsd = null, sceneCount = 1, audioMode } = {}) {
+async function setup(t, { budgetMonthlyUsd = null, sceneCount = 1, sceneDurationSeconds = 3, audioMode, format } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'ytfun-production-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const store = new StudioStore(directory);
   const studio = new Studio(store);
   const project = await studio.createProject({ title: 'Clock city', premise: 'A fictional miniature city', audience: 'Fantasy fans', language: 'pt-BR', budgetMonthlyUsd });
-  const episode = await studio.planEpisode({ projectId: project.id, ...(audioMode ? { audioMode } : {}), title: 'The last clock wakes', hook: 'Time returns to a sleeping city.', synopsis: 'The clock wakes its inhabitants.', originalAngle: 'An original miniature clock-city mythology.', scenes: Array.from({ length: sceneCount }, (_, index) => ({ durationSeconds: 3, ...(audioMode === 'silent' ? {} : { narration: `O relógio ${index + 1} acordou a cidade.` }), visualPrompt: `An original tiny clock city, scene ${index + 1}` })), metadata: { description: 'An original AI-generated fictional episode.', hashtags: ['#FicçãoIA'] } });
+  const episode = await studio.planEpisode({ projectId: project.id, ...(audioMode ? { audioMode } : {}), ...(format ? { format } : {}), title: 'The last clock wakes', hook: 'Time returns to a sleeping city.', synopsis: 'The clock wakes its inhabitants.', originalAngle: 'An original miniature clock-city mythology.', scenes: Array.from({ length: sceneCount }, (_, index) => ({ durationSeconds: sceneDurationSeconds, ...(['silent', 'nonverbal'].includes(audioMode) ? {} : { narration: `O relógio ${index + 1} acordou a cidade.` }), visualPrompt: `An original tiny clock city, scene ${index + 1}` })), metadata: { description: 'An original AI-generated fictional episode.', hashtags: ['#FicçãoIA'] } });
   return { directory, store, studio, project, episode };
 }
 
@@ -1351,4 +1351,364 @@ test('a missing saved asset during cleanup cannot bypass sanitized unknown billi
   assert.equal(submissions, 1);
   await assert.rejects(production.generateAsset(input), /unknown charge outcome/);
   assert.equal(submissions, 1);
+});
+
+test('native long-form rendering accepts more than 12 scenes and a 900-second master', async t => {
+  const context = await setup(t, { format: 'long', audioMode: 'silent', sceneCount: 15, sceneDurationSeconds: 60 });
+  const fake = fakeRenderer(900, { finalHasAudio: false });
+  const production = new Production(context.store, { env, runner: fake.runner });
+  await addSourceAssets(context, production);
+  const render = await production.renderEpisode({ episodeId: context.episode.id });
+  assert.equal(render.durationSeconds, 900);
+  assert.equal(render.sceneAssets.length, 15);
+  assert.equal(render.audioMode, 'silent');
+  assert.equal(render.sizeBytes, MP4.length);
+  const encodes = fake.calls.filter(call => call.command === env.FFMPEG_PATH);
+  assert.equal(encodes.length, 16);
+  assert.ok(encodes.slice(0, -1).every(call => call.args[call.args.indexOf('-t') + 1] === '60'));
+  assert.equal((await context.studio.getEpisode(context.episode.id)).status, 'rendered');
+});
+
+test('production revalidates long scene/duration caps and the legacy short default before reserving', async t => {
+  for (const failure of ['scenes', 'duration', 'legacy']) {
+    const context = await setup(t, { format: 'long', audioMode: 'silent', sceneCount: 16, sceneDurationSeconds: 50 });
+    await context.store.transaction(state => {
+      const episode = state.episodes[0];
+      if (failure === 'scenes') episode.scenes = Array.from({ length: 121 }, () => ({ ...episode.scenes[0], id: randomUUID() }));
+      if (failure === 'duration') for (const scene of episode.scenes) scene.durationSeconds = 60;
+      if (failure === 'legacy') delete episode.format;
+    });
+    const production = new Production(context.store, { env, runner: async () => assert.fail('Invalid plans must not invoke a media process') });
+    await assert.rejects(production.renderEpisode({ episodeId: context.episode.id }), failure === 'scenes' ? /1 to 120 scenes/ : failure === 'duration' ? /900 seconds/ : /1 to 12 scenes/);
+    assert.equal((await context.store.read()).episodes[0].renderAttempt, undefined);
+  }
+});
+
+async function remoteRenderContext(t, { format = 'long', sceneCount = 15, sceneDurationSeconds = 15, audioMode = 'silent', probeHook, probeChange } = {}) {
+  const context = await setup(t, { format, sceneCount, sceneDurationSeconds, audioMode });
+  const calls = [];
+  const runner = async (command, args, options) => {
+    calls.push({ command, args, options });
+    assert.equal(command, env.FFPROBE_PATH, 'Remote registration only probes; it must never encode');
+    if (probeHook) await probeHook({ context, args, options });
+    const duration = sceneCount * sceneDurationSeconds;
+    const probe = { format: { duration: String(duration) }, streams: [
+      { codec_type: 'video', width: 1080, height: 1920, avg_frame_rate: '30/1', duration: String(duration) },
+      ...(audioMode !== 'silent' ? [{ codec_type: 'audio', duration: String(duration) }] : []),
+    ] };
+    if (probeChange) probeChange(probe);
+    return { exitCode: 0, stdout: JSON.stringify(probe) };
+  };
+  const production = new Production(context.store, { env, runner });
+  const sources = await addSourceAssets(context, production);
+  const localPath = join(context.directory, 'returned-master.mp4');
+  await writeFile(localPath, MP4);
+  const beforeExport = await context.store.read();
+  const manifest = await production.exportRenderManifest({ episodeId: context.episode.id });
+  assert.deepEqual(await context.store.read(), beforeExport, 'Export must not reserve, approve or mutate the episode');
+  assert.equal(calls.length, 0, 'Manifest export does not probe or encode');
+  return { ...context, production, sources, localPath, manifest, calls,
+    input: { episodeId: context.episode.id, localPath, manifest, provenance } };
+}
+
+test('remote assembly binds ordered scene/script/source hashes and independently probes its private copy', async t => {
+  const context = await remoteRenderContext(t);
+  assert.equal(context.manifest.format, 'long');
+  assert.equal(context.manifest.durationSeconds, 225);
+  assert.equal(context.manifest.maxRenderBytes, 512 * 1024 * 1024);
+  assert.equal(context.manifest.scenes.length, 15);
+  for (let index = 0; index < context.sources.length; index += 1) {
+    const scene = context.manifest.scenes[index];
+    assert.equal(scene.sceneId, context.episode.scenes[index].id);
+    assert.equal(scene.visual.assetId, context.sources[index].image.id);
+    assert.equal(scene.visual.sha256, context.sources[index].image.sha256);
+    assert.match(scene.scriptSha256, /^[a-f0-9]{64}$/);
+    assert.match(scene.visual.provenanceSha256, /^[a-f0-9]{64}$/);
+    assert.equal(scene.audio, undefined);
+  }
+  // Property insertion order does not change the exact JSON content contract.
+  const reordered = Object.fromEntries(Object.entries(context.manifest).reverse());
+  const render = await context.production.registerRemoteRender({ ...context.input, manifest: reordered });
+  assert.equal(context.calls.length, 1);
+  assert.notEqual(context.calls[0].args.at(-1), context.localPath);
+  assert.equal(context.calls[0].options.timeoutMs, 30000);
+  assert.equal(render.sha256, createHash('sha256').update(MP4).digest('hex'));
+  assert.equal(render.durationSeconds, 225);
+  assert.equal(render.framesPerSecond, 30);
+  assert.equal(render.hasAudio, false);
+  assert.equal(render.provenance.assembly, 'remote');
+  assert.equal(render.provenance.snapshotSha256, context.manifest.snapshotSha256);
+  assert.deepEqual(render.provenance.parents, context.manifest.scenes.map(scene => ({ assetId: scene.visual.assetId, sha256: scene.visual.sha256, provenanceSha256: scene.visual.provenanceSha256 })));
+  await writeFile(context.localPath, Buffer.from('Worker-return file changed after registration'));
+  assert.deepEqual(await readFile(resolve(context.directory, render.path)), MP4);
+  const episode = await context.studio.getEpisode(context.episode.id);
+  assert.equal(episode.status, 'rendered');
+  assert.equal(episode.approval, null);
+  assert.equal(episode.renderAttempt.status, 'completed');
+});
+
+test('long masters can exceed 100 MiB while short masters, source assets and >512 MiB long masters remain bounded', async t => {
+  const long = await remoteRenderContext(t, { sceneCount: 1 });
+  await truncate(long.localPath, 100 * 1024 * 1024 + 1);
+  const render = await long.production.registerRemoteRender(long.input);
+  assert.equal(render.sizeBytes, 100 * 1024 * 1024 + 1);
+  assert.equal((await stat(resolve(long.directory, render.path))).size, render.sizeBytes);
+
+  for (const format of ['short', 'long']) {
+    const context = await remoteRenderContext(t, { format, sceneCount: 1 });
+    const limit = (format === 'long' ? 512 : 100) * 1024 * 1024;
+    await truncate(context.localPath, limit + 1);
+    await assert.rejects(context.production.registerRemoteRender(context.input), /Remote render registration failed/);
+    assert.equal(context.calls.length, 0);
+    const episode = await context.studio.getEpisode(context.episode.id);
+    assert.equal(episode.render, null);
+    assert.equal(episode.renderAttempt.status, 'failed');
+    assert.ok((await readdir(join(context.directory, 'assets'))).every(name => !name.startsWith('render-')));
+  }
+  const source = await remoteRenderContext(t, { sceneCount: 1 });
+  await truncate(source.localPath, 100 * 1024 * 1024 + 1);
+  await assert.rejects(source.production.registerAsset({ episodeId: source.episode.id, sceneId: source.episode.scenes[0].id, kind: 'video', localPath: source.localPath, provenance }), /104857600 bytes/);
+  assert.equal((await source.store.read()).assets.length, 1);
+});
+
+test('a stale or adulterated remote manifest rejects script/provenance/selection changes before probing', async t => {
+  for (const change of ['script', 'provenance', 'selection', 'manifest']) {
+    const context = await remoteRenderContext(t, { sceneCount: 1 });
+    if (change === 'manifest') context.input.manifest = { ...context.manifest, durationSeconds: 1 };
+    else await context.store.transaction(state => {
+      if (change === 'script') state.episodes[0].scenes[0].visualPrompt = 'An altered final shot';
+      if (change === 'provenance') state.assets[0].provenance.commercialLicense.notes = 'Different source terms';
+      if (change === 'selection') state.assets.push({ ...state.assets[0], id: randomUUID() });
+    });
+    await assert.rejects(context.production.registerRemoteRender(context.input), /manifest does not match/);
+    assert.equal(context.calls.length, 0);
+    assert.equal((await context.store.read()).episodes[0].renderAttempt, undefined);
+  }
+});
+
+test('remote verification races cannot commit edited scripts, source evidence/bytes or mutated output', async t => {
+  for (const change of ['script', 'provenance', 'sourceBytes', 'outputBytes']) {
+    const context = await remoteRenderContext(t, { sceneCount: 1, probeHook: async ({ context, args }) => {
+      if (change === 'sourceBytes') await writeFile(resolve(context.directory, (await context.store.read()).assets[0].path), Buffer.concat([PNG, Buffer.from('changed source')]));
+      else if (change === 'outputBytes') await writeFile(args.at(-1), Buffer.concat([MP4, Buffer.from('changed master')]));
+      else await context.store.transaction(state => {
+        if (change === 'script') state.episodes[0].metadata.description = 'Changed during metadata inspection';
+        if (change === 'provenance') state.assets[0].provenance.prompt = 'Changed source intent during inspection';
+      });
+    } });
+    await assert.rejects(context.production.registerRemoteRender(context.input), /Remote render registration failed/);
+    const episode = await context.studio.getEpisode(context.episode.id);
+    assert.equal(episode.render, null);
+    assert.equal(episode.approval, null);
+    assert.equal(episode.renderAttempt.status, 'failed');
+    assert.ok((await readdir(join(context.directory, 'assets'))).every(name => !name.startsWith('render-')));
+  }
+});
+
+test('remote masters require independently verified planned canvas, FPS, duration and audio mode', async t => {
+  for (const failure of ['canvas', 'fps', 'duration', 'videoDuration', 'audio', 'subtitle', 'missingVideo', 'missingNarration']) {
+    const context = await remoteRenderContext(t, { sceneCount: 1, audioMode: failure === 'missingNarration' ? 'narrated' : 'silent', probeChange: probe => {
+      if (failure === 'canvas') probe.streams[0].width = 720;
+      if (failure === 'fps') probe.streams[0].avg_frame_rate = '24/1';
+      if (failure === 'duration') probe.format.duration = '16';
+      if (failure === 'videoDuration') probe.streams[0].duration = '14';
+      if (failure === 'audio') probe.streams.push({ codec_type: 'audio' });
+      if (failure === 'subtitle') probe.streams.push({ codec_type: 'subtitle' });
+      if (failure === 'missingVideo') probe.streams = [];
+      if (failure === 'missingNarration') probe.streams = probe.streams.filter(stream => stream.codec_type !== 'audio');
+    } });
+    await assert.rejects(context.production.registerRemoteRender(context.input), /Remote render registration failed/);
+    assert.equal((await context.studio.getEpisode(context.episode.id)).render, null);
+  }
+});
+
+test('remote narrated assembly records only approximate scene sidecars and the exact audio parents', async t => {
+  const context = await remoteRenderContext(t, { sceneCount: 1, audioMode: 'narrated' });
+  const render = await context.production.registerRemoteRender(context.input);
+  assert.equal(render.hasAudio, true);
+  assert.equal(render.audioMode, 'narrated');
+  assert.equal(render.captionsTiming, 'scene-approximate');
+  assert.equal(render.sceneAssets[0].audioAssetId, context.sources[0].audio.id);
+  assert.equal(render.provenance.parents[1].assetId, context.sources[0].audio.id);
+  assert.match(await readFile(resolve(context.directory, render.captionsPath), 'utf8'), /00:00:00,000 --> 00:00:15,000/);
+});
+
+test('remote probe failures sanitize private process output and never commit or approve an artifact', async t => {
+  const context = await remoteRenderContext(t, { sceneCount: 1, probeHook: async () => { throw new Error('fake-token https://private.example/media?signature=private-secret stderr-private'); } });
+  await assert.rejects(context.production.registerRemoteRender(context.input), error => {
+    assert.match(error.message, /Remote render registration failed/);
+    assert.doesNotMatch(error.message, /fake-token|private-secret|stderr-private/);
+    return true;
+  });
+  const state = await context.store.read();
+  assert.doesNotMatch(JSON.stringify(state), /fake-token|private-secret|stderr-private/);
+  assert.equal(state.episodes[0].render, null);
+  assert.equal(state.episodes[0].approval, null);
+  assert.ok((await readdir(join(context.directory, 'assets'))).every(name => !name.startsWith('render-')));
+});
+
+test('remote render commit failure cleans the private copy and preserves sources without exposing the store error', async t => {
+  const context = await remoteRenderContext(t, { sceneCount: 1 });
+  const transaction = context.store.transaction.bind(context.store);
+  let failures = 0;
+  context.store.transaction = fn => transaction(async state => {
+    const result = await fn(state);
+    if (state.episodes[0].render?.visualMethod === 'remote-assembly') {
+      failures += 1;
+      throw new Error('private-store-commit-error');
+    }
+    return result;
+  });
+  await assert.rejects(context.production.registerRemoteRender(context.input), error => {
+    assert.match(error.message, /Remote render registration failed/);
+    assert.doesNotMatch(error.message, /private-store-commit-error/);
+    return true;
+  });
+  const state = await context.store.read();
+  assert.equal(failures, 1);
+  assert.equal(state.episodes[0].status, 'planned');
+  assert.equal(state.episodes[0].renderAttempt.status, 'failed');
+  assert.equal(state.episodes[0].render, null);
+  assert.equal(state.assets[0].id, context.sources[0].image.id);
+  assert.deepEqual(await readFile(resolve(context.directory, state.assets[0].path)), PNG);
+  assert.deepEqual(await readFile(context.localPath), MP4);
+  assert.doesNotMatch(JSON.stringify(state), /private-store-commit-error/);
+  assert.ok((await readdir(join(context.directory, 'assets'))).every(name => !name.startsWith('render-')));
+});
+
+test('a remote registration reservation prevents concurrent master registration before a second probe', async t => {
+  let entered;
+  let release;
+  const ready = new Promise(resolve => { entered = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  const context = await remoteRenderContext(t, { sceneCount: 1, probeHook: async () => { entered(); await gate; } });
+  const first = context.production.registerRemoteRender(context.input);
+  try {
+    await ready;
+    await assert.rejects(context.production.registerRemoteRender(context.input), /Episode is rendering/);
+    assert.equal(context.calls.length, 1);
+  } finally { release(); }
+  assert.equal((await first).hasAudio, false);
+  assert.equal((await context.studio.getEpisode(context.episode.id)).renderAttempt.status, 'completed');
+});
+
+test('nonverbal blocks speech generation before token, spending or inference but permits original audio import', async t => {
+  const context = await setup(t, { audioMode: 'nonverbal' });
+  const production = new Production(context.store, { env: {}, inferenceClient: { textToSpeech: async () => assert.fail('Nonverbal must never call speech synthesis') } });
+  await assert.rejects(production.generateAsset(generation(context.episode, { kind: 'audio', prompt: 'Do not speak this prompt' })), /cannot use text-to-speech/);
+  assert.deepEqual((await context.store.read()).spending, []);
+  const localPath = join(context.directory, 'original-effects.wav');
+  await writeFile(localPath, WAV);
+  const audio = await production.registerAsset({ episodeId: context.episode.id, sceneId: context.episode.scenes[0].id, kind: 'audio', localPath, provenance: { ...provenance, prompt: 'Original nonverbal mechanical ambience, no spoken language.' } });
+  assert.equal(audio.kind, 'audio');
+  assert.equal(audio.synthetic, true);
+});
+
+test('a speech response cannot commit after its episode switches to nonverbal', async t => {
+  const context = await setup(t);
+  const production = new Production(context.store, { env, inferenceClient: { textToSpeech: async () => {
+    await context.store.transaction(state => {
+      state.episodes[0].audioMode = 'nonverbal';
+      state.episodes[0].scenes[0].narration = '';
+    });
+    return new Blob([WAV], { type: 'audio/wav' });
+  } } });
+  await assert.rejects(production.generateAsset(generation(context.episode, { kind: 'audio' })), /Generation failed after reservation/);
+  const state = await context.store.read();
+  assert.equal(state.episodes[0].audioMode, 'nonverbal');
+  assert.equal(state.spending[0].status, 'unknown');
+  assert.deepEqual(state.assets, []);
+});
+
+test('nonverbal renderer maps original scene audio and pads without SRT, subtitles or embedded source sound', async t => {
+  const context = await setup(t, { audioMode: 'nonverbal', sceneCount: 2 });
+  const fake = fakeRenderer(6, { sourceHasAudio: true, onEncode: async ({ options }) => {
+    assert.ok((await readdir(options.cwd)).every(name => !name.endsWith('.srt')));
+  } });
+  const production = new Production(context.store, { env, runner: fake.runner });
+  const sources = await addSourceAssets(context, production, { alsoVideo: true });
+  const render = await production.renderEpisode({ episodeId: context.episode.id });
+  assert.equal(render.audioMode, 'nonverbal');
+  assert.equal(render.hasAudio, true);
+  for (const field of ['captionsPath', 'captionsSha256', 'captionsTiming']) assert.equal(render[field], undefined);
+  assert.deepEqual(render.sceneAssets, sources.map((source, index) => ({ sceneId: context.episode.scenes[index].id, visualAssetId: source.video.id, audioAssetId: source.audio.id })));
+  const encodes = fake.calls.filter(call => call.command === env.FFMPEG_PATH);
+  assert.equal(encodes.length, 3);
+  for (const call of encodes) {
+    assert.ok(call.args.includes('-sn'));
+    assert.ok(!call.args.includes('-an'));
+    assert.ok(!call.args.join(' ').includes('subtitles='));
+    assert.ok(!call.args.includes('-stream_loop'));
+  }
+  for (const [index, call] of encodes.slice(0, -1).entries()) {
+    const maps = call.args.flatMap((arg, position) => arg === '-map' ? [call.args[position + 1]] : []);
+    assert.deepEqual(maps, ['0:v:0', '1:a:0']);
+    assert.ok(call.args.includes(resolve(context.directory, sources[index].audio.path)));
+    assert.equal(call.args[call.args.indexOf('-af') + 1], 'apad');
+    assert.equal(call.args[call.args.indexOf('-c:a') + 1], 'aac');
+  }
+  assert.ok((await readdir(join(context.directory, 'assets'))).every(name => !name.endsWith('.srt')));
+});
+
+test('nonverbal rendering requires audio and empty narration and refuses to truncate sound or loop a short video', async t => {
+  for (const failure of ['missingAudio', 'narration', 'longAudio', 'shortVideo']) {
+    const context = await setup(t, { audioMode: 'nonverbal' });
+    const fake = fakeRenderer(3, { audioDuration: failure === 'longAudio' ? 3.2 : 2, sourceVideoDuration: failure === 'shortVideo' ? 2 : 3 });
+    const production = new Production(context.store, { env, runner: fake.runner });
+    await addSourceAssets(context, production, { includeAudio: failure !== 'missingAudio', alsoVideo: true });
+    if (failure === 'narration') await context.store.transaction(state => { state.episodes[0].scenes[0].narration = 'Unwanted speech'; });
+    const expected = { missingAudio: /requires synthetic visual and nonverbal audio/, narration: /Nonverbal episodes cannot contain narration/, longAudio: /would truncate nonverbal audio/, shortVideo: /nonverbal renders do not loop video/ };
+    await assert.rejects(production.renderEpisode({ episodeId: context.episode.id }), expected[failure]);
+    assert.equal(fake.calls.filter(call => call.command === env.FFMPEG_PATH).length, 0);
+    assert.equal((await context.studio.getEpisode(context.episode.id)).render, null);
+  }
+});
+
+test('nonverbal final validation requires audio throughout the planned duration and rejects subtitle streams', async t => {
+  for (const failure of ['missingAudio', 'shortAudio', 'subtitle']) {
+    const context = await setup(t, { audioMode: 'nonverbal' });
+    const fake = fakeRenderer(3);
+    const runner = async (command, args, options) => {
+      const result = await fake.runner(command, args, options);
+      if (command === env.FFPROBE_PATH && /render-[^/]+\.mp4$/.test(args.at(-1))) {
+        const probe = JSON.parse(result.stdout);
+        if (failure === 'missingAudio') probe.streams = probe.streams.filter(stream => stream.codec_type !== 'audio');
+        if (failure === 'shortAudio') probe.streams.find(stream => stream.codec_type === 'audio').duration = '2';
+        if (failure === 'subtitle') probe.streams.push({ codec_type: 'subtitle' });
+        result.stdout = JSON.stringify(probe);
+      }
+      return result;
+    };
+    const production = new Production(context.store, { env, runner });
+    await addSourceAssets(context, production);
+    await assert.rejects(production.renderEpisode({ episodeId: context.episode.id }), failure === 'shortAudio' ? /dropped nonverbal audio/ : /Final render failed/);
+    assert.equal((await context.studio.getEpisode(context.episode.id)).render, null);
+    assert.ok((await readdir(join(context.directory, 'assets'))).every(name => !name.startsWith('render-')));
+  }
+});
+
+test('remote nonverbal master requires exact audio parents and creates no caption sidecar', async t => {
+  const context = await remoteRenderContext(t, { audioMode: 'nonverbal', sceneCount: 1 });
+  assert.equal(context.manifest.audioMode, 'nonverbal');
+  assert.equal(context.manifest.scenes[0].audio.assetId, context.sources[0].audio.id);
+  const render = await context.production.registerRemoteRender(context.input);
+  assert.equal(render.audioMode, 'nonverbal');
+  assert.equal(render.hasAudio, true);
+  assert.equal(render.sceneAssets[0].audioAssetId, context.sources[0].audio.id);
+  assert.equal(render.provenance.parents[1].assetId, context.sources[0].audio.id);
+  for (const field of ['captionsPath', 'captionsSha256', 'captionsTiming']) assert.equal(render[field], undefined);
+  assert.ok((await readdir(join(context.directory, 'assets'))).every(name => !name.endsWith('.srt')));
+});
+
+test('remote nonverbal verification rejects missing/short audio and additional subtitle streams', async t => {
+  for (const failure of ['missingAudio', 'shortAudio', 'subtitle']) {
+    const context = await remoteRenderContext(t, { audioMode: 'nonverbal', sceneCount: 1, probeChange: probe => {
+      if (failure === 'missingAudio') probe.streams = probe.streams.filter(stream => stream.codec_type !== 'audio');
+      if (failure === 'shortAudio') probe.streams.find(stream => stream.codec_type === 'audio').duration = '14';
+      if (failure === 'subtitle') probe.streams.push({ codec_type: 'subtitle' });
+    } });
+    await assert.rejects(context.production.registerRemoteRender(context.input), /Remote render registration failed/);
+    assert.equal((await context.studio.getEpisode(context.episode.id)).render, null);
+    assert.ok((await readdir(join(context.directory, 'assets'))).every(name => !name.startsWith('render-')));
+  }
 });

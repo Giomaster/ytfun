@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { Studio, episodeAssetHash, episodeReviewHash, fileSha256 } from '../src/domain.mjs';
+import { Studio, episodeAssetHash, episodeLimits, episodeReviewHash, fileSha256 } from '../src/domain.mjs';
 import { StudioStore } from '../src/store.mjs';
 
 const projectInput = { title: 'Original worlds', premise: 'Small fictional stories with evolving characters', audience: 'Adults who enjoy speculative fiction', language: 'pt-BR', continuity: 'Remember events between episodes' };
@@ -29,14 +29,14 @@ async function rendered(fixture, episode) {
       const id = randomUUID();
       const path = `assets/${id}.${kind === 'image' ? 'png' : 'wav'}`;
       await writeFile(join(fixture.directory, path), `synthetic-${kind}-${scene.id}`);
-      assets.push({ id, episodeId: episode.id, sceneId: scene.id, kind, path, sha256: await fileSha256(join(fixture.directory, path)), synthetic: true, provenance: { provider: 'fixture-provider', model: 'licensed-original-model', prompt: kind === 'image' ? scene.visualPrompt : scene.narration, commercialLicense: { url: 'https://example.org/model-license', notes: 'Fixture evidence of commercial output rights.' } } });
+      assets.push({ id, episodeId: episode.id, sceneId: scene.id, kind, path, sha256: await fileSha256(join(fixture.directory, path)), synthetic: true, provenance: { provider: 'fixture-provider', model: 'licensed-original-model', prompt: kind === 'image' ? scene.visualPrompt : episode.audioMode === 'nonverbal' ? 'Original procedural contact and reveal effects without voices or music.' : scene.narration, commercialLicense: { url: 'https://example.org/model-license', notes: 'Fixture evidence of commercial output rights.' } } });
       linked[kind === 'image' ? 'visualAssetId' : 'audioAssetId'] = id;
     }
     sceneAssets.push(linked);
   }
   const path = `assets/${episode.id}.mp4`;
   await writeFile(join(fixture.directory, path), 'render-fixture');
-  const render = { path, sha256: await fileSha256(join(fixture.directory, path)), durationSeconds: episode.scenes.reduce((sum, scene) => sum + scene.durationSeconds, 0), sceneAssets, synthetic: true, createdAt: new Date().toISOString(), ...(episode.audioMode === 'silent' ? { audioMode: 'silent', hasAudio: false } : {}) };
+  const render = { path, sha256: await fileSha256(join(fixture.directory, path)), durationSeconds: episode.scenes.reduce((sum, scene) => sum + scene.durationSeconds, 0), sceneAssets, synthetic: true, createdAt: new Date().toISOString(), ...(episode.audioMode === 'silent' ? { audioMode: 'silent', hasAudio: false } : episode.audioMode === 'nonverbal' ? { audioMode: 'nonverbal', hasAudio: true } : {}) };
   await fixture.store.transaction((state) => {
     state.assets.push(...assets);
     Object.assign(state.episodes.find((entry) => entry.id === episode.id), { render, status: 'rendered' });
@@ -134,6 +134,149 @@ test('server scene IDs, duration caps and normalized near duplicates prevent rep
   await assert.rejects(f.studio.planEpisode(episodeInput(f.project.id, { scenes: [{ id: randomUUID(), durationSeconds: 10, narration: 'Original text', visualPrompt: 'Original visual' }] })), /generated/);
   await assert.rejects(f.studio.planEpisode(episodeInput(f.project.id, { scenes: Array.from({ length: 4 }, (_, index) => ({ durationSeconds: 60, narration: `Original narration ${index}`, visualPrompt: `Original image ${index}` })) })), /180 seconds/);
   await assert.rejects(f.studio.planEpisode(episodeInput(f.project.id, { scenes: Array.from({ length: 13 }, () => ({ durationSeconds: 1, narration: 'Scene', visualPrompt: 'Visual' })) })), /12 scenes/);
+});
+
+const longScenes = [
+  { durationSeconds: 10, narration: 'A copper shell splits and reveals a tiny snowstorm that quietly settles into a crystal.', visualPrompt: 'Copper shell with a miniature blizzard; reveal, settle and complete the visual payoff.' },
+  { durationSeconds: 12, narration: 'An emerald sphere opens around a luminous waterfall and closes only after the cascade fills a pool.', visualPrompt: 'Emerald sphere, luminous cascade flowing downhill into a still pool, complete ending.' },
+  { durationSeconds: 8, narration: 'A velvet globe releases a golden sunrise, turning the surrounding shadows into delicate birds.', visualPrompt: 'Velvet globe reveals golden sunrise and stable paperlike birds, completed transformation.' },
+];
+const derivedInput = (parent, overrides = {}) => ({ parentEpisodeId: parent.id, sceneIds: parent.scenes.map(scene => scene.id), title: 'Three impossible interiors revealed', hook: 'An unexpected universe hides inside each shell.', synopsis: 'Three complete reveals form an original standalone miniature film.', originalAngle: 'A tactile succession of original worlds with a resolved final reveal.', metadata: { description: 'Original synthetic standalone film derived from its original master.', hashtags: ['#AIMeow'] }, ...overrides });
+
+async function renderDerived(f, episode) {
+  const path = `assets/derived-${episode.id}.mp4`;
+  await writeFile(join(f.directory, path), `original-derived-${episode.id}`);
+  const render = {
+    path, sha256: await fileSha256(join(f.directory, path)), durationSeconds: episode.scenes.reduce((sum, scene) => sum + scene.durationSeconds, 0), synthetic: true,
+    sceneAssets: [],
+  };
+  const state = await f.store.read();
+  render.sceneAssets = episode.scenes.map(scene => {
+    const records = episode.derivation.assets.filter(asset => asset.sceneId === scene.id);
+    const visual = records.find(record => ['image', 'video'].includes(state.assets.find(asset => asset.id === record.assetId).kind));
+    const audio = records.find(record => state.assets.find(asset => asset.id === record.assetId).kind === 'audio');
+    return { sceneId: scene.id, visualAssetId: visual.assetId, ...(audio ? { audioAssetId: audio.assetId } : {}) };
+  });
+  if (episode.audioMode === 'silent') Object.assign(render, { audioMode: 'silent', hasAudio: false });
+  if (episode.audioMode === 'nonverbal') Object.assign(render, { audioMode: 'nonverbal', hasAudio: true });
+  await f.store.transaction(state => Object.assign(state.episodes.find(item => item.id === episode.id), { render, status: 'rendered' }));
+}
+
+test('only explicit long format expands planning and editorial duration; legacy short limits stay bounded', async t => {
+  const f = await fixture(t);
+  assert.deepEqual(episodeLimits(), { format: 'short', maxScenes: 12, maxDurationSeconds: 180, maxRenderBytes: 100 * 1024 * 1024 });
+  assert.deepEqual(episodeLimits({}), episodeLimits('short'));
+  assert.deepEqual(episodeLimits('long'), { format: 'long', maxScenes: 120, maxDurationSeconds: 900, maxRenderBytes: 512 * 1024 * 1024 });
+  for (const format of ['horizontal', '', null, 0]) await assert.rejects(f.studio.planEpisode(episodeInput(f.project.id, { format })), /format must be short or long/);
+  const master = await f.studio.planEpisode(episodeInput(f.project.id, { format: 'long', scenes: Array.from({ length: 15 }, (_, index) => ({ durationSeconds: 60, narration: `Complete original sphere reveal number ${index}.`, visualPrompt: `Sphere ${index} with its own resolved luminous world.` })) }));
+  assert.equal(master.format, 'long');
+  assert.equal(master.scenes.length, 15);
+  await rendered(f, master);
+  assert.equal((await f.studio.editorialReview(master.id)).readyForApproval, true);
+  assert.equal((await f.studio.editorialReview(master.id)).limits.maximumDurationSeconds, 900);
+  await assert.rejects(f.studio.planEpisode(episodeInput(f.project.id, { format: 'long', scenes: Array.from({ length: 16 }, () => ({ durationSeconds: 60, narration: 'Different narrative.', visualPrompt: 'Different scene.' })) })), /900 seconds/);
+  await assert.rejects(f.studio.planEpisode(episodeInput(f.project.id, { format: 'long', scenes: Array.from({ length: 121 }, () => ({ durationSeconds: 1, narration: 'Different narrative.', visualPrompt: 'Different scene.' })) })), /120 scenes/);
+  assert.notEqual(episodeReviewHash(master), episodeReviewHash({ ...master, format: 'short' }));
+  await f.store.transaction(state => { delete state.episodes[0].format; });
+  const shortReview = await f.studio.editorialReview(master.id);
+  assert.equal(shortReview.limits.maximumDurationSeconds, 180);
+  assert.equal(shortReview.readyForApproval, false);
+});
+
+test('derived shorts remap original synthetic assets, bind lineage and still require their own watched render', async t => {
+  const f = await fixture(t);
+  const parent = await f.studio.planEpisode(episodeInput(f.project.id, { format: 'long', title: 'The master anthology of tactile universes', scenes: longScenes }));
+  const { assets, render } = await rendered(f, parent);
+  const short = await f.studio.deriveShort(derivedInput(parent));
+  assert.equal(short.status, 'planned');
+  assert.equal(short.format, 'short');
+  assert.equal(short.render, null);
+  assert.equal(short.approval, null);
+  assert.deepEqual(short.trendIds, []);
+  assert.deepEqual(short.derivation.sourceSceneIds, parent.scenes.map(scene => scene.id));
+  assert.equal(short.derivation.parentRenderSha256, render.sha256);
+  assert.deepEqual(short.derivation.sourceTimeRanges.map(({ startSeconds, endSeconds }) => [startSeconds, endSeconds]), [[0, 10], [10, 22], [22, 30]]);
+  const state = await f.store.read();
+  const copied = state.assets.filter(asset => asset.episodeId === short.id);
+  assert.equal(copied.length, assets.length);
+  for (const asset of copied) {
+    const source = assets.find(original => original.id === asset.lineage.sourceAssetId);
+    assert.notEqual(asset.id, source.id);
+    assert.notEqual(asset.sceneId, source.sceneId);
+    assert.equal(asset.path, source.path);
+    assert.equal(asset.sha256, source.sha256);
+    assert.deepEqual(asset.provenance, source.provenance);
+  }
+  await assert.rejects(f.studio.approveEpisode({ episodeId: short.id, review }), /final render/);
+  await renderDerived(f, short);
+  assert.equal((await f.studio.editorialReview(short.id)).readyForApproval, true);
+  assert.equal((await f.studio.editorialReview(parent.id)).readyForApproval, true);
+  const approved = await f.studio.approveEpisode({ episodeId: short.id, review });
+  assert.equal(approved.status, 'approved');
+  assert.notEqual(approved.approval.reviewHash, episodeReviewHash({ ...approved, derivation: undefined }));
+  const changedAssets = structuredClone((await f.store.read()).assets);
+  changedAssets.find(asset => asset.episodeId === short.id).lineage.sourceAssetId = randomUUID();
+  assert.notEqual(approved.approval.assetReviewHash, episodeAssetHash(approved, changedAssets));
+  await assert.rejects(f.studio.planEpisode(episodeInput(f.project.id, { title: 'Unrelated upload with recycled narrative', scenes: longScenes })), /Near duplicate/);
+});
+
+test('derivation validates source order, bounded duration and duplicate selection inside the transaction', async t => {
+  const f = await fixture(t);
+  const parent = await f.studio.planEpisode(episodeInput(f.project.id, { format: 'long', title: 'A collection of distinct completed reveals', scenes: longScenes }));
+  await rendered(f, parent);
+  for (const ids of [[parent.scenes[1].id, parent.scenes[0].id], [randomUUID()], [parent.scenes[0].id, parent.scenes[0].id]]) await assert.rejects(f.studio.deriveShort(derivedInput(parent, { sceneIds: ids })), /chronological order|unique/);
+  const input = derivedInput(parent, { sceneIds: [parent.scenes[0].id, parent.scenes[2].id] });
+  const outcomes = await Promise.allSettled([f.studio.deriveShort(input), f.studio.deriveShort({ ...input, title: 'A second caption cannot repeat the same selection' })]);
+  assert.equal(outcomes.filter(outcome => outcome.status === 'fulfilled').length, 1);
+  assert.match(outcomes.find(outcome => outcome.status === 'rejected').reason.message, /already been derived/);
+  const short = outcomes.find(outcome => outcome.status === 'fulfilled').value;
+  assert.deepEqual(short.derivation.sourceTimeRanges.map(({ startSeconds, endSeconds }) => [startSeconds, endSeconds]), [[0, 10], [22, 30]]);
+  assert.equal((await f.store.read()).episodes.length, 2);
+
+  const other = await fixture(t);
+  const tooLong = await other.studio.planEpisode(episodeInput(other.project.id, { format: 'long', scenes: Array.from({ length: 4 }, (_, index) => ({ durationSeconds: 60, narration: `Original complete narrative ${index}.`, visualPrompt: `A distinct complete scene ${index}.` })) }));
+  await rendered(other, tooLong);
+  await assert.rejects(other.studio.deriveShort(derivedInput(tooLong)), /180 seconds/);
+});
+
+test('derivation rejects unrendered or tampered parents and retains source hash checks after creation', async t => {
+  const f = await fixture(t);
+  const parent = await f.studio.planEpisode(episodeInput(f.project.id, { format: 'long', title: 'Original source with verifiable generation history', scenes: longScenes }));
+  await assert.rejects(f.studio.deriveShort(derivedInput(parent)), /rendered long episode/);
+  const { assets } = await rendered(f, parent);
+  await writeFile(join(f.directory, assets[0].path), 'changed source bytes');
+  await assert.rejects(f.studio.deriveShort(derivedInput(parent)), /source is invalid.*hash changed/);
+  await writeFile(join(f.directory, assets[0].path), `synthetic-${assets[0].kind}-${assets[0].sceneId}`);
+  const short = await f.studio.deriveShort(derivedInput(parent));
+  await f.store.transaction(state => { state.assets.find(asset => asset.id === assets[0].id).provenance.model = 'a different undisclosed generation'; });
+  const findings = (await f.studio.editorialReview(short.id)).findings;
+  assert.ok(findings.some(finding => finding.code === 'derivation_invalid' && /source changed/.test(finding.message)));
+  await assert.rejects(f.studio.approveEpisode({ episodeId: short.id, review }), /source changed/);
+});
+
+test('parent-child narrative reuse is narrow: repeated titles and sibling stories remain blocked', async t => {
+  const f = await fixture(t);
+  const narration = 'An amber moon opens to release silver rain that fills a basin and settles into a luminous garden.';
+  const parent = await f.studio.planEpisode(episodeInput(f.project.id, { format: 'long', title: 'Amber moon anthology with complete reveals', scenes: [0, 1].map(() => ({ durationSeconds: 10, narration, visualPrompt: 'Amber moon releases silver rain into a luminous basin garden.' })) }));
+  await rendered(f, parent);
+  await assert.rejects(f.studio.deriveShort(derivedInput(parent, { title: parent.title, sceneIds: [parent.scenes[0].id] })), /Near duplicate/);
+  await f.studio.deriveShort(derivedInput(parent, { sceneIds: [parent.scenes[0].id] }));
+  await assert.rejects(f.studio.deriveShort(derivedInput(parent, { title: 'Silver rain creates a basin garden', sceneIds: [parent.scenes[1].id] })), /Near duplicate/);
+  assert.equal((await f.store.read()).episodes.length, 2);
+});
+
+test('nonverbal episodes require original audio, forbid narration/captions and deduplicate their visual story', async t => {
+  const f = await fixture(t);
+  const input = episodeInput(f.project.id, { audioMode: 'nonverbal', scenes: [{ durationSeconds: 10, narration: '', visualPrompt: 'A quartz sphere reveals a complete tiny aurora and its crystal shell settles on the table.' }] });
+  await assert.rejects(f.studio.planEpisode({ ...input, scenes: [{ ...input.scenes[0], narration: 'This would introduce spoken language.' }] }), /Nonverbal episodes cannot contain narration/);
+  const episode = await f.studio.planEpisode(input);
+  await rendered(f, episode);
+  assert.equal((await f.studio.editorialReview(episode.id)).readyForApproval, true);
+  await assert.rejects(f.studio.planEpisode({ ...input, title: 'A completely different headline' }), /visual story token overlap/);
+  await f.store.transaction(state => { state.episodes[0].render.captionsTiming = 'scene-approximate'; });
+  assert.ok((await f.studio.editorialReview(episode.id)).findings.some(finding => finding.code === 'nonverbal_render_invalid'));
+  await f.store.transaction(state => { delete state.episodes[0].render.captionsTiming; delete state.episodes[0].render.sceneAssets[0].audioAssetId; });
+  assert.ok((await f.studio.editorialReview(episode.id)).findings.some(finding => finding.code === 'scene_asset_invalid'));
 });
 
 test('metrics keep missing values absent and support concurrent independent platforms', async (t) => {
