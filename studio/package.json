@@ -8,12 +8,14 @@
   "bin": { "ytfun-mcp": "src/mcp.mjs" },
   "scripts": {
     "start": "node src/mcp.mjs",
+    "setup:youtube-auth": "node scripts/youtube-oauth-setup.mjs",
     "inspect:kwai-har": "node scripts/inspect-kwai-har.mjs",
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
     "@huggingface/inference": "4.13.30",
     "@modelcontextprotocol/sdk": "1.31.0",
+    "google-auth-library": "11.1.0",
     "zod": "4.6.5"
   },
   "packageManager": "pnpm@10.33.0"

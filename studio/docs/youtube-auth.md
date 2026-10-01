@@ -30,6 +30,53 @@ Nunca cole tokens, códigos ou client secrets na conversa, em projetos, prompts,
 metadados de mídia ou logs. Use o armazenamento de segredos do ambiente de
 operação, fora do checkout, com acesso limitado ao worker.
 
+## Helper Desktop para configurar o ambiente
+
+O helper do studio realiza o consentimento de um **cliente Desktop** do Google
+com a biblioteca oficial `google-auth-library`. Ele pede somente `youtube.upload`
+e `youtube.readonly`; não pede Analytics ou acesso financeiro nesta configuração.
+
+Prepare dois arquivos privados fora do repositório, pertencentes ao usuário e
+com permissão `0600`: o JSON do cliente (`installed`) e um `.env` já existente.
+Nesse `.env`, configure primeiro o `YOUTUBE_CHANNEL_ID` pretendido. Para AI Meow,
+o canal confirmado nesta configuração é `UCjwAEFZPOQ6FIfweosLmCTg`.
+
+Execute a partir de `studio/`, com Node 22+ e as dependências instaladas:
+
+```sh
+node scripts/youtube-oauth-setup.mjs \
+  --client "/private/oauth/google-client.json" \
+  --env-file "/private/ytfun.env"
+```
+
+Os argumentos contêm somente caminhos. O helper imprime a URL de consentimento
+do Google e aguarda por até dez minutos; não abre o navegador nem confirma a
+tela. Abra a URL no perfil Chrome correto, entre diretamente no Google e confira
+o canal e as duas permissões antes de consentir. A URL contém client ID público,
+`state`, challenge PKCE e callback; não contém client secret, tokens ou códigos.
+Não compartilhe capturas de telas/URLs que contenham o código de retorno.
+
+O callback usa porta efêmera em `127.0.0.1` e valida origem, caminho, parâmetros
+limitados, estado e uso único. A troca usa PKCE S256 e não repete o authorization
+code. O listener fecha na conclusão, cancelamento ou timeout. O helper só grava
+o refresh token depois de confirmar `channels.list(mine=true)` para o ID esperado.
+Escolher outro canal ou negar um escopo deixa o arquivo original intacto.
+
+A atualização usa arquivo temporário privado, fsync e rename, com lock exclusivo
+entre helpers e detecção de mudanças concorrentes. Preserva as demais configurações
+e comentários em assignments de uma linha, remove access tokens/expirações antigos
+e fixa `YTFUN_YOUTUBE_PUBLIC_ENABLED=false` e `YTFUN_YOUTUBE_AUDIT_CONFIRMED=false`.
+O helper não aceita arquivos com valores multiline, symlinks ou permissões abertas.
+Um lock `.oauth.lock` deixado por interrupção abrupta só deve ser removido depois
+de confirmar que nenhum helper continua ativo.
+
+Client ID/secret e refresh token são gravados no `.env` privado; os arquivos de
+credenciais originais não são alterados. O helper não imprime resultados de APIs,
+tokens ou erros brutos do SDK, e desativa os interceptores de logging OAuth.
+Depois de configurar, reinicie o worker com esse arquivo de ambiente; configurar
+um grant não publica vídeo nem habilita auditoria. Esse fluxo segue as
+[regras oficiais para aplicativos Desktop e loopback](https://developers.google.com/identity/protocols/oauth2/native-app).
+
 ## Obter o grant com o dono do canal
 
 1. No projeto Google Cloud pessoal escolhido, habilite YouTube Data API v3;
@@ -37,7 +84,8 @@ operação, fora do checkout, com acesso limitado ao worker.
 2. Configure um cliente OAuth adequado ao ambiente e seu callback autorizado.
    Use o fluxo oficial com biblioteca Google para consentimento e troca do código,
    validando `state` e os requisitos do tipo de cliente. O provider deste pacote
-   não implementa um callback de autorização.
+   não implementa um callback de autorização; o helper Desktop acima oferece
+   esse passo para clientes `installed`.
 3. Peça `access_type=offline`. O dono entra diretamente no Google e confere o
    canal e as permissões antes de consentir. Escolha o canal AI Meow quando houver
    seleção entre canal pessoal e canais de marca.
@@ -111,4 +159,6 @@ e revogue a conexão no [Google](https://myaccount.google.com/connections).
 
 Os cenários de cache, concorrência, expiração, escopos e falhas de autenticação
 têm testes com rede simulada em `test/oauth.test.mjs`. Executam somente no workflow
-GitHub Actions `AI Studio CI`; não rode testes no laptop.
+GitHub Actions `AI Studio CI`; não rode testes no laptop. As regressões do helper
+em `test/youtube-oauth-setup.test.mjs` usam grants falsos, rede Google simulada e
+callback local somente no runner do CI; nunca use o helper como smoke test local.
