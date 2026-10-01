@@ -9,6 +9,7 @@ import { falQueueReceiptFetch } from './fal-queue-receipt.mjs';
 import { recoverFalVideo } from './fal-queue-recovery.mjs';
 
 const MAX_ASSET_BYTES = 100 * 1024 * 1024;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_PROBE_BYTES = 1024 * 1024;
 const KINDS = new Set(['image', 'audio', 'video']);
 const PUBLICATION_FREEZE_STATUSES = new Set(['reserved', 'uploading', 'sending', 'unknown', 'processing', 'uploaded', 'scheduled', 'published']);
@@ -31,6 +32,30 @@ export const videoParametersSchema = z.strictObject({
   num_interpolated_frames: z.literal(0).optional(),
   enable_prompt_expansion: z.boolean().optional(),
 });
+
+export const imageParametersSchema = z.strictObject({
+  width: z.number().int().min(256).max(2048).optional(),
+  height: z.number().int().min(256).max(2048).optional(),
+  num_inference_steps: z.number().int().min(1).max(50).optional(),
+  seed: z.number().int().min(0).max(4_294_967_295).optional(),
+});
+
+function imageParametersFor(kind, value) {
+  if (value === undefined) return undefined;
+  if (kind !== 'image') throw new Error('imageParameters is allowed only for image generation');
+  const parsed = imageParametersSchema.safeParse(value);
+  if (!parsed.success) throw new Error('imageParameters contains unsupported values or fields');
+  if ((parsed.data.width === undefined) !== (parsed.data.height === undefined)) throw new Error('imageParameters width and height must be provided together');
+  return parsed.data;
+}
+
+function imageSdkParameters(provider, parameters) {
+  if (parameters === undefined || provider !== 'fal-ai' || parameters.width === undefined) return parameters;
+  // The fal SDK flattens parameters without translating width/height. Its
+  // image API expects the bounded dimensions under image_size instead.
+  const { width, height, ...remaining } = parameters;
+  return { ...remaining, image_size: { width, height } };
+}
 
 function videoParametersFor(kind, value) {
   if (value === undefined) return undefined;
@@ -168,6 +193,39 @@ function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
+function referenceImageAsset(state, episodeId, sceneId, assetId) {
+  const asset = state.assets.find(item => item.id === assetId);
+  if (!asset || asset.kind !== 'image' || asset.episodeId !== episodeId || asset.sceneId !== sceneId) throw new Error('Reference must be an image asset from the same episode and scene');
+  if (asset.synthetic !== true || !/^[a-f0-9]{64}$/.test(asset.sha256 ?? '')) throw new Error('Reference image must be synthetic with a recorded SHA-256');
+  requiredText(asset.provenance?.provider, 'reference image provider', 100);
+  requiredText(asset.provenance?.model, 'reference image model', 300);
+  requiredText(asset.provenance?.prompt, 'reference image prompt');
+  evidence(asset.provenance?.commercialLicense);
+  return asset;
+}
+
+function referenceSnapshot(asset) {
+  return JSON.stringify({ id: asset.id, path: asset.path, sha256: asset.sha256, synthetic: asset.synthetic, provenance: asset.provenance });
+}
+
+async function loadReferenceImage(store, state, episodeId, sceneId, assetId) {
+  if (assetId === undefined) return undefined;
+  if (typeof assetId !== 'string' || !UUID.test(assetId)) throw new Error('referenceImageAssetId must be an image asset UUID');
+  const asset = referenceImageAsset(state, episodeId, sceneId, assetId);
+  const bytes = await boundedFile(await internalPath(store, asset.path));
+  if (sha256(bytes) !== asset.sha256) throw new Error('Reference image file hash does not match its recorded SHA-256');
+  const extension = detectType(bytes, 'image');
+  const type = Object.keys(MIME_EXTENSIONS.image).find(mime => MIME_EXTENSIONS.image[mime] === extension);
+  const snapshot = referenceSnapshot(asset);
+  return { descriptor: { assetId, sha256: asset.sha256 }, snapshot, snapshotHash: sha256(Buffer.from(snapshot)), blob: new Blob([bytes], { type }) };
+}
+
+function assertReferenceUnchanged(state, episodeId, sceneId, reference) {
+  if (reference === undefined) return;
+  const asset = referenceImageAsset(state, episodeId, sceneId, reference.descriptor.assetId);
+  if (referenceSnapshot(asset) !== reference.snapshot) throw new Error('Reference image changed during generation');
+}
+
 async function saveAsset(store, bytes, extension, fields) {
   const { assets } = await assetRoot(store);
   const id = randomUUID();
@@ -256,9 +314,11 @@ export class Production {
     this.fetch = fetchImpl;
   }
 
-  async generateAsset({ episodeId, sceneId, kind, model, provider, prompt, videoParameters, estimatedCostUsd, pricingSourceUrl, commercialLicense, acknowledgePaidCost = false, resumeReservationId, productionJobId }) {
+  async generateAsset({ episodeId, sceneId, kind, model, provider, prompt, videoParameters, imageParameters, referenceImageAssetId, estimatedCostUsd, pricingSourceUrl, commercialLicense, acknowledgePaidCost = false, resumeReservationId, productionJobId }) {
     requireKind(kind);
     const parameters = videoParametersFor(kind, videoParameters);
+    const imageSettings = imageParametersFor(kind, imageParameters);
+    if (referenceImageAssetId !== undefined && kind !== 'video') throw new Error('referenceImageAssetId is allowed only for video generation');
     model = requiredText(model, 'model', 300);
     provider = requiredText(provider, 'provider', 100);
     if (provider === 'auto') throw new Error('Choose an explicit provider so the cost and license evidence refer to the actual service');
@@ -270,9 +330,10 @@ export class Production {
     requireProductionKind(context.episode, kind);
     if (!this.env.HF_TOKEN) throw new Error('HF_TOKEN is required for cloud inference');
     const inputs = requiredText(prompt ?? (kind === 'audio' ? context.scene.narration : context.scene.visualPrompt), 'prompt');
+    const reference = await loadReferenceImage(this.store, initial, episodeId, sceneId, referenceImageAssetId);
     if (resumeReservationId !== undefined) return this.recoverAsset({
       episodeId, sceneId, kind, model, provider, inputs, parameters, estimatedCostUsd,
-      pricingSourceUrl: pricing.url, commercialLicense: license, resumeReservationId,
+      pricingSourceUrl: pricing.url, commercialLicense: license, resumeReservationId, reference,
     });
     if (estimatedCostUsd > 0 && (acknowledgePaidCost !== true || this.env.YTFUN_PAID_GENERATION_ENABLED !== 'true')) throw new Error('Paid generation needs explicit per-call cost acknowledgment and YTFUN_PAID_GENERATION_ENABLED=true');
     const id = randomUUID();
@@ -280,33 +341,39 @@ export class Production {
       const { episode, project } = sceneContext(state, episodeId, sceneId);
       mutableEpisode(episode, state);
       requireProductionKind(episode, kind);
+      assertReferenceUnchanged(state, episodeId, sceneId, reference);
       if (productionJobId !== undefined && !state.productionJobs?.some(job => job.id === productionJobId && job.action === 'generate' && job.episodeId === episodeId && job.status === 'running')) throw new Error('Generation job is not the active owner of this episode request');
       if (hasPendingGeneration(state, episodeId, sceneId, kind)) throw new Error('A previous generation is reserved or has an unknown charge outcome; reconcile it before retrying');
       assertBudget(state, project, estimatedCostUsd);
-      state.spending.push({ id, projectId: project.id, episodeId, sceneId, kind, provider, model, prompt: inputs, commercialLicense: license, ...(productionJobId === undefined ? {} : { productionJobId }), ...(parameters === undefined ? {} : { videoParameters: { ...parameters } }), estimatedCostUsd, pricingSourceUrl: pricing.url, priceNote: pricing.notes, status: 'reserved', createdAt: new Date().toISOString() });
+      state.spending.push({ id, projectId: project.id, episodeId, sceneId, kind, provider, model, prompt: inputs, commercialLicense: license, ...(productionJobId === undefined ? {} : { productionJobId }), ...(parameters === undefined ? {} : { videoParameters: { ...parameters } }), ...(imageSettings === undefined ? {} : { imageParameters: { ...imageSettings } }), ...(reference === undefined ? {} : { referenceImage: { ...reference.descriptor }, referenceImageSnapshotHash: reference.snapshotHash }), estimatedCostUsd, pricingSourceUrl: pricing.url, priceNote: pricing.notes, status: 'reserved', createdAt: new Date().toISOString() });
       invalidate(episode);
     });
     let asset;
     try {
       const client = this.inferenceClient ?? new (await import('@huggingface/inference')).InferenceClient(this.env.HF_TOKEN);
-      const method = { image: 'textToImage', audio: 'textToSpeech', video: 'textToVideo' }[kind];
+      const method = reference ? 'imageToVideo' : { image: 'textToImage', audio: 'textToSpeech', video: 'textToVideo' }[kind];
       // Official SDK textToVideo/textToSpeech return Blob; textToImage is forced to Blob.
       // A 503 may have an ambiguous charge outcome; disable the SDK's recursive retry.
       const options = { retry_on_error: false, ...(kind === 'image' ? { outputType: 'blob' } : {}) };
       // The SDK polls only after this supported hook returns its POST response.
       // Preserve the remote queue identity before polling can outlive this worker.
       if (kind === 'video' && provider === 'fal-ai') options.fetch = falQueueReceiptFetch(this.store, id, { fetchImpl: this.fetch });
-      const output = await client[method]({ model, provider, inputs, ...(parameters === undefined ? {} : { parameters: { ...parameters } }) }, options);
+      const sdkParameters = kind === 'image' ? imageSdkParameters(provider, imageSettings) : parameters;
+      const args = reference
+        ? { model, provider, inputs: reference.blob, parameters: { ...parameters, prompt: inputs } }
+        : { model, provider, inputs, ...(sdkParameters === undefined ? {} : { parameters: structuredClone(sdkParameters) }) };
+      const output = await client[method](args, options);
       if (!(output instanceof Blob) || output.size === 0 || output.size > MAX_ASSET_BYTES) throw new Error('Inference response must be a nonempty Blob no larger than 100 MiB');
       const extension = MIME_EXTENSIONS[kind][output.type.toLowerCase().split(';')[0]];
       if (!extension) throw new Error(`Unsupported ${kind} response MIME type`);
       const bytes = Buffer.from(await output.arrayBuffer());
       if (detectType(bytes, kind) !== extension) throw new Error('Inference response MIME type does not match its file header');
-      asset = await saveAsset(this.store, bytes, extension, { episodeId, sceneId, kind, provenance: { provider, model, prompt: inputs, ...(parameters === undefined ? {} : { videoParameters: { ...parameters } }), commercialLicense: license } });
+      asset = await saveAsset(this.store, bytes, extension, { episodeId, sceneId, kind, provenance: { provider, model, prompt: inputs, ...(parameters === undefined ? {} : { videoParameters: { ...parameters } }), ...(imageSettings === undefined ? {} : { imageParameters: { ...imageSettings } }), ...(reference === undefined ? {} : { referenceImage: { ...reference.descriptor }, parents: [{ ...reference.descriptor }] }), commercialLicense: license } });
       return await this.store.transaction((state) => {
         const { episode } = sceneContext(state, episodeId, sceneId);
         mutableEpisode(episode, state);
         requireProductionKind(episode, kind);
+        assertReferenceUnchanged(state, episodeId, sceneId, reference);
         state.assets.push(asset);
         const reservation = state.spending.find((item) => item.id === id);
         if (!reservation || reservation.status !== 'reserved') throw new Error('Generation reservation changed during inference');
@@ -343,7 +410,7 @@ export class Production {
     }
   }
 
-  async recoverAsset({ episodeId, sceneId, kind, model, provider, inputs, parameters, estimatedCostUsd, pricingSourceUrl, commercialLicense, resumeReservationId }) {
+  async recoverAsset({ episodeId, sceneId, kind, model, provider, inputs, parameters, estimatedCostUsd, pricingSourceUrl, commercialLicense, resumeReservationId, reference }) {
     if (kind !== 'video' || provider !== 'fal-ai' || typeof resumeReservationId !== 'string' ||
         !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(resumeReservationId)) throw new Error('Recovery requires the UUID of an existing fal-ai video reservation');
     const attemptId = randomUUID();
@@ -356,7 +423,10 @@ export class Production {
           reservation.prompt !== inputs || reservation.estimatedCostUsd !== estimatedCostUsd ||
           reservation.pricingSourceUrl !== pricingSourceUrl ||
           JSON.stringify(reservation.videoParameters) !== JSON.stringify(parameters) ||
+          JSON.stringify(reservation.referenceImage) !== JSON.stringify(reference?.descriptor) ||
+          reservation.referenceImageSnapshotHash !== reference?.snapshotHash ||
           JSON.stringify(reservation.commercialLicense) !== JSON.stringify(commercialLicense)) throw new Error('Recovery inputs must match the original persisted generation request');
+      assertReferenceUnchanged(state, episodeId, sceneId, reference);
       if (reservation.status === 'completed') {
         const asset = state.assets.find(item => item.id === reservation.assetId && item.episodeId === episodeId && item.sceneId === sceneId);
         if (!asset) throw new Error('Completed generation has no recorded asset');
@@ -393,11 +463,13 @@ export class Production {
       const bytes = Buffer.from(await result.blob.arrayBuffer());
       asset = await saveAsset(this.store, bytes, detectType(bytes, 'video'), {
         episodeId, sceneId, kind, provenance: { provider, model, prompt: inputs,
-          ...(parameters === undefined ? {} : { videoParameters: { ...parameters } }), commercialLicense },
+          ...(parameters === undefined ? {} : { videoParameters: { ...parameters } }),
+          ...(reference === undefined ? {} : { referenceImage: { ...reference.descriptor }, parents: [{ ...reference.descriptor }] }), commercialLicense },
       });
       const committed = await this.store.transaction(state => {
         const { episode } = sceneContext(state, episodeId, sceneId);
         mutableEpisode(episode, state);
+        assertReferenceUnchanged(state, episodeId, sceneId, reference);
         const reservation = state.spending.find(item => item.id === resumeReservationId);
         if (reservation?.recoveryClaim?.id !== attemptId) throw new Error('Recovery claim changed');
         if (reservation.status === 'completed') {

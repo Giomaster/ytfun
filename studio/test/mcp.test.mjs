@@ -36,6 +36,21 @@ test('stdio MCP negotiates, lists tools and persists a series across restarts', 
   ]);
   const jobSchema = tools.tools.find(tool => tool.name === 'ytfun_production_job_start').inputSchema;
   assert.match(JSON.stringify(jobSchema), /"videoParameters"/);
+  const generationSchema = tools.tools.find(tool => tool.name === 'ytfun_asset_generate').inputSchema;
+  const imageSchema = generationSchema.properties.imageParameters;
+  assert.equal(imageSchema.additionalProperties, false);
+  assert.deepEqual(Object.keys(imageSchema.properties).sort(), ['height', 'num_inference_steps', 'seed', 'width']);
+  for (const dimension of ['width', 'height']) {
+    assert.equal(imageSchema.properties[dimension].type, 'integer');
+    assert.equal(imageSchema.properties[dimension].minimum, 256);
+    assert.equal(imageSchema.properties[dimension].maximum, 2048);
+  }
+  assert.equal(imageSchema.properties.num_inference_steps.minimum, 1);
+  assert.equal(imageSchema.properties.num_inference_steps.maximum, 50);
+  assert.equal(generationSchema.properties.referenceImageAssetId.type, 'string');
+  assert.equal(generationSchema.properties.referenceImageAssetId.format, 'uuid');
+  assert.match(JSON.stringify(jobSchema), /"imageParameters"/);
+  assert.match(JSON.stringify(jobSchema), /"referenceImageAssetId"/);
   const created = await client.callTool({ name: 'ytfun_project_create', arguments: { title: 'Arquivo das cidades impossíveis', premise: 'Uma cidade imaginária diferente por episódio.', audience: 'Pessoas interessadas em ficção especulativa.', language: 'pt-BR' } });
   assert.ok(!created.isError, JSON.stringify(created));
   const project = JSON.parse(created.content[0].text);

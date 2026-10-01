@@ -6,7 +6,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { StudioStore } from './store.mjs';
 import { Studio } from './domain.mjs';
-import { Production, videoParametersSchema } from './production.mjs';
+import { Production, videoParametersSchema, imageParametersSchema } from './production.mjs';
 import { Publisher } from './publishing.mjs';
 import { Research } from './research.mjs';
 import { ProductionJobs } from './jobs.mjs';
@@ -22,7 +22,7 @@ const platform = z.enum(['youtube', 'facebook', 'tiktok', 'kwai']);
 const metadata = z.object({ description: z.string().max(5000), hashtags: z.array(z.string().trim().min(1).max(60).regex(/^#[\p{L}\p{N}_]+$/u)).max(8) });
 const generationSchema = {
   episodeId: id, sceneId: id, kind, model: z.string().trim().min(1).max(200), provider: z.string().trim().min(1).max(100), prompt: text.optional(), estimatedCostUsd: z.number().finite().nonnegative(), pricingSourceUrl: url, commercialLicense: license, acknowledgePaidCost: z.boolean().default(false),
-  videoParameters: videoParametersSchema.optional(), resumeReservationId: id.optional(),
+  videoParameters: videoParametersSchema.optional(), imageParameters: imageParametersSchema.optional(), referenceImageAssetId: id.optional(), resumeReservationId: id.optional(),
 };
 
 export function createServer({ directory = process.env.YTFUN_STUDIO_DIR, env = process.env, fetchImpl = fetch, store, studio, production, publisher, research, youtubeLifecycle } = {}) {
@@ -71,7 +71,7 @@ export function createServer({ directory = process.env.YTFUN_STUDIO_DIR, env = p
   }, input => studio.planEpisode(input));
   register('ytfun_episode_get', 'Read full episode, scene IDs and linked asset provenance before producing or reviewing.', { episodeId: id }, async ({ episodeId }) => ({ episode: await studio.getEpisode(episodeId), assets: (await store.read()).assets.filter(asset => asset.episodeId === episodeId) }), { readOnly: true });
   register('ytfun_episode_review', 'Run structural editorial checks; this cannot watch a render or establish originality or monetization eligibility.', { episodeId: id }, ({ episodeId }) => studio.editorialReview(episodeId), { readOnly: true });
-  register('ytfun_asset_generate', 'Generate one original image, speech or video with remote Hugging Face inference. Requires model/provider/license/pricing evidence. A zero estimate does not establish free usage. Paid calls require per-call acknowledgment and a runtime enable flag. resumeReservationId retrieves an existing fal-ai video receipt with GET only, matching original inputs; pending does not create an asset. Prefer ytfun_production_job_start for slow generations.', generationSchema, input => production.generateAsset(input), { external: true });
+  register('ytfun_asset_generate', 'Generate one original image, speech or video with remote Hugging Face inference. imageParameters controls bounded image dimensions, steps and seed. referenceImageAssetId animates a synthetic image from the same episode and scene with imageToVideo; its license and hash are verified and its lineage is recorded. Requires model/provider/license/pricing evidence. A zero estimate does not establish free usage. Paid calls require per-call acknowledgment and a runtime enable flag. resumeReservationId retrieves an existing fal-ai video receipt with GET only, matching original inputs; pending does not create an asset. Prefer ytfun_production_job_start for slow generations.', generationSchema, input => production.generateAsset(input), { external: true });
   register('ytfun_asset_import', 'Import an already-generated original AI asset from a regular local file (for example another authorized connector). Requires exact provider/model/prompt and commercial terms evidence. Does not accept third-party footage or music.', {
     episodeId: id, sceneId: id, kind, localPath: text, provenance: z.object({ provider: text, model: text, prompt: text, commercialLicense: license, synthetic: z.literal(true) }),
   }, input => production.registerAsset(input));

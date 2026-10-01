@@ -196,6 +196,218 @@ function fakeRenderer(durationSeconds, { audioDuration = 2, finalHasAudio = true
   return { runner, calls };
 }
 
+test('image dimensions translate to fal image_size and preserve original bounded intent', async t => {
+  const context = await setup(t, { audioMode: 'silent' });
+  const imageParameters = { width: 720, height: 1280, num_inference_steps: 28, seed: 20261002 };
+  const production = new Production(context.store, { env, inferenceClient: { textToImage: async (args, options) => {
+    assert.deepEqual(args.parameters, { image_size: { width: 720, height: 1280 }, num_inference_steps: 28, seed: 20261002 });
+    assert.equal(options.outputType, 'blob');
+    assert.equal(options.retry_on_error, false);
+    assert.deepEqual((await context.store.read()).spending[0].imageParameters, imageParameters);
+    args.parameters.image_size.width = 256;
+    return new Blob([PNG], { type: 'image/png' });
+  } } });
+  const asset = await production.generateAsset(generation(context.episode, { provider: 'fal-ai', imageParameters }));
+  assert.deepEqual(asset.provenance.imageParameters, imageParameters);
+  assert.deepEqual((await context.store.read()).spending[0].imageParameters, imageParameters);
+  assert.equal(imageParameters.width, 720);
+});
+
+test('unsupported image settings and non-video references reject before reservation or inference', async t => {
+  const context = await setup(t);
+  let requests = 0;
+  const request = async () => { requests += 1; assert.fail('Invalid inputs reached inference'); };
+  const production = new Production(context.store, { env, inferenceClient: { textToImage: request, textToVideo: request, imageToVideo: request } });
+  for (const imageParameters of [null, [], { width: 255, height: 1280 }, { width: 2049, height: 1280 }, { width: 720.5, height: 1280 }, { height: 255, width: 720 }, { height: 2049, width: 720 }, { width: 720 }, { height: 1280 }, { num_inference_steps: 0 }, { num_inference_steps: 51 }, { seed: -1 }, { seed: 4_294_967_296 }, { image_size: 'portrait_16_9' }, { enable_safety_checker: false }]) {
+    await assert.rejects(production.generateAsset(generation(context.episode, { imageParameters })), /imageParameters/);
+  }
+  await assert.rejects(production.generateAsset(generation(context.episode, { kind: 'video', imageParameters: {} })), /only for image/);
+  for (const kind of ['image', 'audio']) await assert.rejects(production.generateAsset(generation(context.episode, { kind, referenceImageAssetId: randomUUID() })), /only for video/);
+  assert.equal(requests, 0);
+  assert.equal((await context.store.read()).spending.length, 0);
+});
+
+test('real HF SDK sends Qwen dimensions under fal image_size without leaking image controls', async t => {
+  const context = await setup(t, { audioMode: 'silent' });
+  let posts = 0;
+  const mockFetch = async (url, options) => {
+    if (new URL(url).hostname === 'huggingface.co') return Response.json({ inferenceProviderMapping: { 'fal-ai': { providerId: 'fal-ai/qwen-image-2512', status: 'live', task: 'text-to-image' } } });
+    assert.equal(url, 'https://router.huggingface.co/fal-ai/fal-ai/qwen-image-2512?_subdomain=queue');
+    assert.equal(options.method, 'POST');
+    posts += 1;
+    if (posts > 1) assert.fail('A second image submission is forbidden');
+    const payload = JSON.parse(options.body);
+    assert.deepEqual(payload.image_size, { width: 720, height: 1280 });
+    assert.equal(payload.width, undefined);
+    assert.equal(payload.height, undefined);
+    assert.equal(payload.num_inference_steps, 28);
+    assert.equal(payload.seed, 123);
+    assert.equal(payload.prompt, context.episode.scenes[0].visualPrompt);
+    return Response.json({ error: 'fake-private-image-error' }, { status: 503 });
+  };
+  const client = new InferenceClient('hf_fake_ci_only', { fetch: mockFetch, retry_on_error: true });
+  const production = new Production(context.store, { env: { ...env, YTFUN_PAID_GENERATION_ENABLED: 'true' }, inferenceClient: client });
+  const imageParameters = { width: 720, height: 1280, num_inference_steps: 28, seed: 123 };
+  await assert.rejects(production.generateAsset(generation(context.episode, { model: 'ci-only/qwen-image-size-contract', provider: 'fal-ai', imageParameters, estimatedCostUsd: 0.02, acknowledgePaidCost: true })), /Generation failed after reservation/);
+  const state = await context.store.read();
+  assert.equal(posts, 1);
+  assert.deepEqual(state.spending[0].imageParameters, imageParameters);
+  assert.equal(state.spending[0].status, 'unknown');
+  assert.doesNotMatch(JSON.stringify(state), /hf_fake_ci_only|fake-private-image-error/);
+});
+
+test('image-to-video sends typed reference bytes and motion prompt, preserving parent evidence and original image', async t => {
+  const context = await setup(t, { audioMode: 'silent' });
+  let image;
+  const production = new Production(context.store, { env, inferenceClient: { imageToVideo: async (args, options) => {
+    assert.equal(args.inputs instanceof Blob, true);
+    assert.equal(args.inputs.type, 'image/png');
+    assert.deepEqual(Buffer.from(await args.inputs.arrayBuffer()), PNG);
+    assert.deepEqual(args.parameters, { ...pilotVideoParameters, prompt: 'The same cat opens its eyes and raises one paw.' });
+    assert.equal(options.retry_on_error, false);
+    assert.equal(typeof options.fetch, 'function');
+    const reserved = (await context.store.read()).spending[0];
+    assert.equal(reserved.status, 'reserved');
+    assert.deepEqual(reserved.referenceImage, { assetId: image.id, sha256: image.sha256 });
+    args.parameters.seed = 7;
+    return new Blob([MP4], { type: 'video/mp4' });
+  }, textToVideo: async () => assert.fail('A reference must select imageToVideo') } });
+  [{ image }] = await addSourceAssets(context, production, { includeAudio: false });
+  const jobs = new ProductionJobs(context.store, production);
+  const job = await jobs.start({ action: 'generate', input: generation(context.episode, {
+    kind: 'video', provider: 'fal-ai', model: 'Wan-AI/Wan2.2-I2V-A14B', referenceImageAssetId: image.id,
+    prompt: 'The same cat opens its eyes and raises one paw.', videoParameters: pilotVideoParameters,
+  }) });
+  await jobs.running.get(job.id);
+  const done = await jobs.get(job.id);
+  assert.equal(done.status, 'completed');
+  const asset = done.result;
+  const descriptor = { assetId: image.id, sha256: image.sha256 };
+  assert.deepEqual(asset.provenance.referenceImage, descriptor);
+  assert.deepEqual(asset.provenance.parents, [descriptor]);
+  assert.deepEqual(asset.provenance.videoParameters, pilotVideoParameters);
+  const state = await context.store.read();
+  assert.equal(state.assets.length, 2);
+  assert.deepEqual(state.assets.find(item => item.id === image.id), image);
+  assert.equal(state.spending[0].productionJobId, job.id);
+  assert.equal(state.spending[0].status, 'completed');
+  assert.deepEqual(state.spending[0].referenceImage, descriptor);
+  assert.match(state.spending[0].referenceImageSnapshotHash, /^[a-f0-9]{64}$/);
+  assert.equal(state.episodes[0].approval, null);
+});
+
+test('reference validity and file hash prevent image-to-video charges before reservation', async t => {
+  const context = await setup(t, { audioMode: 'silent', sceneCount: 2 });
+  let requests = 0;
+  const production = new Production(context.store, { env, inferenceClient: { imageToVideo: async () => { requests += 1; assert.fail('Invalid reference reached inference'); } } });
+  const images = await addSourceAssets(context, production, { includeAudio: false });
+  const image = images[0].image;
+  const input = generation(context.episode, { kind: 'video', provider: 'fal-ai', referenceImageAssetId: image.id });
+  await assert.rejects(production.generateAsset({ ...input, referenceImageAssetId: randomUUID() }), /same episode and scene/);
+  await assert.rejects(production.generateAsset({ ...input, referenceImageAssetId: images[1].image.id }), /same episode and scene/);
+  for (const change of [{ synthetic: false }, { provenance: { ...image.provenance, commercialLicense: null } }, { path: 'source.png' }]) {
+    await context.store.transaction(state => { Object.assign(state.assets.find(asset => asset.id === image.id), change); });
+    await assert.rejects(production.generateAsset(input));
+    await context.store.transaction(state => { Object.assign(state.assets.find(asset => asset.id === image.id), image); });
+  }
+  await writeFile(resolve(context.directory, image.path), Buffer.concat([PNG, Buffer.from('changed')]));
+  await assert.rejects(production.generateAsset(input), /hash does not match/);
+  assert.equal(requests, 0);
+  assert.equal((await context.store.read()).spending.length, 0);
+});
+
+test('real HF SDK routes image-to-video as data URI with prompt, preserving one ambiguous charge', async t => {
+  const context = await setup(t, { audioMode: 'silent' });
+  let posts = 0;
+  const mockFetch = async (url, options) => {
+    if (new URL(url).hostname === 'huggingface.co') return Response.json({ inferenceProviderMapping: { 'fal-ai': { providerId: 'fal-ai/wan/v2.2-a14b/image-to-video', status: 'live', task: 'image-to-video' } } });
+    assert.equal(url, 'https://router.huggingface.co/fal-ai/fal-ai/wan/v2.2-a14b/image-to-video?_subdomain=queue');
+    assert.equal(options.method, 'POST');
+    posts += 1;
+    if (posts > 1) assert.fail('A second paid submission is forbidden');
+    const payload = JSON.parse(options.body);
+    assert.equal(payload.image_url, `data:image/png;base64,${PNG.toString('base64')}`);
+    assert.equal(payload.prompt, 'A cat raises its paw.');
+    assert.equal(payload.num_frames, 81);
+    assert.equal(payload.inputs, undefined);
+    return Response.json({ error: 'fake-provider-private-value' }, { status: 503 });
+  };
+  const client = new InferenceClient('hf_fake_ci_only', { fetch: mockFetch, retry_on_error: true });
+  const production = new Production(context.store, { env: { ...env, YTFUN_PAID_GENERATION_ENABLED: 'true' }, inferenceClient: client, fetchImpl: mockFetch });
+  const [{ image }] = await addSourceAssets(context, production, { includeAudio: false });
+  await assert.rejects(production.generateAsset(generation(context.episode, { kind: 'video', provider: 'fal-ai', model: 'ci-only/wan-i2v-contract', prompt: 'A cat raises its paw.', referenceImageAssetId: image.id, videoParameters: { num_frames: 81, frames_per_second: 16 }, estimatedCostUsd: 0.41, acknowledgePaidCost: true })), /Generation failed after reservation/);
+  const state = await context.store.read();
+  assert.equal(posts, 1);
+  assert.equal(state.spending[0].status, 'unknown');
+  assert.deepEqual(state.spending[0].referenceImage, { assetId: image.id, sha256: image.sha256 });
+  assert.equal(state.assets.length, 1);
+  assert.doesNotMatch(JSON.stringify(state), /hf_fake_ci_only|fake-provider-private-value|data:image/);
+});
+
+test('image-to-video receipt recovery requires the exact original reference and retrieves without a second POST', async t => {
+  const context = await setup(t, { audioMode: 'silent' });
+  let posts = 0;
+  const production = new Production(context.store, { env, fetchImpl: async (url, options) => {
+    assert.equal(options.method, 'POST');
+    posts += 1;
+    return Response.json({ request_id: 'i2v-request', status: 'IN_QUEUE', response_url: 'https://queue.fal.run/fal-ai/wan/requests/i2v-request' });
+  }, inferenceClient: { imageToVideo: async (args, options) => {
+    assert.equal(args.inputs.type, 'image/png');
+    await options.fetch('https://router.huggingface.co/fal-ai/fal-ai/wan/v2.2-a14b/image-to-video?_subdomain=queue', { method: 'POST' });
+    throw new Error('Interrupted original polling');
+  } } });
+  const [{ image }] = await addSourceAssets(context, production, { includeAudio: false });
+  const secondImage = await production.registerAsset({ episodeId: context.episode.id, sceneId: context.episode.scenes[0].id, kind: 'image', localPath: join(context.directory, 'source.png'), provenance });
+  const input = generation(context.episode, { kind: 'video', provider: 'fal-ai', model: 'Wan-AI/Wan2.2-I2V-A14B', referenceImageAssetId: image.id, videoParameters: { num_frames: 81, frames_per_second: 16 } });
+  await assert.rejects(production.generateAsset(input), /Generation failed after reservation/);
+  const reservation = (await context.store.read()).spending[0];
+  assert.match(reservation.referenceImageSnapshotHash, /^[a-f0-9]{64}$/);
+  // A new worker must compare against the persisted snapshot from the original
+  // POST, rather than treating the current parent metadata as original intent.
+  await context.store.transaction(state => {
+    state.assets.find(item => item.id === image.id).provenance.commercialLicense.notes = 'Changed parent terms after the worker failed';
+  });
+  const replies = [Response.json({ status: 'COMPLETED' }), Response.json({ video: { url: 'https://v3.fal.media/recovered-i2v.mp4' } }), new Response(MP4, { headers: { 'content-type': 'video/mp4' } })];
+  let gets = 0;
+  const recovery = new Production(context.store, { env, inferenceClient: { imageToVideo: async () => assert.fail('GET recovery cannot invoke inference') }, fetchImpl: async (url, options) => {
+    assert.equal(options.method, 'GET');
+    gets += 1;
+    assert.ok(replies.length);
+    return replies.shift();
+  } });
+  const request = { ...input, resumeReservationId: reservation.id };
+  await assert.rejects(recovery.generateAsset(request), /match the original persisted generation request/);
+  assert.equal(gets, 0);
+  await context.store.transaction(state => { state.assets.find(item => item.id === image.id).provenance = image.provenance; });
+  await assert.rejects(recovery.generateAsset({ ...request, referenceImageAssetId: undefined }), /match the original persisted generation request/);
+  await assert.rejects(recovery.generateAsset({ ...request, referenceImageAssetId: secondImage.id }), /match the original persisted generation request/);
+  assert.equal(gets, 0);
+  const asset = await recovery.generateAsset(request);
+  assert.deepEqual(asset.provenance.parents, [{ assetId: image.id, sha256: image.sha256 }]);
+  assert.deepEqual(await recovery.generateAsset(request), asset);
+  const state = await context.store.read();
+  assert.equal(gets, 3);
+  assert.equal(posts, 1);
+  assert.equal(state.spending.length, 1);
+  assert.equal(state.spending[0].status, 'completed');
+  assert.equal(state.assets.length, 3);
+});
+
+test('a reference metadata change during generation preserves the charge barrier and rejects the derived asset', async t => {
+  const context = await setup(t, { audioMode: 'silent' });
+  let image;
+  const production = new Production(context.store, { env, inferenceClient: { imageToVideo: async () => {
+    await context.store.transaction(state => { state.assets.find(item => item.id === image.id).provenance.prompt = 'Changed parent intent'; });
+    return new Blob([MP4], { type: 'video/mp4' });
+  } } });
+  [{ image }] = await addSourceAssets(context, production, { includeAudio: false });
+  await assert.rejects(production.generateAsset(generation(context.episode, { kind: 'video', provider: 'fal-ai', referenceImageAssetId: image.id })), /Generation failed after reservation/);
+  const state = await context.store.read();
+  assert.equal(state.spending[0].status, 'unknown');
+  assert.equal(state.assets.length, 1);
+  assert.deepEqual(await readdir(join(context.directory, 'assets')), [image.path.split('/').at(-1)]);
+});
+
 test('free-first generation reserves before cloud inference and stores licensing evidence', async (t) => {
   const context = await setup(t);
   let received;

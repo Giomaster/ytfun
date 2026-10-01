@@ -134,7 +134,7 @@ inspeção do provider antes de qualquer novo envio.
 
 Para recuperar uma tentativa com recibo, envie `resumeReservationId` em
 `ytfun_asset_generate` (ou no input do job), mantendo episódio, cena, modelo,
-prompt, parâmetros, licença e estimativa originais. A operação faz somente GET:
+prompt, parâmetros, referência de imagem, licença e estimativa originais. A operação faz somente GET:
 retorna `pending` enquanto a fila trabalha e registra o MP4 quando concluído,
 sem nova reserva ou nova inferência. Recusa worker original ativo/não reconciliado
 e recuperação concorrente. Novas reservas guardam a intenção e o job original;
@@ -170,6 +170,30 @@ e na proveniência; a estimativa e a autorização de custo continuam explícita
 O retry automático de geração do SDK fica desativado; uma falha após a reserva
 continua `unknown` e exige reconciliação antes de outra chamada.
 Os nomes seguem a [API Wan 2.2 do fal.ai](https://fal.ai/models/fal-ai/wan/v2.2-a14b/text-to-video/api), encaminhados pelo SDK Hugging Face; isso não garante suporte de outros modelos/provedores nem um preço fixo.
+
+Geração de imagem aceita `imageParameters` opcional: `width` e `height` inteiros
+entre 256 e 2048, sempre juntos, `num_inference_steps` entre 1 e 50 e `seed` entre
+0 e 2³²−1. Para uma referência vertical, por exemplo, use
+`{ "width": 720, "height": 1280, "num_inference_steps": 28, "seed": 20261002 }`.
+No fal.ai, o studio converte essas dimensões para `parameters.image_size`, pois o
+SDK não faz essa tradução. A reserva e a proveniência guardam `imageParameters`
+originais; sem esse campo, os defaults do provedor ficam intactos. O contrato
+foi alinhado à [API Qwen Image 2512](https://fal.ai/models/fal-ai/qwen-image-2512/api).
+
+Para animar a referência, envie `kind: "video"` e `referenceImageAssetId` com o
+ID de uma imagem sintética já registrada na mesma cena e episódio. O studio
+valida licença, arquivo dentro de `assets/`, formato e SHA-256 antes de reservar
+a chamada. Usa `InferenceClient.imageToVideo` com um Blob de imagem e o prompt
+de movimento em `parameters.prompt`; a imagem original permanece registrada.
+A reserva guarda `referenceImage: { assetId, sha256 }`, e a proveniência do vídeo
+guarda essa referência e `parents` com a mesma derivação. A reserva também guarda
+um digest da identidade, caminho e proveniência da imagem; alterações desses
+dados impedem a retomada mesmo após reiniciar o worker. A retomada exige o ID
+e hash originais e usa a mesma recuperação GET, sem inferência adicional.
+O [Wan 2.2 A14B I2V](https://fal.ai/models/fal-ai/wan/v2.2-a14b/image-to-video/api)
+é uma rota compatível; confirme o mapping live do modelo no Hugging Face e a
+tarifa atual antes de chamar. A referência orienta a geração, e o piloto ainda
+precisa de revisão visual antes de aprovação ou publicação.
 
 YouTube precisa de OAuth válido e `YOUTUBE_CHANNEL_ID`.
 Escopos: `youtube.upload` e `youtube.readonly`; métricas pedem
