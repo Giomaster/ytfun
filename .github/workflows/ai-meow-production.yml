@@ -44,7 +44,13 @@ jobs:
       - run: pnpm install --frozen-lockfile --ignore-scripts
         working-directory: studio
       - name: Ensure media tools
-        run: command -v ffmpeg >/dev/null || (timeout 90s sudo apt-get update -qq && timeout 90s sudo apt-get install -y -qq ffmpeg)
+        run: |
+          if ! command -v ffmpeg >/dev/null; then
+            timeout 90s python3 -m pip install --target "$RUNNER_TEMP/ffmpeg-wheel" --no-deps --only-binary=:all: imageio-ffmpeg==0.6.0
+            mkdir -p "$RUNNER_TEMP/media-bin"
+            PYTHONPATH="$RUNNER_TEMP/ffmpeg-wheel" python3 -c 'import imageio_ffmpeg, os; os.symlink(imageio_ffmpeg.get_ffmpeg_exe(), os.path.join(os.environ["RUNNER_TEMP"], "media-bin", "ffmpeg"))'
+            printf '%s\n' "$RUNNER_TEMP/media-bin" >> "$GITHUB_PATH"
+          fi
       - uses: actions/github-script@v7
         env:
           AI_MEOW_BATCH_PACKET: ${{ secrets.AI_MEOW_BATCH_PACKET }}
