@@ -34,6 +34,12 @@ test('stdio MCP negotiates, lists tools and persists a series across restarts', 
     { type: 'number', const: 16 },
     { type: 'number', const: 24 },
   ]);
+  assert.deepEqual(videoSchema.properties.interpolator_model.enum, ['none', 'film']);
+  assert.deepEqual(videoSchema.properties.num_interpolated_frames.anyOf, [
+    { type: 'number', const: 0 },
+    { type: 'number', const: 1 },
+  ]);
+  assert.equal(videoSchema.properties.adjust_fps_for_interpolation.type, 'boolean');
   const jobSchema = tools.tools.find(tool => tool.name === 'ytfun_production_job_start').inputSchema;
   assert.match(JSON.stringify(jobSchema), /"videoParameters"/);
   const generationSchema = tools.tools.find(tool => tool.name === 'ytfun_asset_generate').inputSchema;
@@ -49,8 +55,12 @@ test('stdio MCP negotiates, lists tools and persists a series across restarts', 
   assert.equal(imageSchema.properties.num_inference_steps.maximum, 50);
   assert.equal(generationSchema.properties.referenceImageAssetId.type, 'string');
   assert.equal(generationSchema.properties.referenceImageAssetId.format, 'uuid');
+  assert.equal(generationSchema.properties.endReferenceImageAssetId.type, 'string');
+  assert.equal(generationSchema.properties.endReferenceImageAssetId.format, 'uuid');
   assert.match(JSON.stringify(jobSchema), /"imageParameters"/);
   assert.match(JSON.stringify(jobSchema), /"referenceImageAssetId"/);
+  assert.match(JSON.stringify(jobSchema), /"endReferenceImageAssetId"/);
+  assert.match(JSON.stringify(jobSchema), /"adjust_fps_for_interpolation"/);
   const created = await client.callTool({ name: 'ytfun_project_create', arguments: { title: 'Arquivo das cidades impossíveis', premise: 'Uma cidade imaginária diferente por episódio.', audience: 'Pessoas interessadas em ficção especulativa.', language: 'pt-BR' } });
   assert.ok(!created.isError, JSON.stringify(created));
   const project = JSON.parse(created.content[0].text);

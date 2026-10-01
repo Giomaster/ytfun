@@ -19,7 +19,12 @@ Upgrade the model only when the expected quality gain justifies its cost. The
 user pays for Hugging Face and accepts paid models with good value; verify the
 selected provider's price and actual credit/subscription coverage, record costs
 and honor the applicable authorization/runtime gates. No fixed monthly budget
-is assumed. Prefer external generation through the MCP. AI Meow videos use
+is assumed. Optimize the total cost per approved output, including discarded
+attempts; model ranking and price per call do not establish value. Keep a firm
+editorial floor for coherent action, fluid motion, consistent characters and sets,
+readable payoff and complete endings. Generate one representative transition first,
+and repeat a paid attempt only with a concrete correction to its failure cause.
+Prefer external generation through the MCP. AI Meow videos use
 visual storytelling and optional original nonverbal sound, without speech or
 on-screen text unless the user requests a different direction. This media rule
 does not impose cheaper coding-agent models or permit local validation tests.

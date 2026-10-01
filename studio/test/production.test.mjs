@@ -19,6 +19,8 @@ const license = { url: 'https://provider.example/model-license', notes: 'Commerc
 const provenance = { provider: 'studio-example', model: 'licensed-model', prompt: 'An original fictional clock city.', synthetic: true, commercialLicense: license };
 const env = { HF_TOKEN: 'fake-token', FFMPEG_PATH: 'fake-ffmpeg', FFPROBE_PATH: 'fake-ffprobe' };
 const pilotVideoParameters = { resolution: '480p', aspect_ratio: '16:9', num_frames: 81, frames_per_second: 16, num_inference_steps: 27, seed: 20261001, interpolator_model: 'none', num_interpolated_frames: 0, enable_prompt_expansion: false };
+const filmVideoParameters = { ...pilotVideoParameters, resolution: '720p', aspect_ratio: '9:16', interpolator_model: 'film', num_interpolated_frames: 1, adjust_fps_for_interpolation: true };
+const END_PNG = Buffer.concat([PNG, Buffer.from('original final frame')]);
 
 async function setup(t, { budgetMonthlyUsd = null, sceneCount = 1, audioMode } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'ytfun-production-'));
@@ -171,6 +173,12 @@ async function addSourceAssets(context, production, { alsoVideo = false, include
     registered.push({ image, audio, video });
   }
   return registered;
+}
+
+async function addEndReference(context, production) {
+  const localPath = join(context.directory, `end-${randomUUID()}.png`);
+  await writeFile(localPath, END_PNG);
+  return production.registerAsset({ episodeId: context.episode.id, sceneId: context.episode.scenes[0].id, kind: 'image', localPath, provenance });
 }
 
 function fakeRenderer(durationSeconds, { audioDuration = 2, finalHasAudio = true, sourceHasAudio = false, sourceVideoDuration = 3, onEncode } = {}) {
@@ -406,6 +414,202 @@ test('a reference metadata change during generation preserves the charge barrier
   assert.equal(state.spending[0].status, 'unknown');
   assert.equal(state.assets.length, 1);
   assert.deepEqual(await readdir(join(context.directory, 'assets')), [image.path.split('/').at(-1)]);
+});
+
+test('Wan final-frame jobs send only owned image bytes and preserve both parents plus explicit FILM intent', async t => {
+  const context = await setup(t, { audioMode: 'silent' });
+  let start;
+  let end;
+  const production = new Production(context.store, { env: { ...env, YTFUN_PAID_GENERATION_ENABLED: 'true' }, inferenceClient: { imageToVideo: async (args, options) => {
+    assert.equal(args.inputs instanceof Blob, true);
+    assert.deepEqual(Buffer.from(await args.inputs.arrayBuffer()), PNG);
+    assert.deepEqual(args.parameters, { ...filmVideoParameters, prompt: context.episode.scenes[0].visualPrompt, end_image_url: `data:image/png;base64,${END_PNG.toString('base64')}` });
+    assert.equal(options.retry_on_error, false);
+    const reservation = (await context.store.read()).spending[0];
+    assert.equal(reservation.status, 'reserved');
+    assert.equal(reservation.estimatedCostUsd, 0.41);
+    assert.deepEqual(reservation.referenceImage, { assetId: start.id, sha256: start.sha256 });
+    assert.deepEqual(reservation.endReferenceImage, { assetId: end.id, sha256: end.sha256 });
+    assert.match(reservation.referenceImageSnapshotHash, /^[a-f0-9]{64}$/);
+    assert.match(reservation.endReferenceImageSnapshotHash, /^[a-f0-9]{64}$/);
+    assert.notEqual(reservation.referenceImageSnapshotHash, reservation.endReferenceImageSnapshotHash);
+    args.parameters.end_image_url = 'https://example.invalid/changed-by-sdk.png';
+    args.parameters.adjust_fps_for_interpolation = false;
+    return new Blob([MP4], { type: 'video/mp4' });
+  } } });
+  [{ image: start }] = await addSourceAssets(context, production, { includeAudio: false });
+  end = await addEndReference(context, production);
+  const input = generation(context.episode, { kind: 'video', model: 'Wan-AI/Wan2.2-I2V-A14B', provider: 'fal-ai', referenceImageAssetId: start.id, endReferenceImageAssetId: end.id, videoParameters: filmVideoParameters, estimatedCostUsd: 0.41, acknowledgePaidCost: true });
+  const jobs = new ProductionJobs(context.store, production);
+  const job = await jobs.start({ action: 'generate', input });
+  await jobs.running.get(job.id);
+  const done = await jobs.get(job.id);
+  assert.equal(done.status, 'completed');
+  assert.deepEqual(done.result.provenance.referenceImage, { assetId: start.id, sha256: start.sha256 });
+  assert.deepEqual(done.result.provenance.endReferenceImage, { assetId: end.id, sha256: end.sha256 });
+  assert.deepEqual(done.result.provenance.parents, [{ assetId: start.id, sha256: start.sha256 }, { assetId: end.id, sha256: end.sha256 }]);
+  assert.deepEqual(done.result.provenance.videoParameters, filmVideoParameters);
+  const state = await context.store.read();
+  assert.deepEqual(state.assets.find(asset => asset.id === start.id), start);
+  assert.deepEqual(state.assets.find(asset => asset.id === end.id), end);
+  assert.equal(state.assets.length, 3);
+  assert.equal(state.spending[0].productionJobId, job.id);
+  assert.equal(state.spending[0].status, 'completed');
+  assert.deepEqual(state.spending[0].videoParameters, filmVideoParameters);
+  assert.equal(state.episodes[0].approval, null);
+  assert.doesNotMatch(JSON.stringify(state), /data:image|fake-token|changed-by-sdk/);
+});
+
+test('final frames and FILM reject unsupported routes, incoherent FPS and invalid source evidence before reservation', async t => {
+  const context = await setup(t, { audioMode: 'silent', sceneCount: 2 });
+  let calls = 0;
+  const rejectCall = async () => { calls += 1; assert.fail('Invalid final-frame request reached inference'); };
+  const production = new Production(context.store, { env, inferenceClient: { imageToVideo: rejectCall, textToVideo: rejectCall, textToImage: rejectCall } });
+  const sources = await addSourceAssets(context, production, { includeAudio: false });
+  const start = sources[0].image;
+  const end = await addEndReference(context, production);
+  const input = generation(context.episode, { kind: 'video', provider: 'fal-ai', model: 'Wan-AI/Wan2.2-I2V-A14B', referenceImageAssetId: start.id, endReferenceImageAssetId: end.id, videoParameters: filmVideoParameters });
+  for (const overrides of [{ kind: 'image', videoParameters: undefined }, { kind: 'audio', videoParameters: undefined }, { provider: 'wavespeed' }, { model: 'Wan-AI/Wan2.2-TI2V-5B' }, { model: 'MiniMaxAI/MiniMax-H3' }, { referenceImageAssetId: undefined }]) {
+    await assert.rejects(production.generateAsset({ ...input, ...overrides }), /only for video|require fal-ai Wan/);
+  }
+  for (const videoParameters of [{ interpolator_model: 'film' }, { interpolator_model: 'film', num_interpolated_frames: 1 }, { interpolator_model: 'film', num_interpolated_frames: 1, adjust_fps_for_interpolation: false }, { interpolator_model: 'film', num_interpolated_frames: 0, adjust_fps_for_interpolation: true }, { num_interpolated_frames: 1 }, { interpolator_model: 'none', num_interpolated_frames: 1 }, { adjust_fps_for_interpolation: true }, { ...filmVideoParameters, num_interpolated_frames: 2 }, { ...filmVideoParameters, adjust_fps_for_interpolation: 'true' }, { ...filmVideoParameters, end_image_url: 'https://example.invalid/unverified.png' }]) {
+    await assert.rejects(production.generateAsset({ ...input, videoParameters }), /unsupported values or fields/);
+  }
+  for (const endReferenceImageAssetId of ['https://example.invalid/image.png', randomUUID(), sources[1].image.id]) {
+    await assert.rejects(production.generateAsset({ ...input, endReferenceImageAssetId }), /image asset UUID|same episode and scene/);
+  }
+  for (const change of [{ kind: 'video' }, { episodeId: randomUUID() }, { synthetic: false }, { sha256: 'invalid' }, { provenance: { ...end.provenance, commercialLicense: null } }, { path: 'source.png' }]) {
+    await context.store.transaction(state => { Object.assign(state.assets.find(asset => asset.id === end.id), change); });
+    await assert.rejects(production.generateAsset(input));
+    await context.store.transaction(state => { Object.assign(state.assets.find(asset => asset.id === end.id), end); });
+  }
+  await writeFile(resolve(context.directory, end.path), Buffer.concat([END_PNG, Buffer.from('external mutation')]));
+  await assert.rejects(production.generateAsset(input), /hash does not match/);
+  assert.equal(calls, 0);
+  assert.equal((await context.store.read()).spending.length, 0);
+});
+
+test('owned final frames and FILM can be used independently while FILM remains restricted to Wan A14B I2V', async t => {
+  const context = await setup(t, { audioMode: 'silent' });
+  const received = [];
+  const production = new Production(context.store, { env, inferenceClient: { imageToVideo: async args => {
+    received.push(structuredClone(args.parameters));
+    return new Blob([MP4], { type: 'video/mp4' });
+  } } });
+  const [{ image: start }] = await addSourceAssets(context, production, { includeAudio: false });
+  const end = await addEndReference(context, production);
+  const input = generation(context.episode, { kind: 'video', provider: 'fal-ai', model: 'Wan-AI/Wan2.2-I2V-A14B', referenceImageAssetId: start.id });
+  const anchored = await production.generateAsset({ ...input, endReferenceImageAssetId: end.id, videoParameters: pilotVideoParameters });
+  assert.equal(received[0].end_image_url, `data:image/png;base64,${END_PNG.toString('base64')}`);
+  assert.equal(received[0].interpolator_model, 'none');
+  assert.equal(received[0].num_interpolated_frames, 0);
+  assert.equal(received[0].adjust_fps_for_interpolation, undefined);
+  assert.equal(anchored.provenance.parents.length, 2);
+  const interpolated = await production.generateAsset({ ...input, videoParameters: { ...filmVideoParameters, frames_per_second: 24 } });
+  assert.equal(received[1].end_image_url, undefined);
+  assert.equal(received[1].frames_per_second, 24);
+  assert.equal(received[1].interpolator_model, 'film');
+  assert.equal(received[1].adjust_fps_for_interpolation, true);
+  assert.equal(interpolated.provenance.endReferenceImage, undefined);
+  assert.equal(interpolated.provenance.parents.length, 1);
+  await assert.rejects(production.generateAsset({ ...input, model: 'other/model', videoParameters: filmVideoParameters }), /require fal-ai Wan/);
+  assert.equal(received.length, 2);
+});
+
+test('real HF SDK forwards final-frame data URI and FILM without persisting image payloads or repeating a POST', async t => {
+  const context = await setup(t, { audioMode: 'silent' });
+  let posts = 0;
+  const mockFetch = async (url, options) => {
+    if (new URL(url).hostname === 'huggingface.co') return Response.json({ inferenceProviderMapping: { 'fal-ai': { providerId: 'fal-ai/wan/v2.2-a14b/image-to-video', status: 'live', task: 'image-to-video' } } });
+    assert.equal(url, 'https://router.huggingface.co/fal-ai/fal-ai/wan/v2.2-a14b/image-to-video?_subdomain=queue');
+    assert.equal(options.method, 'POST');
+    posts += 1;
+    assert.equal(posts, 1);
+    const payload = JSON.parse(options.body);
+    assert.equal(payload.image_url, `data:image/png;base64,${PNG.toString('base64')}`);
+    assert.equal(payload.end_image_url, `data:image/png;base64,${END_PNG.toString('base64')}`);
+    assert.equal(payload.interpolator_model, 'film');
+    assert.equal(payload.num_interpolated_frames, 1);
+    assert.equal(payload.adjust_fps_for_interpolation, true);
+    assert.equal(payload.frames_per_second, 16);
+    assert.equal(payload.prompt, context.episode.scenes[0].visualPrompt);
+    assert.equal(payload.inputs, undefined);
+    return Response.json({ error: 'fake-provider-private-final-frame-value' }, { status: 503 });
+  };
+  const production = new Production(context.store, { env: { ...env, YTFUN_PAID_GENERATION_ENABLED: 'true' }, inferenceClient: new InferenceClient('hf_fake_final_frame_ci_only', { fetch: mockFetch, retry_on_error: true }), fetchImpl: mockFetch });
+  const [{ image: start }] = await addSourceAssets(context, production, { includeAudio: false });
+  const end = await addEndReference(context, production);
+  await assert.rejects(production.generateAsset(generation(context.episode, { kind: 'video', provider: 'fal-ai', model: 'Wan-AI/Wan2.2-I2V-A14B-Diffusers', referenceImageAssetId: start.id, endReferenceImageAssetId: end.id, videoParameters: filmVideoParameters, estimatedCostUsd: 0.41, acknowledgePaidCost: true })), /Generation failed after reservation/);
+  const state = await context.store.read();
+  assert.equal(posts, 1);
+  assert.equal(state.spending[0].status, 'unknown');
+  assert.equal(state.assets.length, 2);
+  assert.doesNotMatch(JSON.stringify(state), /data:image|fake_final_frame_ci_only|fake-provider-private-final-frame-value/);
+});
+
+test('final-frame recovery after restart binds both persisted snapshots and completes idempotently with GET only', async t => {
+  const context = await setup(t, { audioMode: 'silent' });
+  let posts = 0;
+  const production = new Production(context.store, { env: { ...env, YTFUN_PAID_GENERATION_ENABLED: 'true' }, fetchImpl: async (url, options) => {
+    assert.equal(options.method, 'POST');
+    posts += 1;
+    return Response.json({ request_id: 'final-frame-request', status: 'IN_QUEUE', response_url: 'https://queue.fal.run/fal-ai/wan/requests/final-frame-request' });
+  }, inferenceClient: { imageToVideo: async (args, options) => {
+    await options.fetch('https://router.huggingface.co/fal-ai/fal-ai/wan/v2.2-a14b/image-to-video?_subdomain=queue', { method: 'POST' });
+    throw new Error('Interrupted final-frame provider with fake private credential');
+  } } });
+  const [{ image: start }] = await addSourceAssets(context, production, { includeAudio: false });
+  const end = await addEndReference(context, production);
+  const alternativeEnd = await addEndReference(context, production);
+  const input = generation(context.episode, { kind: 'video', provider: 'fal-ai', model: 'Wan-AI/Wan2.2-I2V-A14B', referenceImageAssetId: start.id, endReferenceImageAssetId: end.id, videoParameters: filmVideoParameters, estimatedCostUsd: 0.41, acknowledgePaidCost: true });
+  await assert.rejects(production.generateAsset(input), /Generation failed after reservation/);
+  const reservation = (await context.store.read()).spending[0];
+  const replies = [Response.json({ status: 'IN_PROGRESS' }), Response.json({ status: 'COMPLETED' }), Response.json({ video: { url: 'https://v3.fal.media/recovered-final-frame.mp4' } }), new Response(MP4, { headers: { 'content-type': 'video/mp4' } })];
+  let gets = 0;
+  const recovery = new Production(context.store, { env, inferenceClient: { imageToVideo: async () => assert.fail('Recovery cannot submit inference') }, fetchImpl: async (url, options) => {
+    assert.equal(options.method, 'GET');
+    gets += 1;
+    assert.ok(replies.length);
+    return replies.shift();
+  } });
+  const request = { ...input, acknowledgePaidCost: false, resumeReservationId: reservation.id };
+  for (const overrides of [{ endReferenceImageAssetId: undefined }, { endReferenceImageAssetId: alternativeEnd.id }, { videoParameters: { ...filmVideoParameters, frames_per_second: 24 } }]) {
+    await assert.rejects(recovery.generateAsset({ ...request, ...overrides }), /match the original persisted generation request/);
+  }
+  await context.store.transaction(state => { state.assets.find(asset => asset.id === end.id).provenance.commercialLicense.notes = 'Changed final-frame terms after worker restart'; });
+  await assert.rejects(recovery.generateAsset(request), /match the original persisted generation request/);
+  assert.equal(gets, 0);
+  await context.store.transaction(state => { state.assets.find(asset => asset.id === end.id).provenance = end.provenance; });
+  assert.deepEqual(await recovery.generateAsset(request), { reservationId: reservation.id, status: 'pending', remoteStatus: 'IN_PROGRESS', submitted: false });
+  const asset = await recovery.generateAsset(request);
+  assert.deepEqual(asset.provenance.parents, [{ assetId: start.id, sha256: start.sha256 }, { assetId: end.id, sha256: end.sha256 }]);
+  assert.deepEqual(asset.provenance.endReferenceImage, { assetId: end.id, sha256: end.sha256 });
+  assert.deepEqual(await recovery.generateAsset(request), asset);
+  const state = await context.store.read();
+  assert.equal(posts, 1);
+  assert.equal(gets, 4);
+  assert.equal(state.spending.length, 1);
+  assert.equal(state.spending[0].estimatedCostUsd, 0.41);
+  assert.equal(state.spending[0].status, 'completed');
+  assert.equal(state.spending[0].recoveryClaim, undefined);
+  assert.equal(state.assets.length, 4);
+  assert.doesNotMatch(JSON.stringify(state), /data:image|fake private credential|fake-token/);
+});
+
+test('changing final-frame metadata during inference rejects the video and keeps the uncertain charge barrier', async t => {
+  const context = await setup(t, { audioMode: 'silent' });
+  let end;
+  const production = new Production(context.store, { env, inferenceClient: { imageToVideo: async () => {
+    await context.store.transaction(state => { state.assets.find(asset => asset.id === end.id).provenance.prompt = 'Changed final-frame intent during generation'; });
+    return new Blob([MP4], { type: 'video/mp4' });
+  } } });
+  const [{ image: start }] = await addSourceAssets(context, production, { includeAudio: false });
+  end = await addEndReference(context, production);
+  await assert.rejects(production.generateAsset(generation(context.episode, { kind: 'video', provider: 'fal-ai', model: 'Wan-AI/Wan2.2-I2V-A14B', referenceImageAssetId: start.id, endReferenceImageAssetId: end.id, videoParameters: filmVideoParameters })), /Generation failed after reservation/);
+  const state = await context.store.read();
+  assert.equal(state.spending[0].status, 'unknown');
+  assert.equal(state.assets.length, 2);
+  assert.deepEqual((await readdir(join(context.directory, 'assets'))).sort(), [start.path.split('/').at(-1), end.path.split('/').at(-1)].sort());
 });
 
 test('free-first generation reserves before cloud inference and stores licensing evidence', async (t) => {

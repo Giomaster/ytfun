@@ -105,6 +105,17 @@ Quality, required checks and authorization are constraints, not token-saving opt
 - After the pilot validates the direction, choose a stronger model when the
   expected improvement justifies its cost. A successful inexpensive result may
   be retained; a more expensive model is not a mandatory finishing step.
+- Optimize the cost of approved, publishable content, including rejected attempts,
+  reference images, generation, finishing and hosting. Price per call and model
+  rankings alone do not establish good value. Choose the least expensive suitable
+  route that meets the editorial criteria; do not lower those criteria to save money.
+- Define the visible acceptance criteria before generation: coherent action and
+  object interactions, fluid motion, stable character/set identity, readable payoff
+  and a complete ending. Validate one representative transition before financing
+  the remaining sequence. Repeat a paid attempt only after identifying a concrete
+  change in references, prompt, scene complexity or model that addresses the defect.
+  Reuse approved material across long videos and complete shorts, and record the
+  effective cost per approved output without assuming views or revenue.
 - The user has a paid Hugging Face subscription and allows more expensive
   models with good value. Verify actual provider prices and subscription/credit
   coverage for the selected model; membership alone does not establish that an

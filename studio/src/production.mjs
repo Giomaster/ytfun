@@ -10,6 +10,7 @@ import { recoverFalVideo } from './fal-queue-recovery.mjs';
 
 const MAX_ASSET_BYTES = 100 * 1024 * 1024;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const WAN_A14B_I2V_MODELS = new Set(['Wan-AI/Wan2.2-I2V-A14B', 'Wan-AI/Wan2.2-I2V-A14B-Diffusers']);
 const MAX_PROBE_BYTES = 1024 * 1024;
 const KINDS = new Set(['image', 'audio', 'video']);
 const PUBLICATION_FREEZE_STATUSES = new Set(['reserved', 'uploading', 'sending', 'unknown', 'processing', 'uploaded', 'scheduled', 'published']);
@@ -28,8 +29,9 @@ export const videoParametersSchema = z.strictObject({
   frames_per_second: z.union([z.literal(16), z.literal(24)]).optional(),
   num_inference_steps: z.number().int().min(1).max(40).optional(),
   seed: z.number().int().min(0).max(4_294_967_295).optional(),
-  interpolator_model: z.literal('none').optional(),
-  num_interpolated_frames: z.literal(0).optional(),
+  interpolator_model: z.enum(['none', 'film']).optional(),
+  num_interpolated_frames: z.union([z.literal(0), z.literal(1)]).optional(),
+  adjust_fps_for_interpolation: z.boolean().optional(),
   enable_prompt_expansion: z.boolean().optional(),
 });
 
@@ -62,7 +64,20 @@ function videoParametersFor(kind, value) {
   if (kind !== 'video') throw new Error('videoParameters is allowed only for video generation');
   const parsed = videoParametersSchema.safeParse(value);
   if (!parsed.success) throw new Error('videoParameters contains unsupported values or fields');
+  // Keep the clip duration stable: one FILM frame doubles 16/24 to 32/48 fps.
+  // Require explicit controls rather than inheriting undocumented combinations.
+  if (parsed.data.interpolator_model === 'film') {
+    if (parsed.data.num_interpolated_frames !== 1 || parsed.data.adjust_fps_for_interpolation !== true) throw new Error('videoParameters contains unsupported values or fields: FILM requires one interpolated frame and FPS adjustment');
+  } else if (parsed.data.num_interpolated_frames === 1 ||
+      (parsed.data.adjust_fps_for_interpolation !== undefined && (parsed.data.interpolator_model !== 'none' || parsed.data.num_interpolated_frames !== 0))) {
+    throw new Error('videoParameters contains unsupported values or fields: interpolation controls must be coherent');
+  }
   return parsed.data;
+}
+
+function requireWanFrameControls({ kind, model, provider, parameters, referenceImageAssetId, endReferenceImageAssetId }) {
+  if (endReferenceImageAssetId === undefined && parameters?.interpolator_model !== 'film' && parameters?.adjust_fps_for_interpolation === undefined) return;
+  if (kind !== 'video' || provider !== 'fal-ai' || !WAN_A14B_I2V_MODELS.has(model) || referenceImageAssetId === undefined) throw new Error('Final-frame and interpolation controls require fal-ai Wan2.2-I2V-A14B with an initial reference image');
 }
 
 function requiredText(value, name, max = 20000) {
@@ -208,9 +223,9 @@ function referenceSnapshot(asset) {
   return JSON.stringify({ id: asset.id, path: asset.path, sha256: asset.sha256, synthetic: asset.synthetic, provenance: asset.provenance });
 }
 
-async function loadReferenceImage(store, state, episodeId, sceneId, assetId) {
+async function loadReferenceImage(store, state, episodeId, sceneId, assetId, name = 'referenceImageAssetId') {
   if (assetId === undefined) return undefined;
-  if (typeof assetId !== 'string' || !UUID.test(assetId)) throw new Error('referenceImageAssetId must be an image asset UUID');
+  if (typeof assetId !== 'string' || !UUID.test(assetId)) throw new Error(`${name} must be an image asset UUID`);
   const asset = referenceImageAsset(state, episodeId, sceneId, assetId);
   const bytes = await boundedFile(await internalPath(store, asset.path));
   if (sha256(bytes) !== asset.sha256) throw new Error('Reference image file hash does not match its recorded SHA-256');
@@ -224,6 +239,22 @@ function assertReferenceUnchanged(state, episodeId, sceneId, reference) {
   if (reference === undefined) return;
   const asset = referenceImageAsset(state, episodeId, sceneId, reference.descriptor.assetId);
   if (referenceSnapshot(asset) !== reference.snapshot) throw new Error('Reference image changed during generation');
+}
+
+function referenceProvenance(reference, endReference) {
+  if (reference === undefined) return {};
+  return {
+    referenceImage: { ...reference.descriptor },
+    ...(endReference === undefined ? {} : { endReferenceImage: { ...endReference.descriptor } }),
+    parents: [reference, ...(endReference === undefined ? [] : [endReference])].map(item => ({ ...item.descriptor })),
+  };
+}
+
+function referenceReservation(reference, endReference) {
+  return {
+    ...(reference === undefined ? {} : { referenceImage: { ...reference.descriptor }, referenceImageSnapshotHash: reference.snapshotHash }),
+    ...(endReference === undefined ? {} : { endReferenceImage: { ...endReference.descriptor }, endReferenceImageSnapshotHash: endReference.snapshotHash }),
+  };
 }
 
 async function saveAsset(store, bytes, extension, fields) {
@@ -314,14 +345,16 @@ export class Production {
     this.fetch = fetchImpl;
   }
 
-  async generateAsset({ episodeId, sceneId, kind, model, provider, prompt, videoParameters, imageParameters, referenceImageAssetId, estimatedCostUsd, pricingSourceUrl, commercialLicense, acknowledgePaidCost = false, resumeReservationId, productionJobId }) {
+  async generateAsset({ episodeId, sceneId, kind, model, provider, prompt, videoParameters, imageParameters, referenceImageAssetId, endReferenceImageAssetId, estimatedCostUsd, pricingSourceUrl, commercialLicense, acknowledgePaidCost = false, resumeReservationId, productionJobId }) {
     requireKind(kind);
     const parameters = videoParametersFor(kind, videoParameters);
     const imageSettings = imageParametersFor(kind, imageParameters);
     if (referenceImageAssetId !== undefined && kind !== 'video') throw new Error('referenceImageAssetId is allowed only for video generation');
+    if (endReferenceImageAssetId !== undefined && kind !== 'video') throw new Error('endReferenceImageAssetId is allowed only for video generation');
     model = requiredText(model, 'model', 300);
     provider = requiredText(provider, 'provider', 100);
     if (provider === 'auto') throw new Error('Choose an explicit provider so the cost and license evidence refer to the actual service');
+    requireWanFrameControls({ kind, model, provider, parameters, referenceImageAssetId, endReferenceImageAssetId });
     const license = evidence(commercialLicense);
     const pricing = evidence({ url: pricingSourceUrl, notes: 'Caller-supplied estimate; zero does not prove the provider will not bill.' });
     if (!Number.isFinite(estimatedCostUsd) || estimatedCostUsd < 0) throw new Error('estimatedCostUsd must be an explicit nonnegative finite estimate');
@@ -331,9 +364,10 @@ export class Production {
     if (!this.env.HF_TOKEN) throw new Error('HF_TOKEN is required for cloud inference');
     const inputs = requiredText(prompt ?? (kind === 'audio' ? context.scene.narration : context.scene.visualPrompt), 'prompt');
     const reference = await loadReferenceImage(this.store, initial, episodeId, sceneId, referenceImageAssetId);
+    const endReference = await loadReferenceImage(this.store, initial, episodeId, sceneId, endReferenceImageAssetId, 'endReferenceImageAssetId');
     if (resumeReservationId !== undefined) return this.recoverAsset({
       episodeId, sceneId, kind, model, provider, inputs, parameters, estimatedCostUsd,
-      pricingSourceUrl: pricing.url, commercialLicense: license, resumeReservationId, reference,
+      pricingSourceUrl: pricing.url, commercialLicense: license, resumeReservationId, reference, endReference,
     });
     if (estimatedCostUsd > 0 && (acknowledgePaidCost !== true || this.env.YTFUN_PAID_GENERATION_ENABLED !== 'true')) throw new Error('Paid generation needs explicit per-call cost acknowledgment and YTFUN_PAID_GENERATION_ENABLED=true');
     const id = randomUUID();
@@ -342,10 +376,11 @@ export class Production {
       mutableEpisode(episode, state);
       requireProductionKind(episode, kind);
       assertReferenceUnchanged(state, episodeId, sceneId, reference);
+      assertReferenceUnchanged(state, episodeId, sceneId, endReference);
       if (productionJobId !== undefined && !state.productionJobs?.some(job => job.id === productionJobId && job.action === 'generate' && job.episodeId === episodeId && job.status === 'running')) throw new Error('Generation job is not the active owner of this episode request');
       if (hasPendingGeneration(state, episodeId, sceneId, kind)) throw new Error('A previous generation is reserved or has an unknown charge outcome; reconcile it before retrying');
       assertBudget(state, project, estimatedCostUsd);
-      state.spending.push({ id, projectId: project.id, episodeId, sceneId, kind, provider, model, prompt: inputs, commercialLicense: license, ...(productionJobId === undefined ? {} : { productionJobId }), ...(parameters === undefined ? {} : { videoParameters: { ...parameters } }), ...(imageSettings === undefined ? {} : { imageParameters: { ...imageSettings } }), ...(reference === undefined ? {} : { referenceImage: { ...reference.descriptor }, referenceImageSnapshotHash: reference.snapshotHash }), estimatedCostUsd, pricingSourceUrl: pricing.url, priceNote: pricing.notes, status: 'reserved', createdAt: new Date().toISOString() });
+      state.spending.push({ id, projectId: project.id, episodeId, sceneId, kind, provider, model, prompt: inputs, commercialLicense: license, ...(productionJobId === undefined ? {} : { productionJobId }), ...(parameters === undefined ? {} : { videoParameters: { ...parameters } }), ...(imageSettings === undefined ? {} : { imageParameters: { ...imageSettings } }), ...referenceReservation(reference, endReference), estimatedCostUsd, pricingSourceUrl: pricing.url, priceNote: pricing.notes, status: 'reserved', createdAt: new Date().toISOString() });
       invalidate(episode);
     });
     let asset;
@@ -360,7 +395,9 @@ export class Production {
       if (kind === 'video' && provider === 'fal-ai') options.fetch = falQueueReceiptFetch(this.store, id, { fetchImpl: this.fetch });
       const sdkParameters = kind === 'image' ? imageSdkParameters(provider, imageSettings) : parameters;
       const args = reference
-        ? { model, provider, inputs: reference.blob, parameters: { ...parameters, prompt: inputs } }
+        ? { model, provider, inputs: reference.blob, parameters: { ...parameters, prompt: inputs,
+          ...(endReference === undefined ? {} : { end_image_url: `data:${endReference.blob.type};base64,${Buffer.from(await endReference.blob.arrayBuffer()).toString('base64')}` }),
+        } }
         : { model, provider, inputs, ...(sdkParameters === undefined ? {} : { parameters: structuredClone(sdkParameters) }) };
       const output = await client[method](args, options);
       if (!(output instanceof Blob) || output.size === 0 || output.size > MAX_ASSET_BYTES) throw new Error('Inference response must be a nonempty Blob no larger than 100 MiB');
@@ -368,12 +405,13 @@ export class Production {
       if (!extension) throw new Error(`Unsupported ${kind} response MIME type`);
       const bytes = Buffer.from(await output.arrayBuffer());
       if (detectType(bytes, kind) !== extension) throw new Error('Inference response MIME type does not match its file header');
-      asset = await saveAsset(this.store, bytes, extension, { episodeId, sceneId, kind, provenance: { provider, model, prompt: inputs, ...(parameters === undefined ? {} : { videoParameters: { ...parameters } }), ...(imageSettings === undefined ? {} : { imageParameters: { ...imageSettings } }), ...(reference === undefined ? {} : { referenceImage: { ...reference.descriptor }, parents: [{ ...reference.descriptor }] }), commercialLicense: license } });
+      asset = await saveAsset(this.store, bytes, extension, { episodeId, sceneId, kind, provenance: { provider, model, prompt: inputs, ...(parameters === undefined ? {} : { videoParameters: { ...parameters } }), ...(imageSettings === undefined ? {} : { imageParameters: { ...imageSettings } }), ...referenceProvenance(reference, endReference), commercialLicense: license } });
       return await this.store.transaction((state) => {
         const { episode } = sceneContext(state, episodeId, sceneId);
         mutableEpisode(episode, state);
         requireProductionKind(episode, kind);
         assertReferenceUnchanged(state, episodeId, sceneId, reference);
+        assertReferenceUnchanged(state, episodeId, sceneId, endReference);
         state.assets.push(asset);
         const reservation = state.spending.find((item) => item.id === id);
         if (!reservation || reservation.status !== 'reserved') throw new Error('Generation reservation changed during inference');
@@ -410,7 +448,7 @@ export class Production {
     }
   }
 
-  async recoverAsset({ episodeId, sceneId, kind, model, provider, inputs, parameters, estimatedCostUsd, pricingSourceUrl, commercialLicense, resumeReservationId, reference }) {
+  async recoverAsset({ episodeId, sceneId, kind, model, provider, inputs, parameters, estimatedCostUsd, pricingSourceUrl, commercialLicense, resumeReservationId, reference, endReference }) {
     if (kind !== 'video' || provider !== 'fal-ai' || typeof resumeReservationId !== 'string' ||
         !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(resumeReservationId)) throw new Error('Recovery requires the UUID of an existing fal-ai video reservation');
     const attemptId = randomUUID();
@@ -425,8 +463,11 @@ export class Production {
           JSON.stringify(reservation.videoParameters) !== JSON.stringify(parameters) ||
           JSON.stringify(reservation.referenceImage) !== JSON.stringify(reference?.descriptor) ||
           reservation.referenceImageSnapshotHash !== reference?.snapshotHash ||
+          JSON.stringify(reservation.endReferenceImage) !== JSON.stringify(endReference?.descriptor) ||
+          reservation.endReferenceImageSnapshotHash !== endReference?.snapshotHash ||
           JSON.stringify(reservation.commercialLicense) !== JSON.stringify(commercialLicense)) throw new Error('Recovery inputs must match the original persisted generation request');
       assertReferenceUnchanged(state, episodeId, sceneId, reference);
+      assertReferenceUnchanged(state, episodeId, sceneId, endReference);
       if (reservation.status === 'completed') {
         const asset = state.assets.find(item => item.id === reservation.assetId && item.episodeId === episodeId && item.sceneId === sceneId);
         if (!asset) throw new Error('Completed generation has no recorded asset');
@@ -464,12 +505,13 @@ export class Production {
       asset = await saveAsset(this.store, bytes, detectType(bytes, 'video'), {
         episodeId, sceneId, kind, provenance: { provider, model, prompt: inputs,
           ...(parameters === undefined ? {} : { videoParameters: { ...parameters } }),
-          ...(reference === undefined ? {} : { referenceImage: { ...reference.descriptor }, parents: [{ ...reference.descriptor }] }), commercialLicense },
+          ...referenceProvenance(reference, endReference), commercialLicense },
       });
       const committed = await this.store.transaction(state => {
         const { episode } = sceneContext(state, episodeId, sceneId);
         mutableEpisode(episode, state);
         assertReferenceUnchanged(state, episodeId, sceneId, reference);
+        assertReferenceUnchanged(state, episodeId, sceneId, endReference);
         const reservation = state.spending.find(item => item.id === resumeReservationId);
         if (reservation?.recoveryClaim?.id !== attemptId) throw new Error('Recovery claim changed');
         if (reservation.status === 'completed') {

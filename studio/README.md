@@ -164,7 +164,11 @@ reservas/futuros e não faz afirmações sobre uma frequência oficial antispam.
 Geração de vídeo aceita `videoParameters` opcional na ferramenta direta e no job.
 O subconjunto explícito admite resolução 480p/580p/720p, proporção 16:9/9:16,
 81–121 quadros inteiros, 16 ou 24 fps, 1–40 passos, seed de 0 a 2³²−1, interpolador
-`none`, zero quadros interpolados e expansão de prompt booleana. Sem parâmetros,
+`none`, zero quadros interpolados e expansão de prompt booleana. Para Wan A14B I2V
+no fal.ai com referência inicial, admite também a combinação explícita
+`interpolator_model: "film"`, `num_interpolated_frames: 1` e
+`adjust_fps_for_interpolation: true`: 16/24 fps tornam-se 32/48 fps mantendo a
+duração. Combinações incompletas ou que alonguem o clip são recusadas. Sem parâmetros,
 os defaults atuais do provedor ficam intactos. Parâmetros usados ficam na reserva
 e na proveniência; a estimativa e a autorização de custo continuam explícitas.
 O retry automático de geração do SDK fica desativado; uma falha após a reserva
@@ -190,6 +194,17 @@ guarda essa referência e `parents` com a mesma derivação. A reserva também g
 um digest da identidade, caminho e proveniência da imagem; alterações desses
 dados impedem a retomada mesmo após reiniciar o worker. A retomada exige o ID
 e hash originais e usa a mesma recuperação GET, sem inferência adicional.
+Para fixar o quadro final nessa rota Wan A14B/fal.ai, forneça também
+`endReferenceImageAssetId`, de uma imagem original na mesma cena e episódio.
+Ambas passam pelas mesmas verificações; o quadro inicial continua como Blob e o
+final vira `parameters.end_image_url` em data URI somente na chamada ao SDK.
+A reserva guarda `endReferenceImage` e seu digest de snapshot; a proveniência
+inclui ambos os quadros em `parents`. A recuperação exige os dois IDs, hashes,
+snapshots e parâmetros originais, sem persistir bytes/data URIs das referências.
+FILM melhora fluidez, sem garantir física correta ou transformar 720p em 1080p
+nativo. A tarifa publicada calcula segundos a 16 fps, sem taxa FILM separada:
+81 quadros em 720p correspondem a aproximadamente US$0,405, estimável como US$0,41
+por tentativa; confirme a [tarifa atual](https://fal.ai/models/fal-ai/wan/v2.2-a14b/image-to-video) antes de autorizar a chamada.
 O [Wan 2.2 A14B I2V](https://fal.ai/models/fal-ai/wan/v2.2-a14b/image-to-video/api)
 é uma rota compatível; confirme o mapping live do modelo no Hugging Face e a
 tarifa atual antes de chamar. A referência orienta a geração, e o piloto ainda
