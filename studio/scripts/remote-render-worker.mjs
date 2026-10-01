@@ -75,7 +75,9 @@ export async function ownedAudioArtifact(packet, { env, artifact, fetchImpl = fe
   const [repositoryOwner, repositoryName] = input.repository.split('/');
   const expectedHash = /^sha256:[a-f0-9]{64}$/.test(metadata.digest ?? '') ? metadata.digest.slice(7) : undefined;
   const downloaded = await artifact.downloadArtifact(input.artifactId, { path: directory, findBy: { token: env.GITHUB_TOKEN, workflowRunId: input.runId, repositoryOwner, repositoryName }, ...(expectedHash ? { expectedHash } : {}) });
-  if (downloaded.digestMismatch || !downloaded.downloadPath || await realpath(downloaded.downloadPath) !== await realpath(directory)) throw new Error('Audio archive failed destination/digest verification');
+  if (downloaded.digestMismatch) throw new Error('Audio archive digest mismatch');
+  if (!downloaded.downloadPath) throw new Error('Audio archive destination missing');
+  if (await realpath(downloaded.downloadPath) !== await realpath(directory)) throw new Error('Audio archive destination differs');
   const receipt = validateAudioReceipt(JSON.parse(await boundedFile(join(directory, 'audio-manifest.json'), 1024 * 1024)), packet);
   for (const [index, scene] of packet.manifest.scenes.entries()) {
     const bytes = await boundedFile(join(directory, audioReceiptPath(index + 1)), SOURCE_MAX_BYTES);

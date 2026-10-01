@@ -6,7 +6,7 @@ import { basename, join } from 'node:path';
 import test from 'node:test';
 import { audioReceiptPath, hash, packAssemblyPacket, packetHash, unpackAssemblyPacket, validateRenderPacket } from '../scripts/assembly-packets.mjs';
 import { runAudioWorker } from '../scripts/remote-audio-worker.mjs';
-import { runRenderWorker, shortCommand, verifiedProbe } from '../scripts/remote-render-worker.mjs';
+import { runRenderWorker, shortCommand, verifiedProbe, ownedAudioArtifact } from '../scripts/remote-render-worker.mjs';
 
 const sha = input => hash(String(input));
 const launch = packet => ({ schemaVersion: 1, type: packet.type, batchId: packet.id, episodeId: packet.episodeId, packetSha256: packetHash(packet) });
@@ -92,6 +92,18 @@ test('unowned or changed audio artifacts fail before provider recovery or encodi
   let downloads = 0; let recoveries = 0; let commands = 0;
   await assert.rejects(runRenderWorker({ env: c.env, artifact: { downloadArtifact: async () => { downloads++; } }, fetchImpl: ownedFetch(packet, value => { if (value.workflow_run) value.workflow_run.id = 99; }), recover: async () => { recoveries++; }, runner: async () => { commands++; } }), /Remote original assembly failed/);
   assert.equal(downloads, 0); assert.equal(recoveries, 0); assert.equal(commands, 0);
+});
+test('owned audio archive rejects digest failure, missing destination and a different directory', async t => {
+  const c = await context(t); const { packet } = renderFixture();
+  const directory = join(c.env.RUNNER_TEMP, 'audio'); await mkdir(directory);
+  for (const [downloaded, message] of [
+    [{downloadPath: directory, digestMismatch: true}, /Audio archive digest mismatch/],
+    [{digestMismatch: false}, /Audio archive destination missing/],
+    [{downloadPath: c.directory, digestMismatch: false}, /Audio archive destination differs/],
+  ]) {
+    await assert.rejects(ownedAudioArtifact(packet, {env:c.env, directory,
+      artifact:{downloadArtifact:async()=>downloaded}, fetchImpl:ownedFetch(packet)}), message);
+  }
 });
 
 test('remote assembly uses 96 exact original videos/WAVs and publishes only verified media plus sanitized receipt', async t => {

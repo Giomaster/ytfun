@@ -75,6 +75,9 @@ export async function runReviewWorker({ env = process.env, artifact = new Defaul
     // Never echo exception messages, transport bodies, filenames or credentials.
     const reasons = new Map([
       ['Audio archive failed destination/digest verification', 'audio-archive'],
+      ['Audio archive digest mismatch', 'audio-archive-digest'],
+      ['Audio archive destination missing', 'audio-archive-destination-missing'],
+      ['Audio archive destination differs', 'audio-archive-destination-differs'],
       ['Original audio receipt differs from the authorized artifact', 'audio-receipt'],
       ['Original audio does not match its imported scene/hash', 'audio-binding'],
       ['Original audio WAV/hash does not match the manifest', 'audio-wave'],

@@ -2,7 +2,7 @@ name: AI Meow Audio Input Diagnosis
 on:
   push:
     branches: ['codex/ai-original-studio']
-    paths: ['studio/batches/review-diagnostic.json']
+    paths: ['studio/batches/review-diagnostic.json', 'studio/scripts/remote-render-worker.mjs']
 permissions:
   contents: read
   actions: read
