@@ -5,6 +5,7 @@ import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { spawn } from 'node:child_process';
 import { z } from 'zod';
 import { episodeLimits, episodeReviewHash } from './domain.mjs';
+import { renderProfile } from './render-profile.mjs';
 import { falQueueReceiptFetch } from './fal-queue-receipt.mjs';
 import { recoverFalVideo } from './fal-queue-recovery.mjs';
 
@@ -360,6 +361,7 @@ function canonicalJson(value) {
 
 function renderPlan(state, episode) {
   const limits = episodeLimits(episode);
+  const profile = renderProfile(episode.renderCanvas);
   if (!Array.isArray(episode.scenes) || !episode.scenes.length || episode.scenes.length > limits.maxScenes) throw new Error(`Rendering requires 1 to ${limits.maxScenes} scenes`);
   if (new Set(episode.scenes.map(scene => scene.id)).size !== episode.scenes.length) throw new Error('Scene IDs must be unique');
   const mode = audioMode(episode);
@@ -371,7 +373,7 @@ function renderPlan(state, episode) {
     durationSeconds += scene.durationSeconds;
   }
   if (durationSeconds > limits.maxDurationSeconds) throw new Error(`Rendered episodes cannot exceed ${limits.maxDurationSeconds} seconds`);
-  return { selected: selectSceneAssets(state, episode), limits, durationSeconds, audioMode: mode };
+  return { selected: selectSceneAssets(state, episode), limits, durationSeconds, audioMode: mode, profile };
 }
 
 function renderManifest(episode, plan) {
@@ -385,7 +387,7 @@ function renderManifest(episode, plan) {
   return {
     schemaVersion: 1, episodeId: episode.id, format: plan.limits.format,
     audioMode: plan.audioMode, durationSeconds: plan.durationSeconds,
-    maxRenderBytes: plan.limits.maxRenderBytes, width: 1080, height: 1920, framesPerSecond: 30,
+    maxRenderBytes: plan.limits.maxRenderBytes, ...plan.profile,
     editorialSha256: episodeReviewHash(editorial), snapshotSha256: fingerprint(editorial, plan.selected),
     scenes: episode.scenes.map((scene, index) => ({
       sceneId: scene.id, durationSeconds: scene.durationSeconds,
@@ -411,7 +413,8 @@ function validateFinalProbe(probe, snapshot) {
   const durationSeconds = Number(probe.format?.duration);
   const [numerator, denominator = '1'] = String(videoStream?.avg_frame_rate ?? videoStream?.r_frame_rate ?? '').split('/');
   const framesPerSecond = Number(numerator) / Number(denominator);
-  if (!videoStream || (withAudio ? !audioStream : audioStream) || (snapshot.audioMode !== 'narrated' && probe.streams.some(stream => stream.codec_type === 'subtitle')) || videoStream.width !== 1080 || videoStream.height !== 1920 || !Number.isFinite(framesPerSecond) || Math.abs(framesPerSecond - 30) > 0.05 || !Number.isFinite(durationSeconds) || durationSeconds <= 0 || durationSeconds > snapshot.limits.maxDurationSeconds || Math.abs(durationSeconds - snapshot.durationSeconds) > 0.5) throw new Error('Final render failed resolution, frame rate, audio or duration validation');
+  if (!videoStream || (withAudio ? !audioStream : audioStream) || (snapshot.audioMode !== 'narrated' && probe.streams.some(stream => stream.codec_type === 'subtitle')) || videoStream.width !== snapshot.profile.width || videoStream.height !== snapshot.profile.height || !Number.isFinite(framesPerSecond) || Math.abs(framesPerSecond - snapshot.profile.framesPerSecond) > 0.05 || !Number.isFinite(durationSeconds) || durationSeconds <= 0 || durationSeconds > snapshot.limits.maxDurationSeconds || Math.abs(durationSeconds - snapshot.durationSeconds) > 0.5) throw new Error('Final render failed resolution, frame rate, audio or duration validation');
+  if ((videoStream.sample_aspect_ratio !== undefined && videoStream.sample_aspect_ratio !== '1:1') || (videoStream.tags?.rotate !== undefined && Number(videoStream.tags.rotate) !== 0) || (videoStream.side_data_list ?? []).some(item => item.rotation !== undefined && Number(item.rotation) !== 0)) throw new Error('Final render must use square pixels and no rotation');
   if (!Number.isFinite(mediaDuration(probe, videoStream)) || Math.abs(mediaDuration(probe, videoStream) - snapshot.durationSeconds) > 0.5) throw new Error('Final render video duration does not match the planned scenes');
   if (withAudio && (!Number.isFinite(mediaDuration(probe, audioStream)) || Math.abs(mediaDuration(probe, audioStream) - snapshot.durationSeconds) > 0.5)) throw new Error(`Final render dropped ${snapshot.audioMode === 'narrated' ? 'narration' : 'nonverbal'} audio`);
   return { durationSeconds, width: videoStream.width, height: videoStream.height, framesPerSecond, hasAudio: Boolean(audioStream) };
@@ -834,9 +837,12 @@ export class Production {
         const srtName = `scene-${index}.srt`;
         if (narrated) await writeFile(resolve(scratch, srtName), captions([scene]), { mode: 0o600 });
         const clip = resolve(scratch, `clip-${index}.mp4`);
+        const { width, height } = snapshot.profile;
+        const zoomWidth = Math.ceil(width / 0.9 / 2) * 2;
+        const zoomHeight = Math.ceil(height / 0.9 / 2) * 2;
         const visualFilter = visual.kind === 'image'
-          ? "scale=1200:2134:force_original_aspect_ratio=decrease,pad=1200:2134:(ow-iw)/2:(oh-ih)/2:color=black,zoompan=z='min(1.08,1+on*0.0003)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=1080x1920:fps=30,setsar=1"
-          : 'scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,fps=30,setsar=1';
+          ? `scale=${zoomWidth}:${zoomHeight}:force_original_aspect_ratio=decrease,pad=${zoomWidth}:${zoomHeight}:(ow-iw)/2:(oh-ih)/2:color=black,zoompan=z='min(1.08,1+on*0.0003)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${width}x${height}:fps=30,setsar=1`
+          : `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black,fps=30,setsar=1`;
         const subtitleFilter = `subtitles=filename=${srtName}:force_style='FontSize=18,Alignment=2,MarginV=70,Outline=2'`;
         // Select only the planned audio source; embedded visual sound is ignored.
         await this.runner(this.env.FFMPEG_PATH || 'ffmpeg', ['-nostdin', '-v', 'error', '-y', ...(visual.kind === 'image' ? ['-loop', '1', '-framerate', '30'] : narrated ? ['-stream_loop', '-1'] : []), '-i', visualPath, ...(withAudio ? ['-i', audioPath] : []), '-map', '0:v:0', ...(withAudio ? ['-map', '1:a:0', ...(!narrated ? ['-sn'] : [])] : ['-an', '-sn']), '-vf', narrated ? `${visualFilter},${subtitleFilter}` : visualFilter, ...(withAudio ? ['-af', 'apad'] : []), '-t', String(scene.durationSeconds), '-r', '30', '-c:v', 'libx264', '-preset', 'medium', '-crf', '20', '-maxrate', '4M', '-bufsize', '8M', '-pix_fmt', 'yuv420p', ...(withAudio ? ['-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2'] : []), '-movflags', '+faststart', clip], { cwd: scratch, timeoutMs: 600000 });

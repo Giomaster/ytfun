@@ -27,9 +27,9 @@ const audioSchema = z.object({
 const manifestSchema = z.object({
   schemaVersion: z.literal(1), episodeId: uuid, format: z.literal('long'), audioMode: z.literal('nonverbal'),
   durationSeconds: z.literal(720), maxRenderBytes: z.literal(512 * 1024 * 1024),
-  width: z.literal(1080), height: z.literal(1920), framesPerSecond: z.literal(30), editorialSha256: sha, snapshotSha256: sha,
+  width: z.union([z.literal(1080), z.literal(1920)]), height: z.union([z.literal(1080), z.literal(1920)]), framesPerSecond: z.literal(30), editorialSha256: sha, snapshotSha256: sha,
   scenes: z.array(z.object({ sceneId: uuid, durationSeconds: z.literal(SCENE_SECONDS), scriptSha256: sha, visual: descriptor('video'), audio: descriptor('audio') }).strict()).length(SCENE_COUNT),
-}).strict();
+}).strict().refine(value => value.width !== value.height, { message: 'Render canvas must be 1080x1920 or 1920x1080' });
 const renderSchema = z.object({
   schemaVersion: z.literal(1), type: z.literal('render'), id: uuid, episodeId: uuid, manifest: manifestSchema,
   visuals: z.array(z.object({ assetId: uuid, sha256: sha, remoteRequest }).strict()).length(SCENE_COUNT),

@@ -10,6 +10,11 @@ import { MASTER_MAX_BYTES, SCENE_SECONDS, SOURCE_MAX_BYTES, audioReceiptPath, ha
 const AUDIO_MAX_BYTES = 160 * 1024 * 1024;
 const FINAL_SPEC = { width: 1080, height: 1920, framesPerSecond: 30 };
 
+function finalProfile(spec) {
+  if (!spec || !((spec.width === 1080 && spec.height === 1920) || (spec.width === 1920 && spec.height === 1080)) || spec.framesPerSecond !== 30) throw new Error('Render canvas must be 1080x1920 or 1920x1080 at 30fps');
+  return { width: spec.width, height: spec.height, framesPerSecond: spec.framesPerSecond };
+}
+
 export async function mediaCommand(binary, args, { timeoutMs = 480000 } = {}) {
   return new Promise((resolveResult, reject) => {
     const child = spawn(binary, args, { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -96,23 +101,28 @@ async function probeFile(filename, runner) {
   if (!Array.isArray(probe.streams)) throw new Error('Media probe is missing streams');
   return probe;
 }
-export function verifiedProbe(probe, seconds) {
+export function verifiedProbe(probe, seconds, spec = FINAL_SPEC) {
+  const profile = finalProfile(spec);
   const videos = probe.streams.filter(stream => stream.codec_type === 'video');
   const audios = probe.streams.filter(stream => stream.codec_type === 'audio');
   const video = videos[0]; const audio = audios[0];
-  if (probe.streams.length !== 2 || videos.length !== 1 || audios.length !== 1 || video.codec_name !== 'h264' || audio.codec_name !== 'aac' || video.width !== 1080 || video.height !== 1920 || Math.abs(rate(video) - 30) > 0.05 || !Number.isFinite(rate(video)) || audio.channels !== 2 || Number(audio.sample_rate) !== 48000 || [Number(probe.format?.duration), duration(probe, video), duration(probe, audio)].some(value => !Number.isFinite(value) || Math.abs(value - seconds) > 0.5)) throw new Error('Rendered streams do not match the planned duration/profile');
-  return { durationSeconds: Number(probe.format.duration), ...FINAL_SPEC, videoCodec: 'h264', audioCodec: 'aac', channels: 2, sampleRate: 48000, hasAudio: true, audioMode: 'nonverbal' };
+  if (video && ((video.sample_aspect_ratio !== undefined && video.sample_aspect_ratio !== '1:1') ||
+      (video.tags?.rotate !== undefined && Number(video.tags.rotate) !== 0) ||
+      video.side_data_list?.some(data => data.rotation !== undefined && Number(data.rotation) !== 0))) throw new Error('Rendered video has a non-square pixel aspect ratio or rotation');
+  if (probe.streams.length !== 2 || videos.length !== 1 || audios.length !== 1 || video.codec_name !== 'h264' || audio.codec_name !== 'aac' || video.width !== profile.width || video.height !== profile.height || Math.abs(rate(video) - profile.framesPerSecond) > 0.05 || !Number.isFinite(rate(video)) || audio.channels !== 2 || Number(audio.sample_rate) !== 48000 || [Number(probe.format?.duration), duration(probe, video), duration(probe, audio)].some(value => !Number.isFinite(value) || Math.abs(value - seconds) > 0.5)) throw new Error('Rendered streams do not match the planned duration/profile');
+  return { durationSeconds: Number(probe.format.duration), ...profile, videoCodec: 'h264', audioCodec: 'aac', channels: 2, sampleRate: 48000, hasAudio: true, audioMode: 'nonverbal' };
 }
-async function outputRecord(filename, path, seconds, cap, runner) {
+async function outputRecord(filename, path, seconds, cap, runner, spec) {
   const digest = await mediaDigest(filename, cap);
-  const metadata = verifiedProbe(await probeFile(filename, runner), seconds);
+  const metadata = verifiedProbe(await probeFile(filename, runner), seconds, spec);
   const current = await mediaDigest(filename, cap);
   if (current.sha256 !== digest.sha256 || current.sizeBytes !== digest.sizeBytes) throw new Error('Output changed while probing');
   return { path, ...digest, ...metadata };
 }
 
-export function shortCommand(video, audio, output) {
-  return ['-nostdin', '-v', 'error', '-i', video, '-i', audio, '-map', '0:v:0', '-map', '1:a:0', '-map_metadata', '-1', '-sn', '-dn', '-vf', 'scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,fps=30,setsar=1', '-t', String(SCENE_SECONDS), '-r', '30', '-c:v', 'libx264', '-preset', 'fast', '-threads', '4', '-crf', '20', '-maxrate', '2200k', '-bufsize', '4400k', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2', '-movflags', '+faststart', '-n', output];
+export function shortCommand(video, audio, output, spec = FINAL_SPEC) {
+  const { width, height, framesPerSecond } = finalProfile(spec);
+  return ['-nostdin', '-v', 'error', '-i', video, '-i', audio, '-map', '0:v:0', '-map', '1:a:0', '-map_metadata', '-1', '-sn', '-dn', '-vf', `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black,fps=${framesPerSecond},setsar=1`, '-t', String(SCENE_SECONDS), '-r', String(framesPerSecond), '-c:v', 'libx264', '-preset', 'fast', '-threads', '4', '-crf', '20', '-maxrate', '2200k', '-bufsize', '4400k', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2', '-movflags', '+faststart', '-n', output];
 }
 
 async function assemble(indices, { directory, outputDirectory, filename, runner }) {
@@ -134,6 +144,7 @@ export async function runRenderWorker({ env = process.env, artifact = new Defaul
     const launchBytes = await readFile(join(env.GITHUB_WORKSPACE, 'studio/batches/render-launch.json'));
     if (launchBytes.length > 4096) throw new Error('Launch is oversized');
     const packet = unpackAssemblyPacket(env.AI_MEOW_RENDER_PACKET, JSON.parse(launchBytes), 'render');
+    const finalSpec = finalProfile(packet.manifest);
     const directory = resolve(env.RUNNER_TEMP, `ai-meow-render-${packet.id}`);
     await mkdir(directory, { recursive: false, mode: 0o700 });
     const outputDirectory = join(directory, 'output'); const audioDirectory = join(directory, 'audio'); const sourceDirectory = join(directory, 'sources');
@@ -156,9 +167,9 @@ export async function runRenderWorker({ env = process.env, artifact = new Defaul
       if (!sourceVideo || !Number.isFinite(duration(sourceProbe, sourceVideo)) || duration(sourceProbe, sourceVideo) + 0.05 < SCENE_SECONDS) throw new Error('Original video is shorter than its planned complete scene; no looping');
       const path = `shorts/${String(index).padStart(3, '0')}.mp4`; const output = join(outputDirectory, path);
       const encodingStartedAt = Date.now();
-      await runner('ffmpeg', shortCommand(original, join(audioDirectory, audioReceiptPath(index)), output));
+      await runner('ffmpeg', shortCommand(original, join(audioDirectory, audioReceiptPath(index)), output, finalSpec));
       receipt.timing.shortEncodingMs += Date.now() - encodingStartedAt;
-      receipt.shorts.push({ index, sceneId: scene.sceneId, sourceSceneIds: [scene.sceneId], sourceTimeRanges: [{ sceneId: scene.sceneId, startSeconds: offset * SCENE_SECONDS, endSeconds: index * SCENE_SECONDS }], ...await outputRecord(output, path, SCENE_SECONDS, SOURCE_MAX_BYTES, runner) });
+      receipt.shorts.push({ index, sceneId: scene.sceneId, sourceSceneIds: [scene.sceneId], sourceTimeRanges: [{ sceneId: scene.sceneId, startSeconds: offset * SCENE_SECONDS, endSeconds: index * SCENE_SECONDS }], ...await outputRecord(output, path, SCENE_SECONDS, SOURCE_MAX_BYTES, runner, finalSpec) });
       receipt.sourceScenes.push({ sceneId: scene.sceneId, visualAssetId: scene.visual.assetId, visualSha256: scene.visual.sha256, audioAssetId: scene.audio.assetId, audioSha256: scene.audio.sha256 });
       files.push(output);
     }
@@ -171,12 +182,12 @@ export async function runRenderWorker({ env = process.env, artifact = new Defaul
       const target = join(outputDirectory, path);
       // The assembly helper writes a flat trusted name; keep the public archive organised.
       await rename(output, target);
-      receipt.compilations.push({ index, sourceSceneIds: packet.manifest.scenes.slice(offset, offset + 12).map(scene => scene.sceneId), sourceTimeRanges: [{ startSeconds: offset * SCENE_SECONDS, endSeconds: (offset + 12) * SCENE_SECONDS }], ...await outputRecord(target, path, 90, SOURCE_MAX_BYTES, runner) }); files.push(target);
+      receipt.compilations.push({ index, sourceSceneIds: packet.manifest.scenes.slice(offset, offset + 12).map(scene => scene.sceneId), sourceTimeRanges: [{ startSeconds: offset * SCENE_SECONDS, endSeconds: (offset + 12) * SCENE_SECONDS }], ...await outputRecord(target, path, 90, SOURCE_MAX_BYTES, runner, finalSpec) }); files.push(target);
     }
     const masterEncodingStartedAt = Date.now();
     const master = await assemble(Array.from({ length: 96 }, (_, index) => index + 1), { directory, outputDirectory, audioDirectory, filename: 'master.mp4', runner });
     receipt.timing.assemblyEncodingMs += Date.now() - masterEncodingStartedAt;
-    receipt.master = await outputRecord(master, 'master.mp4', 720, MASTER_MAX_BYTES, runner); files.push(master);
+    receipt.master = await outputRecord(master, 'master.mp4', 720, MASTER_MAX_BYTES, runner, finalSpec); files.push(master);
     receipt.timing.workerElapsedBeforeUploadMs = Date.now() - startedAt;
     const receiptFile = join(outputDirectory, 'render-manifest.json'); await writeFile(receiptFile, JSON.stringify(receipt), { flag: 'wx', mode: 0o600 }); files.push(receiptFile);
     const name = `ai-meow-render-${packet.id}`;

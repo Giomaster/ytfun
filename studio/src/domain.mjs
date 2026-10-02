@@ -3,6 +3,7 @@ import { createReadStream } from 'node:fs';
 import { realpath, stat } from 'node:fs/promises';
 import { isAbsolute, resolve, sep } from 'node:path';
 import { assertYouTubeConnected, isYouTubeTrend, youtubeApiData } from './youtube-data-policy.mjs';
+import { renderProfile } from './render-profile.mjs';
 
 const maximumTrendAgeMs = 7 * 24 * 60 * 60 * 1000;
 const futureToleranceMs = 5 * 60 * 1000;
@@ -139,6 +140,7 @@ export function episodeReviewHash(episode) {
     title: episode.title, hook: episode.hook, synopsis: episode.synopsis,
     ...(episode.audioMode === undefined ? {} : { audioMode: episode.audioMode }),
     ...(episode.format === undefined ? {} : { format: episode.format }),
+    ...(episode.renderCanvas === undefined ? {} : { renderCanvas: episode.renderCanvas }),
     ...(episode.derivation === undefined ? {} : { derivation: episode.derivation }),
     continuityNote: episode.continuityNote, originalAngle: episode.originalAngle,
     factualSources: episode.factualSources ?? [], scenes: episode.scenes,
@@ -398,6 +400,7 @@ export class Studio {
     rejectClientId(input);
     const mode = audioMode(input.audioMode);
     const limits = episodeLimits(input.format);
+    renderProfile(input.renderCanvas);
     if (!Array.isArray(input.scenes) || !input.scenes.length || input.scenes.length > limits.maxScenes) throw new Error(`scenes must contain between 1 and ${limits.maxScenes} scenes`);
     const scenes = input.scenes.map((scene) => {
       rejectClientId(scene);
@@ -414,6 +417,7 @@ export class Studio {
       hook: text(input.hook, 'hook'), synopsis: text(input.synopsis, 'synopsis'),
       continuityNote: optionalText(input.continuityNote, 'continuityNote'), originalAngle: text(input.originalAngle, 'originalAngle'),
       factualSources: validatedSources, scenes, audioMode: mode, format: limits.format,
+      ...(input.renderCanvas === undefined ? {} : { renderCanvas: input.renderCanvas }),
       metadata: episodeMetadata(input.metadata),
       trendIds: [...trendIds], createdAt: new Date().toISOString(), status: 'planned', render: null, approval: null, metrics: [],
     };

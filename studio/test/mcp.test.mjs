@@ -33,6 +33,8 @@ test('stdio MCP negotiates, lists tools and persists a series across restarts', 
   const planningSchema = tools.tools.find(tool => tool.name === 'ytfun_episode_plan').inputSchema;
   assert.deepEqual(planningSchema.properties.format.enum, ['short', 'long']);
   assert.equal(planningSchema.properties.format.default, 'short');
+  assert.deepEqual(planningSchema.properties.renderCanvas.enum, ['portrait', 'landscape']);
+  assert.ok(!planningSchema.required.includes('renderCanvas'));
   assert.deepEqual(planningSchema.properties.audioMode.enum, ['narrated', 'silent', 'nonverbal']);
   assert.equal(planningSchema.properties.scenes.maxItems, 120);
   const derivationSchema = tools.tools.find(tool => tool.name === 'ytfun_episode_derive_short').inputSchema;

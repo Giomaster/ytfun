@@ -10,12 +10,19 @@ de origem continua limitado a 100 MiB, incluindo imports, referências e mídia
 gerada. O hash/cópia do master usa blocos de até 1 MiB para evitar carregar um
 master inteiro de 512 MiB na memória.
 
-O renderer nativo continua produzindo MP4 1080×1920, 30 fps, H.264, com o áudio
+O canvas é uma escolha independente do limite de duração: `renderCanvas` omitido
+ou `"portrait"` produz 1080×1920; `"landscape"` produz 1920×1080. Ambos usam
+MP4, 30 fps, H.264, com o áudio
 planejado: `silent` remove áudio e legendas; `narrated` usa as vozes das cenas e
 legendas aproximadas; `nonverbal` exige áudio original de efeitos, ambiente ou
-música por cena, com narração vazia e sem legendas/texto gerado. O novo formato
-amplia duração, quantidade de cenas e tamanho do master; não implementa um canvas
-horizontal. A execução real deve ocorrer em um worker remoto; testes só rodam no CI.
+música por cena, com narração vazia e sem legendas/texto gerado. O campo `format`
+amplia duração, quantidade de cenas e tamanho do master; não decide o canvas nem
+classifica a publicação numa plataforma. A execução real ocorre em worker remoto;
+testes só no CI. Escolha `renderCanvas: "landscape"` ao planejar um regular
+horizontal, inclusive uma montagem curta que cabe nos limites de `format: "short"`.
+Vídeos fonte são encaixados inteiros com margens neutras, sem recortar a ação.
+Imagens mantêm o movimento de zoom existente; planeje suas margens de composição.
+Essa adaptação não solicita nova geração nem comprova elegibilidade para receita.
 
 Em `nonverbal`, importe o áudio original já preparado por cena. Geração `audio`
 pela rota atual de text-to-speech é recusada antes de reservar custos; ela não é
@@ -89,19 +96,23 @@ A exportação não muda estado, reserva render ou chama ffprobe. Ela verifica o
 bytes das fontes e recusa mudanças do plano/seleção observadas durante a leitura.
 O registro recomputa e compara o JSON canônico completo do manifesto; reordenar
 chaves de objetos é permitido, mudar valores, campos, fontes ou a ordem das cenas
-não é. Alterações de script, metadados editoriais, formato, seleção ou proveniência
+não é. Alterações de script, metadados editoriais, formato, canvas, seleção ou proveniência
 exigem exportar um novo manifesto e montar/revisar o resultado correspondente.
 
 O registro reserva `rendering`, bloqueando um segundo registro e alterações de
 assets pelas APIs normais. Ele confere os hashes das fontes, copia o MP4 para um
 nome privado dentro de `assets/`, e usa ffprobe independente por meio do runner
 injetável existente. Não aceita um laudo enviado pelo worker como substituto desse
-probe. Exige 1080×1920, 30 fps (tolerância de 0,05 fps), duração planejada
+probe. Exige o par de dimensões planejado (1080×1920 ou 1920×1080), 30 fps
+(tolerância de 0,05 fps), duração planejada
 (tolerância de 0,5 s), duração compatível do stream de vídeo e o áudio planejado.
 Um master `silent` tem somente um stream de vídeo; `narrated` e `nonverbal` têm
 um de vídeo e um de áudio. Em `nonverbal`, o áudio final precisa cobrir a duração
 planejada, e nenhum stream de legenda é aceito. Streams adicionais são recusados.
 O limite total de duração do formato continua valendo mesmo dentro da tolerância.
+SAR explícito deve ser 1:1 e nenhuma rotação explícita é aceita. Canvas explícito
+integra o hash editorial; episódios antigos sem esse campo mantêm o hash anterior
+e o perfil vertical. Trocar apenas `width`/`height` num manifesto é recusado.
 
 Antes do commit, o registro verifica novamente a identidade do episódio, o hash
 editorial/da seleção, os bytes das fontes e da cópia final, e os gates de projeto,
@@ -143,8 +154,9 @@ planejada (`timebase: "planned-scene-boundaries"`), não um laudo de frames exat
 do MP4. O short é montado a partir dos assets remapeados; não recorta o master.
 
 O novo episódio fica `planned`, sem render/aprovação/métricas; conserva projeto,
-modo de áudio e fontes factuais, com metadados próprios e sem reaproveitar sinais
-de tendência como se fossem atuais. Fonte não renderizada, bytes/licenças
+modo de áudio e fontes factuais, com metadados próprios. Um short derivado de
+master horizontal volta ao padrão portrait e usa os assets originais remapeados.
+Não reaproveita sinais de tendência como se fossem atuais. Fonte não renderizada, bytes/licenças
 inválidos, cenas inexistentes/reordenadas ou desfechos de geração pendentes
 impedem a operação. A mesma seleção do mesmo pai não pode ser derivada novamente,
 inclusive em chamadas concorrentes. Títulos quase iguais continuam bloqueados;
@@ -175,3 +187,11 @@ As regressões de produção usam apenas arquivos sintéticos, fake runner e sto
 temporário no GitHub Actions, incluindo caps, duração longa, proveniência,
 mutação de script/assets, validação de streams, sanitização e concorrência.
 Nenhum teste ou render de validação deve executar no laptop.
+
+O worker `ai-meow-render` do packet v1 continua específico para 96 cenas de
+7,5 segundos/720 segundos. Ele aceita os dois canvases do manifesto, usando o
+mesmo canvas em todos os seus outputs; nomes de unidades curtas nesse artifact
+não classificam vídeos horizontais como YouTube Shorts. Seu contrato não monta
+automaticamente um regular de nove cenas/67,5 segundos. Essa seleção menor usa
+o fluxo de montagem externa acima com o manifesto próprio; não preencher com
+cenas repetidas para satisfazer o packet legado.

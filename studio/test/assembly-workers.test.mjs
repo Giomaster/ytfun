@@ -17,7 +17,7 @@ const mockWav = () => {
   return bytes;
 };
 const mp4 = input => Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from('ftypisom'), Buffer.from(String(input))]);
-function finalProbe(seconds) { return { format: { duration: String(seconds) }, streams: [{ codec_type: 'video', codec_name: 'h264', width: 1080, height: 1920, avg_frame_rate: '30/1', duration: String(seconds) }, { codec_type: 'audio', codec_name: 'aac', channels: 2, sample_rate: '48000', duration: String(seconds) }] }; }
+function finalProbe(seconds, spec = { width: 1080, height: 1920 }) { return { format: { duration: String(seconds) }, streams: [{ codec_type: 'video', codec_name: 'h264', width: spec.width, height: spec.height, avg_frame_rate: '30/1', duration: String(seconds) }, { codec_type: 'audio', codec_name: 'aac', channels: 2, sample_rate: '48000', duration: String(seconds) }] }; }
 
 async function context(t) {
   const directory = await mkdtemp(join(tmpdir(), 'ytfun-assembly-ci-'));
@@ -57,6 +57,25 @@ test('assembly packets bind exact launch identity, scene count/order and source 
   }
 });
 
+test('render packets preserve legacy portrait and permit only the paired landscape canvas', () => {
+  const { packet } = renderFixture();
+  const legacyHash = packetHash(packet);
+  const packed = packAssemblyPacket(packet);
+  assert.deepEqual(unpackAssemblyPacket(packed.encoded, launch(packet), 'render'), packet);
+  assert.equal(packetHash(validateRenderPacket(packet)), legacyHash);
+  const landscape = structuredClone(packet);
+  Object.assign(landscape.manifest, { width: 1920, height: 1080 });
+  assert.deepEqual(validateRenderPacket(landscape), landscape);
+  assert.notEqual(packetHash(landscape), legacyHash);
+  const landscapePacked = packAssemblyPacket(landscape);
+  assert.deepEqual(unpackAssemblyPacket(landscapePacked.encoded, launch(landscape), 'render'), landscape);
+  assert.throws(() => unpackAssemblyPacket(landscapePacked.encoded, launch(packet), 'render'), /differs from this launch/);
+  for (const profile of [{ width: 1080, height: 1080 }, { width: 1920, height: 1920 }, { width: 1280, height: 720 }, { width: '1920', height: 1080 }, { width: 1920, height: 1080, framesPerSecond: 24 }]) {
+    const changed = structuredClone(packet); Object.assign(changed.manifest, profile);
+    assert.throws(() => validateRenderPacket(changed));
+  }
+});
+
 test('audio worker uploads only originals/receipt and refuses invalid launch before synthesis or upload', async t => {
   const c = await context(t); const packet = audioPacket();
   await writeFile(join(c.directory, 'studio/batches/audio-launch.json'), JSON.stringify(launch(packet)));
@@ -83,7 +102,33 @@ test('render profile requires 30fps/full-duration original stereo audio, strips 
   assert.equal(args[args.indexOf('-bufsize') + 1], '4400k');
   assert.equal(args[args.indexOf('-preset') + 1], 'fast');
   assert.equal(args[args.indexOf('-threads') + 1], '4');
+  assert.equal(args[args.indexOf('-vf') + 1], 'scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,fps=30,setsar=1');
   assert.ok(!args.some(arg => /stream_loop|subtitles=|drawtext=/.test(arg)));
+});
+
+test('landscape encoding and probe require the exact manifest canvas without rotation or stretched pixels', () => {
+  const profile = { width: 1920, height: 1080, framesPerSecond: 30 };
+  const probe = finalProbe(720, profile);
+  const verified = verifiedProbe(probe, 720, profile);
+  assert.equal(verified.width, 1920); assert.equal(verified.height, 1080);
+  assert.throws(() => verifiedProbe(probe, 720), /duration\/profile/);
+  assert.throws(() => verifiedProbe(finalProbe(720), 720, profile), /duration\/profile/);
+  const args = shortCommand('original.mp4', 'own.wav', 'output.mp4', profile);
+  assert.equal(args[args.indexOf('-vf') + 1], 'scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black,fps=30,setsar=1');
+  assert.equal(args[args.indexOf('-r') + 1], '30');
+  assert.equal(args[args.indexOf('-map_metadata') + 1], '-1');
+  assert.ok(!args.some(arg => /stream_loop|subtitles=|drawtext=/.test(arg)));
+  for (const mutation of [p => { p.streams[0].sample_aspect_ratio = '2:1'; }, p => { p.streams[0].tags = { rotate: '90' }; }, p => { p.streams[0].side_data_list = [{ rotation: -90 }]; }]) {
+    const changed = structuredClone(probe); mutation(changed);
+    assert.throws(() => verifiedProbe(changed, 720, profile), /pixel aspect ratio or rotation/);
+  }
+  const unrotated = structuredClone(probe);
+  Object.assign(unrotated.streams[0], { sample_aspect_ratio: '1:1', tags: { rotate: '0' }, side_data_list: [{ rotation: 0 }] });
+  assert.equal(verifiedProbe(unrotated, 720, profile).width, 1920);
+  for (const invalid of [{ width: 1920, height: 1920, framesPerSecond: 30 }, { width: 1280, height: 720, framesPerSecond: 30 }, { ...profile, framesPerSecond: 24 }, null]) {
+    assert.throws(() => shortCommand('original.mp4', 'own.wav', 'output.mp4', invalid), /Render canvas/);
+    assert.throws(() => verifiedProbe(probe, 720, invalid), /Render canvas/);
+  }
 });
 
 test('unowned or changed audio artifacts fail before provider recovery or encoding', async t => {
@@ -106,8 +151,9 @@ test('owned audio archive rejects digest failure, missing destination and a diff
   }
 });
 
-test('remote assembly uses 96 exact original videos/WAVs and publishes only verified media plus sanitized receipt', async t => {
+for (const finalSpec of [{ width: 1080, height: 1920, framesPerSecond: 30 }, { width: 1920, height: 1080, framesPerSecond: 30 }]) test(`remote assembly uses 96 exact original videos/WAVs in ${finalSpec.width}x${finalSpec.height} and uploads only verified media plus sanitized receipt`, async t => {
   const c = await context(t); const { packet, wav, receipt } = renderFixture();
+  Object.assign(packet.manifest, finalSpec);
   await writeFile(join(c.directory, 'studio/batches/render-launch.json'), JSON.stringify(launch(packet))); c.env.AI_MEOW_RENDER_PACKET = packAssemblyPacket(packet).encoded;
   let recoveries = 0; let encodes = 0; let uploaded = 0;
   const artifact = {
@@ -123,6 +169,8 @@ test('remote assembly uses 96 exact original videos/WAVs and publishes only veri
       const result = JSON.parse(await readFile(join(root, 'render-manifest.json')));
       assert.equal(result.master.durationSeconds, 720); assert.equal(result.shorts.length, 96); assert.equal(result.compilations.length, 8);
       assert.ok(result.compilations.every(item => item.durationSeconds === 90 && item.sourceSceneIds.length === 12));
+      assert.equal(result.sourceManifestSha256, packetHash(packet.manifest));
+      assert.ok([result.master, ...result.shorts, ...result.compilations].every(item => item.width === finalSpec.width && item.height === finalSpec.height && item.framesPerSecond === finalSpec.framesPerSecond));
       const raw = JSON.stringify(result); assert.ok(!/fixture-hf-token|fixture-actions-token|responsePath|request-\d|prompt/.test(raw));
       return { id: 31 };
     },
@@ -130,10 +178,11 @@ test('remote assembly uses 96 exact original videos/WAVs and publishes only veri
   const runner = async (binary, args) => {
     const filename = args.at(-1);
     if (binary === 'ffmpeg') {
+      if (args.includes('-vf')) assert.equal(args[args.indexOf('-vf') + 1], `scale=${finalSpec.width}:${finalSpec.height}:force_original_aspect_ratio=decrease,pad=${finalSpec.width}:${finalSpec.height}:(ow-iw)/2:(oh-ih)/2:color=black,fps=30,setsar=1`);
       encodes++; await writeFile(filename, mp4(basename(filename))); return { stdout: '' };
     }
     if (filename.includes('/sources/')) return { stdout: JSON.stringify({ format: { duration: '7.5625' }, streams: [{ codec_type: 'video', duration: '7.5625' }] }) };
-    return { stdout: JSON.stringify(finalProbe(filename.includes('/shorts/') ? 7.5 : filename.includes('/compilations/') ? 90 : 720)) };
+    return { stdout: JSON.stringify(finalProbe(filename.includes('/shorts/') ? 7.5 : filename.includes('/compilations/') ? 90 : 720, finalSpec)) };
   };
   const result = await runRenderWorker({ env: c.env, artifact, fetchImpl: ownedFetch(packet, value => { if (value.workflow_run) value.digest = `sha256:${sha('original-audio-archive')}`; }), recover: async request => { recoveries++; return { remoteStatus: 'COMPLETED', blob: new Blob([mp4(Number(request.requestId.split('-').at(-1)))], { type: 'video/mp4' }) }; }, runner });
   assert.equal(result.status, 'completed'); assert.equal(recoveries, 96); assert.equal(encodes, 105); assert.equal(uploaded, 1);

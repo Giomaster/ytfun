@@ -119,7 +119,10 @@ fal-ai/HF original. Se ainda estiver pendente, hash divergir ou duração for me
 que a cena, a montagem falha; não submete, repete ou cancela inferência. Downloads
 de vídeo mantêm o cap de 100 MiB e o áudio próprio substitui qualquer som embutido.
 
-O worker monta 96 MP4s de 7,5 s, 1080×1920/30 fps, H.264 yuv420p, CRF20 com
+O worker monta 96 MP4s de 7,5 s no canvas exato do manifesto: 1080×1920 ou
+1920×1080, ambos a 30 fps. Todos os outputs do packet usam esse mesmo canvas;
+um arquivo horizontal no diretório `shorts` é uma unidade curta de montagem,
+não uma classificação automática de YouTube Short. H.264 yuv420p, CRF20 com
 maxrate 2,2 Mbps/bufsize 4,4 Mbps, preset fast/quatro threads, AAC 128 kbps
 estéreo/48 kHz, sem loop, fala ou
 texto inserido. Reúne os vídeos na ordem com cópia de streams de vídeo e codifica

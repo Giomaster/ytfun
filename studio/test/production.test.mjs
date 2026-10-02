@@ -4,7 +4,7 @@ import { mkdtemp, readFile, readdir, rm, stat, truncate, writeFile } from 'node:
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { StudioStore } from '../src/store.mjs';
-import { Studio } from '../src/domain.mjs';
+import { Studio, episodeReviewHash } from '../src/domain.mjs';
 import { Production } from '../src/production.mjs';
 import { ProductionJobs } from '../src/jobs.mjs';
 import { InferenceClient } from '@huggingface/inference';
@@ -22,13 +22,13 @@ const pilotVideoParameters = { resolution: '480p', aspect_ratio: '16:9', num_fra
 const filmVideoParameters = { ...pilotVideoParameters, resolution: '720p', aspect_ratio: '9:16', interpolator_model: 'film', num_interpolated_frames: 1, adjust_fps_for_interpolation: true };
 const END_PNG = Buffer.concat([PNG, Buffer.from('original final frame')]);
 
-async function setup(t, { budgetMonthlyUsd = null, sceneCount = 1, sceneDurationSeconds = 3, audioMode, format } = {}) {
+async function setup(t, { budgetMonthlyUsd = null, sceneCount = 1, sceneDurationSeconds = 3, audioMode, format, renderCanvas } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'ytfun-production-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const store = new StudioStore(directory);
   const studio = new Studio(store);
   const project = await studio.createProject({ title: 'Clock city', premise: 'A fictional miniature city', audience: 'Fantasy fans', language: 'pt-BR', budgetMonthlyUsd });
-  const episode = await studio.planEpisode({ projectId: project.id, ...(audioMode ? { audioMode } : {}), ...(format ? { format } : {}), title: 'The last clock wakes', hook: 'Time returns to a sleeping city.', synopsis: 'The clock wakes its inhabitants.', originalAngle: 'An original miniature clock-city mythology.', scenes: Array.from({ length: sceneCount }, (_, index) => ({ durationSeconds: sceneDurationSeconds, ...(['silent', 'nonverbal'].includes(audioMode) ? {} : { narration: `O relógio ${index + 1} acordou a cidade.` }), visualPrompt: `An original tiny clock city, scene ${index + 1}` })), metadata: { description: 'An original AI-generated fictional episode.', hashtags: ['#FicçãoIA'] } });
+  const episode = await studio.planEpisode({ projectId: project.id, ...(audioMode ? { audioMode } : {}), ...(format ? { format } : {}), ...(renderCanvas === undefined ? {} : { renderCanvas }), title: 'The last clock wakes', hook: 'Time returns to a sleeping city.', synopsis: 'The clock wakes its inhabitants.', originalAngle: 'An original miniature clock-city mythology.', scenes: Array.from({ length: sceneCount }, (_, index) => ({ durationSeconds: sceneDurationSeconds, ...(['silent', 'nonverbal'].includes(audioMode) ? {} : { narration: `O relógio ${index + 1} acordou a cidade.` }), visualPrompt: `An original tiny clock city, scene ${index + 1}` })), metadata: { description: 'An original AI-generated fictional episode.', hashtags: ['#FicçãoIA'] } });
   return { directory, store, studio, project, episode };
 }
 
@@ -181,7 +181,7 @@ async function addEndReference(context, production) {
   return production.registerAsset({ episodeId: context.episode.id, sceneId: context.episode.scenes[0].id, kind: 'image', localPath, provenance });
 }
 
-function fakeRenderer(durationSeconds, { audioDuration = 2, finalHasAudio = true, sourceHasAudio = false, sourceVideoDuration = 3, onEncode } = {}) {
+function fakeRenderer(durationSeconds, { audioDuration = 2, finalHasAudio = true, sourceHasAudio = false, sourceVideoDuration = 3, onEncode, width = 1080, height = 1920 } = {}) {
   const calls = [];
   const runner = async (command, args, options) => {
     calls.push({ command, args, options });
@@ -192,7 +192,7 @@ function fakeRenderer(durationSeconds, { audioDuration = 2, finalHasAudio = true
       const streams = audio
         ? [{ codec_type: 'audio', duration: String(audioDuration) }]
         : final
-          ? [{ codec_type: 'video', width: 1080, height: 1920, avg_frame_rate: '30/1' }, ...(finalHasAudio ? [{ codec_type: 'audio', duration: String(durationSeconds) }] : [])]
+          ? [{ codec_type: 'video', width, height, avg_frame_rate: '30/1' }, ...(finalHasAudio ? [{ codec_type: 'audio', duration: String(durationSeconds) }] : [])]
           : [{ codec_type: 'video', width: 720, height: 1280, duration: String(sourceVideoDuration) }, ...(sourceHasAudio && /\.mp4$/.test(path) ? [{ codec_type: 'audio', duration: String(sourceVideoDuration) }] : [])];
       return { exitCode: 0, stdout: JSON.stringify({ format: { duration: String(final ? durationSeconds : audio ? audioDuration : sourceVideoDuration) }, streams }) };
     }
@@ -1384,8 +1384,8 @@ test('production revalidates long scene/duration caps and the legacy short defau
   }
 });
 
-async function remoteRenderContext(t, { format = 'long', sceneCount = 15, sceneDurationSeconds = 15, audioMode = 'silent', probeHook, probeChange } = {}) {
-  const context = await setup(t, { format, sceneCount, sceneDurationSeconds, audioMode });
+async function remoteRenderContext(t, { format = 'long', sceneCount = 15, sceneDurationSeconds = 15, audioMode = 'silent', renderCanvas, probeHook, probeChange } = {}) {
+  const context = await setup(t, { format, sceneCount, sceneDurationSeconds, audioMode, renderCanvas });
   const calls = [];
   const runner = async (command, args, options) => {
     calls.push({ command, args, options });
@@ -1393,7 +1393,7 @@ async function remoteRenderContext(t, { format = 'long', sceneCount = 15, sceneD
     if (probeHook) await probeHook({ context, args, options });
     const duration = sceneCount * sceneDurationSeconds;
     const probe = { format: { duration: String(duration) }, streams: [
-      { codec_type: 'video', width: 1080, height: 1920, avg_frame_rate: '30/1', duration: String(duration) },
+      { codec_type: 'video', width: renderCanvas === 'landscape' ? 1920 : 1080, height: renderCanvas === 'landscape' ? 1080 : 1920, avg_frame_rate: '30/1', duration: String(duration) },
       ...(audioMode !== 'silent' ? [{ codec_type: 'audio', duration: String(duration) }] : []),
     ] };
     if (probeChange) probeChange(probe);
@@ -1410,6 +1410,79 @@ async function remoteRenderContext(t, { format = 'long', sceneCount = 15, sceneD
   return { ...context, production, sources, localPath, manifest, calls,
     input: { episodeId: context.episode.id, localPath, manifest, provenance } };
 }
+
+test('canvas is explicit and hash-bound while omitted plans retain the portrait manifest', async t => {
+  const legacy = await remoteRenderContext(t);
+  assert.equal(legacy.episode.renderCanvas, undefined);
+  assert.equal(legacy.manifest.width, 1080);
+  assert.equal(legacy.manifest.height, 1920);
+  // Fixed v1 editorial payload/hash, independent of runtime-generated IDs.
+  const legacyFixture = { title: 'Legacy episode', hook: 'A door opens.', synopsis: 'An original city appears.', continuityNote: 'Same room.', originalAngle: 'A miniature city in stone.', factualSources: [], scenes: [{ id: 'cf441198-c849-4637-812f-dc3d024bc87b', durationSeconds: 3, narration: '', visualPrompt: 'A miniature city.' }], metadata: { description: 'Original synthetic fiction.', hashtags: ['#AIMeow'] }, trendIds: [], render: null };
+  assert.equal(episodeReviewHash(legacyFixture), 'dbedd5ba6b818437445769166d066a4e753f26e22c973aa456aa7ffe59208fd2');
+  assert.notEqual(episodeReviewHash(legacy.episode), episodeReviewHash({ ...legacy.episode, renderCanvas: 'landscape' }));
+  for (const renderCanvas of [null, 'square', '1920x1080', { width: 1920 }]) {
+    await assert.rejects(legacy.studio.planEpisode({ ...legacy.episode, id: undefined, renderCanvas }), /renderCanvas must be/);
+  }
+  for (const format of ['short', 'long']) {
+    const c = await remoteRenderContext(t, { renderCanvas: 'landscape', format, sceneCount: 9, sceneDurationSeconds: 7.5, audioMode: 'nonverbal' });
+    assert.equal(c.manifest.width, 1920);
+    assert.equal(c.manifest.height, 1080);
+    const render = await c.production.registerRemoteRender(c.input);
+    assert.equal(render.width, 1920);
+    assert.equal(render.height, 1080);
+    assert.equal(render.durationSeconds, 67.5);
+    assert.equal(render.hasAudio, true);
+    assert.equal(c.calls.length, 1, 'Remote registration probes the output and never encodes');
+  }
+});
+
+test('remote registration rejects canvas substitution, wrong dimensions and non-square or rotated display', async t => {
+  for (const change of [p => { p.streams[0].width = 1080; p.streams[0].height = 1920; }, p => { p.streams[0].sample_aspect_ratio = '2:1'; }, p => { p.streams[0].tags = { rotate: '90' }; }, p => { p.streams[0].side_data_list = [{ rotation: -90 }]; }]) {
+    const c = await remoteRenderContext(t, { renderCanvas: 'landscape', probeChange: change });
+    await assert.rejects(c.production.registerRemoteRender(c.input), /Remote render registration failed/);
+    assert.equal((await c.studio.getEpisode(c.episode.id)).render, null);
+  }
+  const c = await remoteRenderContext(t, { renderCanvas: 'landscape' });
+  await assert.rejects(c.production.registerRemoteRender({ ...c.input, manifest: { ...c.manifest, width: 1080, height: 1920 } }), /manifest does not match/);
+  assert.equal(c.calls.length, 0);
+  const raced = await remoteRenderContext(t, { renderCanvas: 'landscape', probeHook: async ({ context }) => {
+    await context.store.transaction(state => { state.episodes[0].renderCanvas = 'portrait'; });
+  } });
+  await assert.rejects(raced.production.registerRemoteRender(raced.input), /Remote render registration failed/);
+  assert.equal((await raced.studio.getEpisode(raced.episode.id)).render, null);
+});
+
+test('a short derived from a landscape master remaps the original sources and defaults to portrait', async t => {
+  const c = await remoteRenderContext(t, { renderCanvas: 'landscape', sceneCount: 2, sceneDurationSeconds: 3 });
+  await c.production.registerRemoteRender(c.input);
+  const child = await c.studio.deriveShort({ parentEpisodeId: c.episode.id, sceneIds: c.episode.scenes.map(scene => scene.id), title: 'The miniature sunrise revealed', hook: 'A complete small-world reveal.', synopsis: 'A standalone view of the awakening city.', originalAngle: 'A focused complete reveal drawn from the original clock-city scenes.', metadata: { description: 'Original AI Meow short derived from its source master.', hashtags: ['#AIMeow'] } });
+  assert.equal(child.renderCanvas, undefined, 'The parent landscape canvas is never implicitly inherited');
+  const manifest = await c.production.exportRenderManifest({ episodeId: child.id });
+  assert.equal(manifest.width, 1080);
+  assert.equal(manifest.height, 1920);
+  assert.deepEqual(manifest.scenes.map(scene => scene.visual.sha256), c.manifest.scenes.map(scene => scene.visual.sha256));
+});
+
+test('native landscape render preserves video fit and the existing image zoom without video looping', async t => {
+  for (const alsoVideo of [false, true]) {
+    const c = await setup(t, { audioMode: 'silent', renderCanvas: 'landscape' });
+    const fake = fakeRenderer(3, { finalHasAudio: false, width: 1920, height: 1080 });
+    const production = new Production(c.store, { env, runner: fake.runner });
+    await addSourceAssets(c, production, { alsoVideo });
+    const render = await production.renderEpisode({ episodeId: c.episode.id });
+    assert.equal(render.width, 1920);
+    assert.equal(render.height, 1080);
+    const args = fake.calls.find(call => call.command === env.FFMPEG_PATH).args;
+    const filter = args[args.indexOf('-vf') + 1];
+    assert.match(filter, /force_original_aspect_ratio=decrease/);
+    assert.match(filter, alsoVideo ? /pad=1920:1080/ : /s=1920x1080/);
+    assert.match(filter, /setsar=1/);
+    assert.doesNotMatch(filter, /crop=/);
+    if (alsoVideo) assert.doesNotMatch(filter, /zoompan/);
+    else assert.match(filter, /zoompan/);
+    assert.ok(!args.includes('-stream_loop'));
+  }
+});
 
 test('rejected current visual/audio selection blocks rendering and manifest export without falling back', async t => {
   for (const kind of ['video', 'audio', 'image']) {

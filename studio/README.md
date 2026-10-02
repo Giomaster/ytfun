@@ -30,7 +30,7 @@ série precisa ser combinado antes de entrar em produção.
   dirigidos. Preservar o peso da casca e o comportamento dos materiais. Em rodadas
   de ajuste de prompt sem novas imagens, gerar o vídeo diretamente ou reutilizar
   a referência existente que a rota exigir; manter a revisão focada na ação.
-- Validar cada conceito em piloto barato antes de investir em qualidade maior; usar modelos pagos quando o ganho justificar o custo. A direção editorial prioriza vídeos longos com unidades que rendam shorts completos, sem fala ou texto. O formato longo é explícito e mantém o canvas vertical. Sem teto
+- Validar cada conceito em piloto barato antes de investir em qualidade maior; usar modelos pagos quando o ganho justificar o custo. A direção editorial prioriza vídeos longos com unidades que rendam shorts completos, sem fala ou texto. O formato longo é explícito; `renderCanvas` escolhe portrait (padrão) ou landscape independentemente da duração. Sem teto
   mensal fixo por padrão. Cada chamada guarda estimativa e fonte de preço;
   operação paga exige reconhecimento por chamada e habilitação no ambiente.
 - Reaproveitar o ytfun sem incorporar automaticamente seu trabalho local ainda
@@ -54,7 +54,7 @@ exportação TikTok em publicação.
 4. Gera imagem/voz/vídeo na inferência remota do Hugging Face ou importa assets
    originais de outros conectores. Provider, modelo, prompt, licença e hashes
    ficam ligados à cena. Fonte de tendência nunca vira footage para edição.
-5. FFmpeg monta 9:16, 1080×1920, 30 fps em worker remoto. No modo narrado, exige voz e gera legendas com timing aproximado por cena. `silent` descarta áudio embutido e não gera SRT; `nonverbal` usa áudio original por cena sem legendas. Nos modos sem fala, vídeo mais curto que a cena é bloqueado, sem repetição automática. Imagens recebem movimento simples; áudio maior que a cena é bloqueado para evitar truncamento. Master longo aceita até 512 MiB; render curto e cada asset de origem mantêm 100 MiB. A montagem externa pode ser registrada por manifesto exato e ffprobe independente. [Contrato remoto e limites](docs/long-form-production.md).
+5. FFmpeg monta 1080×1920 (portrait padrão) ou 1920×1080 (`renderCanvas: "landscape"` explícito), 30 fps em worker remoto. Vídeos fonte são encaixados inteiros com margens neutras; imagens mantêm o zoom existente. No modo narrado, exige voz e gera legendas com timing aproximado por cena. `silent` descarta áudio embutido e não gera SRT; `nonverbal` usa áudio original por cena sem legendas. Nos modos sem fala, vídeo mais curto que a cena é bloqueado, sem repetição automática. Imagens recebem movimento simples; áudio maior que a cena é bloqueado para evitar truncamento. Master longo aceita até 512 MiB; render curto e cada asset de origem mantêm 100 MiB. A montagem externa pode ser registrada por manifesto exato e ffprobe independente. [Contrato remoto e limites](docs/long-form-production.md).
 6. A revisão real de originalidade, fatos e render fica vinculada aos hashes do
    episódio, arquivo final e proveniência. As verificações estruturais não
    substituem assistir ao vídeo ou confirmar fontes.
