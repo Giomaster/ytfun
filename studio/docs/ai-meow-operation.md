@@ -147,7 +147,26 @@ deve trazer uma nova recompensa, informação ou avanço da sequência.
 A MESTRE desperta a cada 18 horas para analisar demandas, resultados e estoque.
 O despertar inicia uma decisão de produção, sem obrigação de gerar ou publicar.
 Evite acumular material além da capacidade de lançamento ou tornar uma tendência
-obsoleta na fila. Cada especialista mantém sua própria agenda de publicação.
+obsoleta na fila. A MESTRE é a única sessão com agendamento periódico ativo.
+Em cada ciclo, ela aciona as três especialistas atuais de Operação/threads.json
+por mensagem, incluindo o trabalho com acervo existente e filas elegíveis mesmo
+quando não houver geração nova. O despacho informa cycleId, rede, modo, material
+disponível e tarefa delimitada; registre os recibos e não repita o despacho do
+mesmo ciclo nem sobreponha outra execução na mesma entrega.
+
+Facebook, TikTok e YouTube permanecem sem despertares periódicos próprios. Suas
+automações independentes ficam pausadas; não restaurar checagem horária, cron,
+polling ou follow-ups recorrentes das conversas. Uma especialista trabalha quando
+a MESTRE a aciona ou quando o dono intervém diretamente, conclui a tarefa e encerra.
+Não manter o turno acordado esperando a próxima data de envio. Heartbeat antigo
+já enfileirado sem despacho atual não inicia montagem ou publicação.
+
+Cada especialista mantém sua própria fila e cadência de publicação. Essa agenda
+não é o relógio de despertar da conversa. Sem um executor de fila independente
+comprovadamente ativo ou agendamento confirmado pelo provider, uma entrega elegível
+é tratada no próximo despacho da MESTRE; não prometer envio no minuto planejado.
+Preserve reservas, estados e recibos, sem rajadas para compensar atraso. A pausa
+do heartbeat de uma especialista não pausa a operação nem elimina suas entregas.
 
 Antes de gerar, cada especialista informa temas promissores, evidências recentes,
 métricas disponíveis, hipótese criativa, formato, duração necessária e material
