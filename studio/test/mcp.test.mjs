@@ -44,7 +44,8 @@ test('stdio MCP negotiates, lists tools and persists a series across restarts', 
   assert.deepEqual(reschedule.properties.expectedClaim.required.sort(), ['accountId', 'bindingSha256', 'dueAt', 'madeForKids', 'mode', 'platform', 'privacy', 'providerAccountId', 'renderSha256', 'reviewHash']);
   assert.deepEqual(reschedule.properties.expectedClaim.properties.platform.enum, ['youtube', 'facebook', 'tiktok', 'kwai']);
   assert.deepEqual(reschedule.properties.expectedClaim.properties.privacy.enum, ['private', 'unlisted', 'public']);
-  for (const key of ['providerAccountId', 'bindingSha256', 'madeForKids']) assert.ok(reschedule.properties.expectedClaim.properties[key].anyOf.some(value => value.type === 'null'));
+  for (const key of ['providerAccountId', 'bindingSha256']) assert.ok(reschedule.properties.expectedClaim.properties[key].anyOf.some(value => value.type === 'null'));
+  assert.deepEqual(reschedule.properties.expectedClaim.properties.madeForKids.type, ['boolean', 'null']);
   const cadenceSchema = tools.tools.find(tool => tool.name === 'ytfun_project_cadence_update').inputSchema.properties.cadence;
   assert.equal(cadenceSchema.properties.minHoursBetweenPosts.minimum, 0);
   assert.equal(cadenceSchema.properties.minHoursBetweenPosts.maximum, undefined);
