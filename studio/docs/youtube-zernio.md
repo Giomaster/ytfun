@@ -74,11 +74,17 @@ require reconciliation rather than another request. Idempotency is a provider
 duplicate safeguard, not authorization to replay uncertain mutations.
 
 `status({providerPostId, publicationId, renderSha256})` is GET only. It requires the
-exact account, target count, correlation metadata, public intent, no schedule/draft,
+exact account, target count, correlation metadata, public intent, no future schedule/draft,
 no removal marker, published platform state, exact native video ID/permalink and
 an effective publication timestamp. Native public/processed ownership is then
 observed before `confirmed:true`. Upload completion, generic provider `published`
 or a missing permalink never declares public delivery.
+
+Zernio may populate root and target `scheduledFor` with the immediate dispatch
+instant even for `publishNow:true`. Reconciliation accepts these timestamps only
+when they include a timezone, are valid, and do not exceed the post's valid
+creation time. A future schedule, missing creation evidence or malformed date
+remains unresolved. Native public/processed ownership is still required.
 
 The queue must keep native channel cadence, reservations and prior unknown attempts
 across route changes. Migration applies only to unstarted queued deliveries through

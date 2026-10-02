@@ -196,6 +196,107 @@ test('GET-only reconciliation requires exact target/hash plus observed native pu
   assert.ok(f.calls.every(call => call.options.method === 'GET'));
 });
 
+test('publishNow normalized dispatch timestamps reconcile through GET and native public verification', async () => {
+  const createdMs = Date.now() - 60_000;
+  const createdAt = new Date(createdMs).toISOString();
+  const dispatchedAt = new Date(createdMs - 609).toISOString();
+  const offset = value => new Date(value + 3_600_000).toISOString().replace('Z', '+01:00');
+  for (const [label, schedules] of [
+    ['root and target normalized before creation', { root: dispatchedAt, target: dispatchedAt }],
+    ['root and target exactly at creation', { root: createdAt, target: createdAt }],
+    ['root only', { root: dispatchedAt }],
+    ['target only', { target: dispatchedAt }],
+    ['root and target equivalent offset instants', { root: offset(createdMs - 609), target: offset(createdMs) }],
+  ]) {
+    const normalized = structuredClone(post);
+    normalized.createdAt = createdAt;
+    normalized.platforms[0].publishedAt = new Date(createdMs + 1_000).toISOString();
+    if (schedules.root !== undefined) normalized.scheduledFor = schedules.root;
+    if (schedules.target !== undefined) normalized.platforms[0].scheduledFor = schedules.target;
+    const f = fixture({ create: Response.json({ post: normalized }, { status: 201 }), status: { post: normalized } });
+    const accepted = await upload(f.adapter);
+    assert.equal(accepted.status, 'processing', label);
+    assert.equal(accepted.confirmed, false, label);
+    assert.equal(accepted.providerPostId, POST, label);
+    assert.equal(f.nativeCalls.length, 0, label);
+    const createCall = f.calls.find(call => call.options.method === 'POST' && call.url.endsWith('/posts'));
+    const request = JSON.parse(createCall.options.body);
+    assert.equal(request.publishNow, true, label);
+    assert.equal(request.scheduledFor, undefined, label);
+    assert.equal(request.platforms[0].scheduledFor, undefined, label);
+    const callsBeforeReconciliation = f.calls.length;
+    const observed = await status(f.adapter);
+    assert.equal(observed.status, 'published', label);
+    assert.equal(observed.confirmed, true, label);
+    assert.equal(observed.privacy, 'public', label);
+    assert.equal(observed.accountId, CHANNEL, label);
+    assert.equal(observed.nativeVisibilityVerified, true, label);
+    assert.deepEqual(f.nativeCalls, [{ videoId: VIDEO, channelId: CHANNEL }], label);
+    assert.ok(f.calls.slice(callsBeforeReconciliation).every(call => call.options.method === 'GET'), label);
+    assert.equal(f.calls.filter(call => call.options.method === 'PUT').length, 1, label);
+    assert.equal(f.calls.filter(call => call.options.method === 'POST' && call.url.endsWith('/posts')).length, 1, label);
+  }
+});
+
+test('normalized dispatch dates reject future, invalid or unanchored schedules before native verification', async () => {
+  const createdMs = Date.now() - 60_000;
+  const createdAt = new Date(createdMs).toISOString();
+  const dispatchedAt = new Date(createdMs - 609).toISOString();
+  const afterCreation = new Date(createdMs + 1_000).toISOString();
+  const legacyCreatedAt = new Date(createdMs).toUTCString().replace('GMT', 'GMT+00:00');
+  const legacyDispatchedAt = new Date(createdMs - 5_000).toUTCString().replace('GMT', 'GMT+00:00');
+  const previousYear = new Date(createdMs).getUTCFullYear() - 1;
+  const mutations = [
+    ['root schedule after creation', value => { value.scheduledFor = afterCreation; }],
+    ['target schedule after creation', value => { value.platforms[0].scheduledFor = afterCreation; }],
+    ['root schedule in the future', value => { value.scheduledFor = new Date(Date.now() + 120_000).toISOString(); }],
+    ['target schedule in the future', value => { value.platforms[0].scheduledFor = new Date(Date.now() + 120_000).toISOString(); }],
+    ['root malformed schedule', value => { value.scheduledFor = 'not-a-timestampZ'; }],
+    ['target malformed schedule', value => { value.platforms[0].scheduledFor = 'not-a-timestampZ'; }],
+    ['empty schedule', value => { value.scheduledFor = ''; }],
+    ['numeric schedule', value => { value.platforms[0].scheduledFor = createdMs; }],
+    ['schedule without timezone', value => { value.scheduledFor = dispatchedAt.slice(0, -1); }],
+    ['schedule with invalid offset', value => { value.platforms[0].scheduledFor = dispatchedAt.replace('Z', '+25:00'); }],
+    ['schedule with impossible calendar day', value => { value.scheduledFor = `${previousYear}-02-30T23:50:02.093Z`; }],
+    ['schedule in parseable legacy format', value => { value.scheduledFor = legacyDispatchedAt; }],
+    ['missing creation anchor', value => { delete value.createdAt; }],
+    ['null creation anchor', value => { value.createdAt = null; }],
+    ['malformed creation anchor', value => { value.createdAt = 'not-a-timestampZ'; }],
+    ['numeric creation anchor', value => { value.createdAt = createdMs; }],
+    ['creation anchor without timezone', value => { value.createdAt = createdAt.slice(0, -1); }],
+    ['creation anchor with impossible calendar day', value => {
+      value.createdAt = `${previousYear}-02-30T23:50:02.702Z`;
+      value.scheduledFor = `${previousYear}-02-01T23:50:02.093Z`;
+      value.platforms[0].scheduledFor = value.scheduledFor;
+    }],
+    ['creation anchor in parseable legacy format', value => {
+      value.createdAt = legacyCreatedAt;
+      value.scheduledFor = new Date(createdMs - 5_000).toISOString();
+      value.platforms[0].scheduledFor = value.scheduledFor;
+    }],
+    ['future creation anchor beyond clock allowance', value => {
+      value.createdAt = new Date(Date.now() + 120_000).toISOString();
+      value.scheduledFor = value.createdAt;
+      value.platforms[0].scheduledFor = value.createdAt;
+    }],
+    ['draft with normalized dates', value => { value.status = 'draft'; }],
+    ['cancelled with normalized dates', value => { value.status = 'cancelled'; }],
+  ];
+  for (const [label, mutate] of mutations) {
+    const changed = structuredClone(post);
+    changed.createdAt = createdAt;
+    changed.scheduledFor = dispatchedAt;
+    changed.platforms[0].scheduledFor = dispatchedAt;
+    mutate(changed);
+    const f = fixture({ status: { post: changed } });
+    const observed = await status(f.adapter);
+    assert.equal(observed.status, 'unknown', label);
+    assert.equal(observed.confirmed, false, label);
+    assert.equal(f.nativeCalls.length, 0, label);
+    assert.ok(f.calls.every(call => call.options.method === 'GET'), label);
+  }
+});
+
 test('generic published, unlisted/private, wrong owner, missing link and drafts do not confirm public', async () => {
   const mutations = [value => { value.platforms[0].accountId = 'a'.repeat(24); },
     value => { value.metadata.ytfunPublicationId = 'wrong'; },
