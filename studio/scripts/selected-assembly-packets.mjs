@@ -1,5 +1,6 @@
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { z } from 'zod';
+import { episodeLimits } from '../src/domain.mjs';
 import { canonicalJson, packetHash, SCENE_COUNT, SCENE_SECONDS } from './assembly-packets.mjs';
 
 const uuid = z.string().uuid();
@@ -10,14 +11,21 @@ const request = z.object({ provider: z.literal('fal-ai'), transport: z.literal('
   requestId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/),
   responsePath: z.string().max(2048).regex(/^\/fal-ai\/(?:[A-Za-z0-9_-][A-Za-z0-9_.-]*\/)*[A-Za-z0-9_-][A-Za-z0-9_.-]*$/),
 }).strict().refine(value => value.responsePath.endsWith(`/requests/${value.requestId}`) || value.responsePath.endsWith(`/requests/${value.requestId}/response`));
-const manifestSchema = z.object({ schemaVersion: z.literal(1), episodeId: uuid,
-  format: z.literal('long'), audioMode: z.literal('nonverbal'),
-  durationSeconds: z.number().positive().max(SCENE_COUNT * SCENE_SECONDS), maxRenderBytes: z.literal(512 * 1024 * 1024),
+const sceneSchema = z.object({ sceneId: uuid, durationSeconds: z.literal(SCENE_SECONDS), scriptSha256: sha,
+  visual: descriptor('video'), audio: descriptor('audio') }).strict();
+const manifestFields = { schemaVersion: z.literal(1), episodeId: uuid, audioMode: z.literal('nonverbal'),
   width: z.union([z.literal(1080), z.literal(1920)]), height: z.union([z.literal(1080), z.literal(1920)]),
   framesPerSecond: z.literal(30), editorialSha256: sha, snapshotSha256: sha,
-  scenes: z.array(z.object({ sceneId: uuid, durationSeconds: z.literal(SCENE_SECONDS), scriptSha256: sha,
-    visual: descriptor('video'), audio: descriptor('audio') }).strict()).min(1).max(SCENE_COUNT),
-}).strict().refine(value => value.width !== value.height && value.durationSeconds === value.scenes.length * SCENE_SECONDS);
+};
+const manifestFor = (format, maximumScenes, maximumDurationSeconds, maxRenderBytes) => z.object({
+  ...manifestFields, format: z.literal(format), durationSeconds: z.number().positive().max(maximumDurationSeconds),
+  maxRenderBytes: z.literal(maxRenderBytes), scenes: z.array(sceneSchema).min(1).max(maximumScenes),
+}).strict();
+const shortLimits = episodeLimits('short');
+const manifestSchema = z.discriminatedUnion('format', [
+  manifestFor('long', SCENE_COUNT, SCENE_COUNT * SCENE_SECONDS, 512 * 1024 * 1024),
+  manifestFor('short', Math.min(SCENE_COUNT, shortLimits.maxScenes), shortLimits.maxDurationSeconds, shortLimits.maxRenderBytes),
+]).refine(value => value.width !== value.height && value.durationSeconds === value.scenes.length * SCENE_SECONDS);
 const schema = z.object({ schemaVersion: z.literal(1), type: z.literal('selected-assembly'), id: uuid,
   episodeId: uuid, sourceEpisodeId: uuid, manifest: manifestSchema,
   sources: z.array(z.object({ assetId: uuid, sha256: sha, sourceSceneId: uuid,

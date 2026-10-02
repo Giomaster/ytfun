@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, truncate, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { gzipSync } from 'node:zlib';
 import test from 'node:test';
+import { episodeLimits } from '../src/domain.mjs';
 import { recoverFalVideo } from '../src/fal-queue-recovery.mjs';
 import { audioReceiptPath, canonicalJson, hash, packetHash } from '../scripts/assembly-packets.mjs';
 import { mediaCommand, ownedAudioArtifact, verifiedProbe } from '../scripts/remote-render-worker.mjs';
@@ -12,6 +13,7 @@ import { packSelectedAssemblyPacket, unpackSelectedAssemblyPacket, validateSelec
 import { runSelectedAssemblyWorker } from '../scripts/remote-selected-assembly-worker.mjs';
 
 const SOURCE_INDICES = [82, 1, 49, 2, 81, 4, 18, 3, 17];
+const SHORT_SOURCE_INDICES = [6, 7, 19, 20, 33, 50, 51];
 const LANDSCAPE = { width: 1920, height: 1080, framesPerSecond: 30 };
 const PORTRAIT = { width: 1080, height: 1920, framesPerSecond: 30 };
 const mp4 = input => Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from('ftypisom'), Buffer.from(String(input))]);
@@ -34,7 +36,7 @@ function wavHash(index) {
   return wavHashes.get(index);
 }
 
-function fixture(indices = SOURCE_INDICES, profile = LANDSCAPE) {
+function fixture(indices = SOURCE_INDICES, profile = LANDSCAPE, format = 'long') {
   const sourceEpisodeId = randomUUID(); const episodeId = randomUUID();
   const audioBindings = Array.from({ length: 96 }, (_, offset) => ({ sceneId: randomUUID(), audio: { sha256: wavHash(offset + 1) } }));
   const audioBatchId = randomUUID(); const audioPacketSha256 = hash('fixture-original-audio-packet');
@@ -52,8 +54,8 @@ function fixture(indices = SOURCE_INDICES, profile = LANDSCAPE) {
     remoteRequest: { provider: 'fal-ai', transport: 'huggingface-router', requestId: `request-${indices[offset]}`,
       responsePath: `/fal-ai/wan/requests/request-${indices[offset]}/response` } })).reverse();
   const packet = { schemaVersion: 1, type: 'selected-assembly', id: randomUUID(), episodeId, sourceEpisodeId,
-    manifest: { schemaVersion: 1, episodeId, format: 'long', audioMode: 'nonverbal', durationSeconds: indices.length * 7.5,
-      maxRenderBytes: 512 * 1024 * 1024, ...profile, editorialSha256: hash('editorial'), snapshotSha256: hash('snapshot'), scenes },
+    manifest: { schemaVersion: 1, episodeId, format, audioMode: 'nonverbal', durationSeconds: indices.length * 7.5,
+      maxRenderBytes: episodeLimits(format).maxRenderBytes, ...profile, editorialSha256: hash('editorial'), snapshotSha256: hash('snapshot'), scenes },
     sources, audioBindings, audioArtifact: { artifactId: 21, runId: 11, repository: 'Giomaster/ytfun', commitSha: 'b'.repeat(40),
       batchId: audioBatchId, packetSha256: audioPacketSha256, manifestSha256: packetHash(audioReceipt) } };
   return { packet, audioReceipt };
@@ -224,6 +226,42 @@ test('selected packets preserve exact destination order, parent bindings, launch
   }
 });
 
+test('native short packets bind the exact format cap and destination limits while retaining all 96 parent audio bindings', () => {
+  const limits = episodeLimits('short');
+  assert.deepEqual([limits.maxScenes, limits.maxDurationSeconds, limits.maxRenderBytes], [12, 180, 100 * 1024 * 1024]);
+  for (const profile of [PORTRAIT, LANDSCAPE]) {
+    for (const indices of [[96], SHORT_SOURCE_INDICES, [...Array.from({ length: 11 }, (_, offset) => offset + 1), 96]]) {
+      const { packet } = fixture(indices, profile, 'short'); const packed = packSelectedAssemblyPacket(packet);
+      assert.deepEqual(validateSelectedAssemblyPacket(packet), packet);
+      assert.deepEqual(unpackSelectedAssemblyPacket(packed.encoded, launch(packet)), packet);
+      assert.equal(packet.manifest.maxRenderBytes, limits.maxRenderBytes);
+      assert.equal(packet.manifest.durationSeconds, indices.length * 7.5);
+      assert.equal(packet.audioBindings.length, 96);
+      const wrongCap = structuredClone(packet); wrongCap.manifest.maxRenderBytes = 512 * 1024 * 1024;
+      assert.throws(() => packSelectedAssemblyPacket(wrongCap));
+      assert.throws(() => unpackSelectedAssemblyPacket(unsafeEnvelope(wrongCap), launch(wrongCap)), /differs/);
+    }
+  }
+  const { packet: long } = fixture(Array.from({ length: 96 }, (_, offset) => offset + 1));
+  assert.equal(validateSelectedAssemblyPacket(long).manifest.durationSeconds, 720);
+  long.manifest.maxRenderBytes = limits.maxRenderBytes;
+  assert.throws(() => packSelectedAssemblyPacket(long), undefined, 'A short cap cannot replace the exact long manifest contract');
+  const { packet: tooManyScenes } = fixture(Array.from({ length: 13 }, (_, offset) => offset + 1), PORTRAIT, 'short');
+  assert.throws(() => packSelectedAssemblyPacket(tooManyScenes), undefined, '13 short scenes exceed the destination limit even below 180 seconds');
+  const { packet: short } = fixture(SHORT_SOURCE_INDICES, PORTRAIT, 'short');
+  for (const mutate of [
+    value => { value.manifest.durationSeconds = limits.maxDurationSeconds + 1; },
+    value => { value.manifest.durationSeconds = limits.maxDurationSeconds; },
+    value => { value.manifest.maxRenderBytes = limits.maxRenderBytes - 1; },
+    value => { value.manifest.format = 'unknown'; },
+    value => { value.manifest.scenes[0].durationSeconds = 7.25; },
+  ]) {
+    const invalid = structuredClone(short); mutate(invalid);
+    assert.throws(() => packSelectedAssemblyPacket(invalid));
+    assert.throws(() => unpackSelectedAssemblyPacket(unsafeEnvelope(invalid), launch(invalid)), /differs/);
+  }
+});
+
 test('selected packets reject clones, mismatched mappings, unsafe retrieval and changed exact manifest contracts', () => {
   const mutations = [
     p => { p.sources[1].sha256 = p.sources[0].sha256; }, p => { p.sources[1].assetId = p.sources[0].assetId; },
@@ -293,6 +331,30 @@ test('nine landscape originals use GET-only recovery and original WAV indices in
     download: h.calls.download, commands: h.calls.commands.length, upload: h.calls.upload }, before, 'The same owned run cannot recover or upload the batch a second time');
 });
 
+test('seven native short sources retain original WAV indices and the 100 MiB master cap', async t => {
+  const { packet, audioReceipt } = fixture(SHORT_SOURCE_INDICES, PORTRAIT, 'short');
+  const c = await context(t, packet); const h = harness(packet, audioReceipt, { mockAudio: true });
+  const result = await runSelectedAssemblyWorker({ env: c.env, ...h });
+  assert.equal(result.status, 'completed'); assert.equal(result.scenes, 7);
+  assert.equal(h.calls.audio, 1); assert.equal(h.calls.upload, 1);
+  assert.deepEqual(h.calls.recover, SHORT_SOURCE_INDICES.map(index => `request-${index}`));
+  assert.equal(h.calls.fetch.length, 3 * 7);
+  assert.equal(h.calls.commands.filter(call => call.binary === 'ffmpeg').length, 8);
+  assert.equal(h.receipt.master.durationSeconds, 52.5);
+  assert.ok(h.receipt.master.sizeBytes <= episodeLimits('short').maxRenderBytes);
+
+  const oversizedContext = await context(t, packet); const oversized = harness(packet, audioReceipt, { mockAudio: true });
+  const runner = async (binary, args) => {
+    const result = await oversized.runner(binary, args);
+    if (binary === 'ffmpeg' && basename(args.at(-1)) === 'master.mp4') {
+      await truncate(args.at(-1), episodeLimits('short').maxRenderBytes + 1);
+    }
+    return result;
+  };
+  await assert.rejects(runSelectedAssemblyWorker({ env: oversizedContext.env, ...oversized, runner }), /\[master-verification\]/);
+  assert.equal(oversized.calls.upload, 0, 'An oversized short master cannot leave the worker as a success artifact');
+});
+
 for (const outcome of ['getFailure', 'pending', 'wrongHash', 'wrongRequest', 'shortSource']) {
   test(`selected assembly stops after one ${outcome} without resubmission, looping or a success artifact`, async t => {
     const { packet, audioReceipt } = fixture(); const c = await context(t, packet);
@@ -317,51 +379,57 @@ for (const outcome of ['unownedAudio', 'corruptWavIndex']) {
 }
 
 // The owner's machine never executes media checks. Only GitHub Actions runs this integration.
-test('CI FFmpeg assembles nine complete originals into a 67.5-second landscape master with full AAC audio',
-  { skip: process.env.GITHUB_ACTIONS !== 'true', timeout: 480000 }, async t => {
-    const { packet } = fixture(); const c = await context(t, packet);
-    const originals = new Map(); const generated = join(c.directory, 'ci-originals'); await mkdir(generated);
-    const colors = ['red', 'green', 'blue', 'yellow', 'magenta', 'cyan', 'orange', 'purple', 'lime'];
-    for (const [offset, scene] of packet.manifest.scenes.entries()) {
-      const source = packet.sources.find(item => item.assetId === scene.visual.assetId);
-      const filename = join(generated, `${source.sourceIndex}.mp4`);
-      await mediaCommand('ffmpeg', ['-nostdin', '-v', 'error', '-f', 'lavfi', '-i', `color=c=${colors[offset]}:s=72x128:r=30:d=7.5`,
-        '-an', '-c:v', 'libx264', '-preset', 'ultrafast', '-threads', '1', '-pix_fmt', 'yuv420p', '-t', '7.5', '-n', filename]);
-      const bytes = await readFile(filename); originals.set(source.remoteRequest.requestId, bytes);
-      source.sha256 = hash(bytes); scene.visual.sha256 = source.sha256;
-    }
-    await writeFile(join(c.directory, 'studio/batches/selected-assembly-launch.json'), JSON.stringify(launch(packet)));
-    c.env.AI_MEOW_SELECTED_ASSEMBLY_PACKET = packSelectedAssemblyPacket(packet).encoded;
-    let outputDirectory; let uploadedReceipt; let recovered = 0; let uploaded = 0;
-    const runner = async (binary, args, options) => {
-      assert.ok(!args.some(arg => /stream_loop|aloop=|tpad=/.test(arg)));
-      return mediaCommand(binary, args, options);
-    };
-    const result = await runSelectedAssemblyWorker({ env: c.env, runner,
-      fetchImpl: async () => assert.fail('CI integration uses only fixture originals and WAVs'),
-      retrieveAudio: async (projection, { directory }) => {
-        assert.equal(projection.episodeId, packet.sourceEpisodeId); assert.deepEqual(projection.manifest.scenes, packet.audioBindings);
-        await mkdir(join(directory, 'audio'));
-        for (const source of packet.sources) await writeFile(join(directory, audioReceiptPath(source.sourceIndex)), mockWav(source.sourceIndex));
-      },
-      recover: async request => {
-        recovered++; return { remoteStatus: 'COMPLETED', requestId: request.requestId, blob: new Blob([originals.get(request.requestId)], { type: 'video/mp4' }) };
-      },
-      artifact: { uploadArtifact: async (name, files, root) => {
-        uploaded++; outputDirectory = root; assert.equal(name, `ai-meow-selected-assembly-${packet.id}`);
-        assert.deepEqual(files.map(file => basename(file)).sort(), ['master.mp4', 'render-manifest.json']);
-        uploadedReceipt = JSON.parse(await readFile(join(root, 'render-manifest.json')));
-        return { id: 31 };
-      } },
+for (const { title, indices, profile, format } of [
+  { title: 'nine complete originals into a 67.5-second landscape master', indices: SOURCE_INDICES, profile: LANDSCAPE, format: 'long' },
+  { title: 'seven native short originals into a 52.5-second portrait master', indices: SHORT_SOURCE_INDICES, profile: PORTRAIT, format: 'short' },
+]) {
+  test(`CI FFmpeg assembles ${title} with full AAC audio`,
+    { skip: process.env.GITHUB_ACTIONS !== 'true', timeout: 480000 }, async t => {
+      const { packet } = fixture(indices, profile, format); const c = await context(t, packet);
+      const originals = new Map(); const generated = join(c.directory, 'ci-originals'); await mkdir(generated);
+      const colors = ['red', 'green', 'blue', 'yellow', 'magenta', 'cyan', 'orange', 'purple', 'lime'];
+      for (const [offset, scene] of packet.manifest.scenes.entries()) {
+        const source = packet.sources.find(item => item.assetId === scene.visual.assetId);
+        const filename = join(generated, `${source.sourceIndex}.mp4`);
+        await mediaCommand('ffmpeg', ['-nostdin', '-v', 'error', '-f', 'lavfi', '-i', `color=c=${colors[offset]}:s=72x128:r=30:d=7.5`,
+          '-an', '-c:v', 'libx264', '-preset', 'ultrafast', '-threads', '1', '-pix_fmt', 'yuv420p', '-t', '7.5', '-n', filename]);
+        const bytes = await readFile(filename); originals.set(source.remoteRequest.requestId, bytes);
+        source.sha256 = hash(bytes); scene.visual.sha256 = source.sha256;
+      }
+      await writeFile(join(c.directory, 'studio/batches/selected-assembly-launch.json'), JSON.stringify(launch(packet)));
+      c.env.AI_MEOW_SELECTED_ASSEMBLY_PACKET = packSelectedAssemblyPacket(packet).encoded;
+      let outputDirectory; let uploadedReceipt; let recovered = 0; let uploaded = 0;
+      const runner = async (binary, args, options) => {
+        assert.ok(!args.some(arg => /stream_loop|aloop=|tpad=/.test(arg)));
+        return mediaCommand(binary, args, options);
+      };
+      const result = await runSelectedAssemblyWorker({ env: c.env, runner,
+        fetchImpl: async () => assert.fail('CI integration uses only fixture originals and WAVs'),
+        retrieveAudio: async (projection, { directory }) => {
+          assert.equal(projection.episodeId, packet.sourceEpisodeId); assert.deepEqual(projection.manifest.scenes, packet.audioBindings);
+          await mkdir(join(directory, 'audio'));
+          for (const source of packet.sources) await writeFile(join(directory, audioReceiptPath(source.sourceIndex)), mockWav(source.sourceIndex));
+        },
+        recover: async request => {
+          recovered++; return { remoteStatus: 'COMPLETED', requestId: request.requestId, blob: new Blob([originals.get(request.requestId)], { type: 'video/mp4' }) };
+        },
+        artifact: { uploadArtifact: async (name, files, root) => {
+          uploaded++; outputDirectory = root; assert.equal(name, `ai-meow-selected-assembly-${packet.id}`);
+          assert.deepEqual(files.map(file => basename(file)).sort(), ['master.mp4', 'render-manifest.json']);
+          uploadedReceipt = JSON.parse(await readFile(join(root, 'render-manifest.json')));
+          return { id: 31 };
+        } },
+      });
+      assert.equal(result.status, 'completed'); assert.equal(recovered, indices.length); assert.equal(uploaded, 1);
+      const master = join(outputDirectory, 'master.mp4');
+      const probe = JSON.parse((await mediaCommand('ffprobe', ['-v', 'error', '-show_format', '-show_streams', '-of', 'json', master])).stdout);
+      const verified = verifiedProbe(probe, packet.manifest.durationSeconds, profile);
+      assert.ok(Math.abs(verified.durationSeconds - packet.manifest.durationSeconds) < 0.1);
+      assert.ok(Math.abs(Number(probe.streams.find(stream => stream.codec_type === 'audio').duration) - packet.manifest.durationSeconds) < 0.1);
+      assert.ok(uploadedReceipt.master.sizeBytes <= episodeLimits(format).maxRenderBytes);
+      assert.equal(uploadedReceipt.master.sha256, hash(await readFile(master)));
+      assert.deepEqual(uploadedReceipt.sourceScenes.map(scene => scene.sourceIndex), indices);
+      assert.equal(uploadedReceipt.approved, false); assert.equal(uploadedReceipt.published, false);
+      await mediaCommand('ffmpeg', ['-nostdin', '-v', 'error', '-i', master, '-f', 'null', '-']);
     });
-    assert.equal(result.status, 'completed'); assert.equal(recovered, 9); assert.equal(uploaded, 1);
-    const master = join(outputDirectory, 'master.mp4');
-    const probe = JSON.parse((await mediaCommand('ffprobe', ['-v', 'error', '-show_format', '-show_streams', '-of', 'json', master])).stdout);
-    const verified = verifiedProbe(probe, 67.5, LANDSCAPE);
-    assert.ok(Math.abs(verified.durationSeconds - 67.5) < 0.1);
-    assert.ok(Math.abs(Number(probe.streams.find(stream => stream.codec_type === 'audio').duration) - 67.5) < 0.1);
-    assert.equal(uploadedReceipt.master.sha256, hash(await readFile(master)));
-    assert.deepEqual(uploadedReceipt.sourceScenes.map(scene => scene.sourceIndex), SOURCE_INDICES);
-    assert.equal(uploadedReceipt.approved, false); assert.equal(uploadedReceipt.published, false);
-    await mediaCommand('ffmpeg', ['-nostdin', '-v', 'error', '-i', master, '-f', 'null', '-']);
-  });
+}

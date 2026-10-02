@@ -12,15 +12,20 @@ Não há workflow_dispatch, chamadas pagas, POST ao provider ou nova imagem.
 Os testes usam mocks e uma integração real de montagem somente no GitHub CI;
 não executar testes, áudio ou render no laptop.
 
-## Montagem de uma seleção para vídeo regular
+## Montagem de uma seleção para Short ou vídeo regular
 
 `selected-assembly-packets.mjs` e `remote-selected-assembly-worker.mjs` aceitam
-de 1 a 96 fontes distintas existentes de 7,5 s, sem exigir o master de 96 cenas.
+fontes distintas existentes de 7,5 s, sem exigir o master de 96 cenas.
+O manifesto nativo `short` aceita de 1 a 12 cenas, até 180 s e exatamente
+100 MiB como limite de arquivo; `long` aceita de 1 a 96 cenas nesta rota,
+até 720 s e exatamente 512 MiB. A duração da seleção sempre é cenas × 7,5 s,
+portanto uma seleção `short` de 12 fontes tem 90 s, dentro do teto do domínio.
+O limite de arquivo é vinculado ao formato e conferido na saída pelo worker.
 O workflow `AI Meow Selected Assembly` só inicia quando muda deliberadamente
 `studio/batches/selected-assembly-launch.json` na branch de produção. Alterar
 o código executa CI e não relança mídia. O contrato legado abaixo permanece intacto.
 
-Crie um episódio próprio por `Studio.planEpisode` com `format: "long"`,
+Crie um episódio próprio por `Studio.planEpisode` com `format: "short"` ou `"long"`,
 `audioMode: "nonverbal"` e o canvas desejado; importe os vídeos/WAVs existentes por
 `Production.registerAsset` preservando a proveniência verdadeira e a linhagem
 nos registros da composição. Não edite o episódio de origem nem o store à mão.
