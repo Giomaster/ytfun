@@ -41,12 +41,17 @@ exportação TikTok em publicação.
    final e proveniência. Preserve evidência verdadeira de originalidade, fatos e
    exame efetivamente realizado; não invente audição ou visualização. A política
    única aceita imperfeições da IA e não exige validação humana ou aprovação estética.
-7. YouTube recebe upload oficial, declaração de conteúdo sintético, privacidade
+7. YouTube recebe upload pela rota configurada, declaração de conteúdo sintético, privacidade
    escolhida explicitamente e agendamento opcional. Facebook recebe cortes como
    Page Reels e episódios `long` pela Page Video API, com declaração de IA e
    confirmação de propriedade/processamento; o master exige permalink oficial.
    TikTok mantém exportação e uma rota REST de sessão experimental, habilitada
    explicitamente para a conta autorizada. Kwai recebe pacotes para envio manual.
+   [Zernio/TikTok](docs/tiktok-zernio.md) e [Zernio/YouTube](docs/youtube-zernio.md)
+   são rotas separadas autorizadas pelo dono, com público obrigatório e binding
+   dos IDs nativos. Não alteram a auditoria do aplicativo próprio nem migram
+   tentativas iniciadas. A seleção é explícita no env privado, depois de CI e
+   comprovação da conta; sem fallback silencioso entre providers.
 8. Métricas observadas e estimativas de custo orientam o próximo experimento.
    Métricas das plataformas ficam separadas; ausência de dado não vira zero.
 
@@ -299,6 +304,13 @@ vídeo são consultados no provider. A fila respeita esses mesmos gates.
 [TikTok](docs/tiktok-session-rest.md) tem uma rota experimental pela sessão privada,
 separada do OAuth/Direct Post oficial. Ela não presume aprovação do aplicativo,
 não automatiza login nem contorna desafios; publicação exige prova pública real.
+O provider Zernio exige preview real do dono e consentimento para o render exato:
+`ytfun_tiktok_zernio_consent_record` registra essa evidência e interações,
+sem substituir a aprovação técnica nem inventar visualização.
+`ytfun_zernio_delivery_migrate` move apenas claims públicos não iniciados,
+preservando horário, mídia e histórico. Resultados incertos continuam na rota
+original; `ytfun_tiktok_publication_sync` e `ytfun_youtube_publication_sync`
+selecionam a reconciliação pelo recibo persistido, nunca pelo provider atual.
 Kwai internacional fica como pacote para o criador. Não foi confirmada uma API pública de postagem para Kwai
 internacional; APIs do Kuaishou chinês não são tratadas como compatíveis.
 Métricas manuais aceitam as quatro plataformas, mantendo valores e fontes

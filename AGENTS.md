@@ -122,14 +122,20 @@ Read the policy for modes, shared generation, repetition and cadence decisions.
   separately, use RemoteBatch/Production for imports and recover unknown outcomes
   without blindly repeating mutations. Never hand-edit the canonical store.
 - All AI Meow sends target PUBLIC visibility on the authorized AI Meow account
-  through the owned API. No private/unlisted, browser posting or third-party
-  fallback. Synthetic disclosure and platform/account preflight remain required.
+  through the configured API. Giovanni explicitly authorized Zernio for TikTok
+  and YouTube; it is a separate opt-in provider route, not an audit override or
+  implicit fallback. Facebook stays on the owned Graph integration. No private,
+  unlisted or browser posting. Synthetic disclosure and account preflight remain required.
 - YouTube OAuth is separate from public API audit approval. Facebook targets its
   authorized Page and verifies processing/ownership. TikTok's private session REST
-  experiment is separate from official Direct Post; follow
+  experiment is separate from official Direct Post and Zernio; follow
   `studio/docs/tiktok-session-rest.md`, keep cookies outside Git, stop on challenges
   and unknown post outcomes. Kwai exports for manual use until an authorized route
   exists; mainland Kuaishou is not evidence for international Kwai.
+- Zernio's two free connections are reserved for AI Meow TikTok and YouTube.
+  Read `studio/docs/tiktok-zernio.md` and `studio/docs/youtube-zernio.md`.
+  Preserve old attempts and explicitly migrate only proved unstarted deliveries.
+  Never assert provider-required owner preview/consent from an unobserved render.
 - Scheduled operations, exports, uploads and processing are not confirmed public
   publications. Reconcile exact receipts, visibility and account before success.
   Channel cadence counts all formats/projects and reservations; read/update via

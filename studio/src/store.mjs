@@ -53,6 +53,20 @@ function validateState(state) {
       cycles.add(cycle);
     }
   }
+  if (state.zernioConsents !== undefined) {
+    if (!Array.isArray(state.zernioConsents)) throw new Error('Invalid Zernio consent collection');
+    const keys = new Set();
+    for (const item of state.zernioConsents) {
+      const key = `${item?.episodeId}:${item?.accountId}:${item?.renderSha256}:${item?.reviewHash}`;
+      if (!item || keys.has(key) || typeof item.episodeId !== 'string' || !/^[1-9]\d{0,63}$/.test(item.accountId ?? '') ||
+          !/^[a-f0-9]{64}$/.test(item.renderSha256 ?? '') || !/^[a-f0-9]{64}$/.test(item.reviewHash ?? '') ||
+          item.attestation?.renderSha256 !== item.renderSha256 || item.attestation?.contentPreviewConfirmed !== true ||
+          item.attestation?.expressConsentGiven !== true || item.attestation?.previewWitness !== 'owner' || item.attestation?.consentSource !== 'owner_explicit' ||
+          !/^[a-f0-9]{64}$/.test(item.attestation?.evidenceSha256 ?? '') || !Number.isFinite(Date.parse(item.attestation?.recordedAt)) ||
+          !['allow_comment', 'allow_duet', 'allow_stitch'].every(k => typeof item.interactionSettings?.[k] === 'boolean')) throw new Error('Invalid exact owner preview/consent evidence');
+      keys.add(key);
+    }
+  }
   if (state.productionBatches !== undefined) {
     if (!Array.isArray(state.productionBatches)) throw new Error('Invalid production batch collection');
     const ids = new Set();

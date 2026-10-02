@@ -66,7 +66,7 @@ export function createCloudTokenVerifier(config, { keySet = createRemoteJWKSet(c
 
 export function requiredToolScope(name, { readOnly = false } = {}) {
   if (readOnly) return 'ytfun/read';
-  if (['ytfun_youtube_publish', 'ytfun_facebook_publish', 'ytfun_tiktok_publish', 'ytfun_delivery_enqueue', 'ytfun_delivery_run_due'].includes(name)) return 'ytfun/publish';
+  if (['ytfun_youtube_publish', 'ytfun_facebook_publish', 'ytfun_tiktok_publish', 'ytfun_delivery_enqueue', 'ytfun_delivery_run_due', 'ytfun_zernio_delivery_migrate', 'ytfun_tiktok_zernio_consent_record'].includes(name)) return 'ytfun/publish';
   return 'ytfun/write';
 }
 

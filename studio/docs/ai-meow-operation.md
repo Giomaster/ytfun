@@ -367,6 +367,20 @@ Não peça aprovação humana de cada vídeo nem use qualidade estética como bl
 Verifique conta, capacidade técnica e estado real da integração; agenda,
 exportação ou upload em processamento não comprovam publicação pública.
 
+Giovanni autorizou explicitamente Zernio para TikTok e YouTube em 02/10/2026.
+Facebook permanece na API Graph própria. As duas conexões gratuitas do Zernio
+atendem essas contas; não contratar plano, adicionar outras contas pagas ou mudar
+billing por consequência dessa integração. Kwai não consta da integração pública
+documentada do Zernio e continua com arquivos para o dono.
+As rotas preservam os mesmos hashes, direitos, conta, exclusões, histórico e cadência.
+Não alterar a auditoria do app próprio do Google para representar o provider.
+Migrar apenas entregas comprovadamente não iniciadas pela API do domínio; recibos
+incertos da rota anterior continuam reservados e são reconciliados por GET.
+Confirmações específicas exigidas pelo provider precisam ser verdadeiras: no
+TikTok/Zernio, preview do dono e consentimento explícito são dados do contrato
+do provider, não aprovação estética nem campos a marcar automaticamente a partir
+de `renderWatched:false`. Registrar o impedimento concreto se essa condição faltar.
+
 Use registros compartilhados para demandas e acervo e registros separados de
 publicação por rede. Coordene gravações e evite executores concorrentes na mesma
 entrega. Confirme por recibo/status; reconcilie resultados incertos antes de

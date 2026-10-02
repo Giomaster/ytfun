@@ -34,7 +34,7 @@ export class DeliveryQueue {
     if (plan.reviewHash !== expectedReviewHash) throw new Error('Episode changed since review.');
     if (!plan.ready && !plan.readyToExport) throw new Error(plan.reasons.join(' '));
     return this.store.transaction(state => {
-      if (platform === 'youtube') assertYouTubeConnected(state, { YTFUN_YOUTUBE_GRANT_ID: plan.youtubeGrantId ?? 'legacy' });
+      if (platform === 'youtube' && plan.deliveryMode !== 'zernio') assertYouTubeConnected(state, { YTFUN_YOUTUBE_GRANT_ID: plan.youtubeGrantId ?? 'legacy' });
       state.deliveries ??= [];
       const existing = state.deliveries.find(item => item.episodeId === episodeId && item.platform === platform &&
         item.privacy === privacy &&
@@ -44,8 +44,9 @@ export class DeliveryQueue {
       if (!episode || episodeReviewHash(episode) !== expectedReviewHash || episode.approval?.reviewHash !== expectedReviewHash || episode.render?.sha256 !== plan.render.sha256) throw new Error('Reviewed media changed while enqueueing.');
       const delivery = { id: randomUUID(), episodeId, platform, accountId: plan.accountId, reviewHash: expectedReviewHash,
         renderSha256: plan.render.sha256, privacy, ...(platform === 'youtube' ? { madeForKids } : {}), dueAt,
-        mode: ['youtube', 'facebook'].includes(platform) ? 'official_api' : platform === 'tiktok' && privacy === 'public' ? 'experimental_session_rest' : 'creator_export',
-        ...(platform === 'youtube' ? { apiData: youtubeApiData({ authorized: true, grantId: plan.youtubeGrantId ?? 'legacy', now: this.now() }) } : {}),
+        mode: plan.deliveryMode ?? (['youtube', 'facebook'].includes(platform) ? 'official_api' : platform === 'tiktok' && privacy === 'public' ? 'experimental_session_rest' : 'creator_export'),
+        ...(plan.deliveryMode === 'zernio' ? { providerAccountId: plan.providerAccountId, bindingSha256: plan.bindingSha256 } : {}),
+        ...(platform === 'youtube' && plan.deliveryMode !== 'zernio' ? { apiData: youtubeApiData({ authorized: true, grantId: plan.youtubeGrantId ?? 'legacy', now: this.now() }) } : {}),
         status: 'queued', createdAt: new Date(this.now()).toISOString() };
       state.deliveries.push(delivery);
       return { delivery, warning: 'Cadence and authorization are checked again when due. Queued time is not a provider-confirmed schedule.' };
@@ -62,6 +63,31 @@ export class DeliveryQueue {
     });
   }
 
+  /** Explicit route migration; never resets or replaces an externally started attempt. */
+  async migrateUnstartedToZernio({ deliveryId, expectedMode, expectedReviewHash, reason }) {
+    if (!['official_api', 'experimental_session_rest'].includes(expectedMode) || !/^[a-f0-9]{64}$/.test(expectedReviewHash ?? '') || typeof reason !== 'string' || !reason.trim() || reason.length > 1000) throw new Error('Explicit old route, fingerprint and migration reason are required.');
+    const snapshot = (await this.store.read()).deliveries?.find(item => item.id === deliveryId);
+    if (!snapshot || !this.publisher.zernioSelected(snapshot.platform)) throw new Error('The selected Zernio route is required.');
+    const identity = await this.publisher.zernioAdapter(snapshot.platform).verifyAccount();
+    return this.store.transaction(async state => {
+      const item = state.deliveries?.find(entry => entry.id === deliveryId);
+      if (!item || !(item.status === 'queued' || item.status === 'attention' && item.phase === 'preflight') ||
+          !['youtube', 'tiktok'].includes(item.platform) || item.privacy !== 'public' || item.mode !== expectedMode ||
+          item.reviewHash !== expectedReviewHash || !validTime(item.dueAt) || item.publicationId || state.deliveries.some(entry => entry.status === 'running') ||
+          state.publications.some(p => p.deliveryId === item.id || p.episodeId === item.episodeId && p.platform === item.platform)) throw new Error('Only a proved unstarted exact public delivery may change provider.');
+      const plan = await this.publisher.plan(state, { episodeId: item.episodeId, platform: item.platform, privacy: 'public' }, Math.max(this.now(), Date.parse(item.dueAt)));
+      if (plan.deliveryMode !== 'zernio' || plan.accountId !== item.accountId || plan.accountId !== identity.accountId || plan.providerAccountId !== identity.providerAccountId ||
+          plan.reviewHash !== item.reviewHash || plan.render?.sha256 !== item.renderSha256 || !/^[a-f0-9]{64}$/.test(plan.bindingSha256 ?? '')) throw new Error('Migration account binding or reviewed media changed.');
+      item.providerHistory ??= [];
+      item.providerHistory.push({ at: new Date(this.now()).toISOString(), mode: item.mode, ...(item.apiData ? { apiData: item.apiData } : {}), reason: reason.trim(), previousStatus: item.status,
+        ...(item.phase ? { phase: item.phase } : {}), ...(item.error ? { error: item.error } : {}) });
+      delete item.apiData;
+      Object.assign(item, { mode: 'zernio', providerAccountId: plan.providerAccountId, bindingSha256: plan.bindingSha256, status: 'queued', updatedAt: new Date(this.now()).toISOString() });
+      delete item.phase; delete item.error;
+      return { delivery: item, warning: 'Due time preserved; eligibility, provider consent and cadence are rechecked before dispatch.' };
+    });
+  }
+
   async reconcile({ deliveryId, workerStopped, confirmedBy, evidence }) {
     if (workerStopped !== true || typeof confirmedBy !== 'string' || !confirmedBy.trim() || typeof evidence !== 'string' || !evidence.trim()) throw new Error('Confirm the original worker is stopped and supply operator reconciliation evidence.');
     return this.store.transaction(state => {
@@ -74,7 +100,8 @@ export class DeliveryQueue {
         return { delivery, reason: 'Stopped claim had no publication reservation. Closed without retrying any operation.' };
       }
       const publication = matches[0];
-      if (delivery.platform === 'youtube' && (delivery.apiData?.grantId ?? delivery.grantId ?? 'legacy') !== (publication?.apiData?.grantId ?? publication?.grantId ?? 'legacy')) throw new Error('Reconcile only a receipt from the same YouTube grant generation.');
+      if (delivery.platform === 'youtube' && delivery.mode !== 'zernio' && (delivery.apiData?.grantId ?? delivery.grantId ?? 'legacy') !== (publication?.apiData?.grantId ?? publication?.grantId ?? 'legacy')) throw new Error('Reconcile only a receipt from the same YouTube grant generation.');
+      if (delivery.mode === 'zernio' && (publication?.route !== 'zernio' || publication?.providerAccountId !== delivery.providerAccountId || publication?.bindingSha256 !== delivery.bindingSha256)) throw new Error('Reconcile only the original provider account binding.');
       if (matches.length !== 1 || !publication || publication.episodeId !== delivery.episodeId || publication.platform !== delivery.platform || publication.accountId !== delivery.accountId || publication.reviewHash !== delivery.reviewHash || publication.renderSha256 !== delivery.renderSha256 || !['uploaded', 'processing', 'scheduled', 'published', 'exported', 'failed'].includes(publication.status)) throw new Error('Reconcile the exact provider publication first; this operation never guesses an unknown outcome or resets a task for retry.');
       Object.assign(delivery, { status: 'completed', publicationId: publication.id, outcome: publication.status, reconciledBy: confirmedBy.trim(), reconciliationEvidence: evidence.trim(), updatedAt: new Date(this.now()).toISOString() });
       return { delivery };
@@ -96,13 +123,15 @@ export class DeliveryQueue {
         (cadenceExceptionId !== undefined && candidate.cadenceExceptionId !== cadenceExceptionId)) return { blocked: true, reason: 'The due delivery differs from the explicitly requested delivery or cadence exception; no claim was made.' };
     if (!execute) return { execute: false, delivery: candidate, plan: await this.publisher.preflight({ episodeId: candidate.episodeId, platform: candidate.platform, privacy: candidate.privacy,
       ...(candidate.cadenceExceptionId ? { cadenceExceptionId: candidate.cadenceExceptionId, deliveryId: candidate.id } : {}) }) };
+    const selectedRoute = this.publisher.zernioSelected?.(candidate.platform) ? 'zernio' : (['youtube', 'facebook'].includes(candidate.platform) ? 'official_api' : candidate.platform === 'tiktok' && candidate.privacy === 'public' ? 'experimental_session_rest' : 'creator_export');
+    if (candidate.mode !== selectedRoute) return { blocked: true, reason: 'Selected provider changed; explicitly migrate only an unstarted delivery.' };
     const claimed = await this.store.transaction(current => {
       if (current.deliveries?.some(item => item.status === 'running')) return null;
       const item = current.deliveries?.find(entry => entry.id === candidate.id);
       if (item?.status !== 'queued' || Date.parse(item.dueAt) > this.now() ||
           (expectedDeliveryId !== undefined && item.id !== expectedDeliveryId) ||
           (cadenceExceptionId !== undefined && item.cadenceExceptionId !== cadenceExceptionId)) return null;
-      if (item.platform === 'youtube') {
+      if (item.platform === 'youtube' && item.mode !== 'zernio') {
         const grantId = this.publisher.youtubeGrantId ?? 'legacy';
         assertYouTubeConnected(current, { YTFUN_YOUTUBE_GRANT_ID: grantId });
         if ((item.apiData?.grantId ?? 'legacy') !== grantId) {
@@ -120,7 +149,8 @@ export class DeliveryQueue {
     try {
       const plan = await this.publisher.preflight({ episodeId: claimed.episodeId, platform: claimed.platform, privacy: claimed.privacy,
         ...(claimed.cadenceExceptionId ? { cadenceExceptionId: claimed.cadenceExceptionId, deliveryId: claimed.id } : {}) });
-      if (claimed.platform === 'youtube' && (claimed.apiData?.grantId ?? 'legacy') !== (plan.youtubeGrantId ?? 'legacy')) throw new Error('Delivery consent generation changed.');
+      if (claimed.platform === 'youtube' && claimed.mode !== 'zernio' && (claimed.apiData?.grantId ?? 'legacy') !== (plan.youtubeGrantId ?? 'legacy')) throw new Error('Delivery consent generation changed.');
+      if (claimed.mode === 'zernio' && (plan.deliveryMode !== 'zernio' || plan.providerAccountId !== claimed.providerAccountId || plan.bindingSha256 !== claimed.bindingSha256)) throw new Error('Delivery provider account binding changed.');
       if (plan.accountId !== claimed.accountId || plan.reviewHash !== claimed.reviewHash || plan.render?.sha256 !== claimed.renderSha256) throw new Error('Delivery identity or reviewed content changed.');
       if (!plan.ready && !plan.readyToExport && !plan.publication) throw new Error('Delivery preflight no longer permits the operation.');
       const input = { episodeId: claimed.episodeId, expectedReviewHash: claimed.reviewHash, privacy: claimed.privacy, madeForKids: claimed.madeForKids, execute: true, deliveryId: claimed.id };

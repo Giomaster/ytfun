@@ -11,6 +11,8 @@ import { assertYouTubeConnected, youtubeApiData, youtubeBlocked } from './youtub
 import { TikTokWeb } from './tiktok-web.mjs';
 import { privateSessionFile } from './tiktok-session.mjs';
 import { approvalReviewIsValid } from './review-policy.mjs';
+import { TikTokZernio, validateTikTokZernioAttestation, validateTikTokZernioRender } from './tiktok-zernio.mjs';
+import { YouTubeZernio, safeZernioYouTubePermalink } from './youtube-zernio.mjs';
 
 const DAY_MS = 86_400_000;
 const DEFAULT_MAX_BYTES = 250 * 1024 * 1024;
@@ -24,7 +26,7 @@ function nonempty(value) {
 function verifyDeliveryClaim(state, deliveryId, plan, { privacy, madeForKids } = {}) {
   if (deliveryId === undefined) return;
   const delivery = state.deliveries?.find(item => item.id === deliveryId && item.status === 'running');
-  if (plan.platform === 'youtube') {
+  if (plan.platform === 'youtube' && plan.deliveryMode !== 'zernio') {
     assertYouTubeConnected(state, { YTFUN_YOUTUBE_GRANT_ID: plan.youtubeGrantId ?? 'legacy' });
     if ((delivery?.apiData?.grantId ?? 'legacy') !== (plan.youtubeGrantId ?? 'legacy')) throw new Error('Delivery claim belongs to another YouTube consent generation.');
   }
@@ -32,6 +34,15 @@ function verifyDeliveryClaim(state, deliveryId, plan, { privacy, madeForKids } =
       delivery.accountId !== plan.accountId || delivery.reviewHash !== plan.reviewHash ||
       delivery.renderSha256 !== plan.render.sha256 || delivery.privacy !== privacy ||
       (plan.platform === 'youtube' && delivery.madeForKids !== madeForKids)) throw new Error('Delivery claim no longer matches this exact publication.');
+  if (delivery.mode !== (plan.deliveryMode ?? (['youtube', 'facebook'].includes(plan.platform) ? 'official_api' : 'creator_export')) ||
+      (plan.deliveryMode === 'zernio' && (delivery.providerAccountId !== plan.providerAccountId || delivery.bindingSha256 !== plan.bindingSha256))) {
+    throw new Error('Delivery provider or account binding changed; explicitly migrate an unstarted claim.');
+  }
+}
+
+function providerBinding(env, platform) {
+  try { return JSON.parse(env[`ZERNIO_${platform.toUpperCase()}_BINDING_JSON`] ?? 'null'); }
+  catch { return null; }
 }
 
 function publicEnabled(env) {
@@ -210,7 +221,7 @@ async function responseJson(response) {
 }
 
 export class Publisher {
-  constructor(store, { env = process.env, fetchImpl = fetch, youtubeAuth, facebook, facebookPageVideo, tiktok } = {}) {
+  constructor(store, { env = process.env, fetchImpl = fetch, youtubeAuth, facebook, facebookPageVideo, tiktok, tiktokZernio, youtubeZernio } = {}) {
     this.store = store;
     this.env = env;
     this.youtubeGrantId = env.YTFUN_YOUTUBE_GRANT_ID || 'legacy';
@@ -219,10 +230,17 @@ export class Publisher {
     this.facebook = facebook ?? new FacebookReels({ env, fetchImpl });
     this.facebookPageVideo = facebookPageVideo ?? new FacebookPageVideo({ env, fetchImpl });
     this.tiktok = tiktok ?? new TikTokWeb({ env, fetchImpl });
+    this.tiktokZernio = tiktokZernio ?? new TikTokZernio({ env, fetchImpl, binding: providerBinding(env, 'tiktok') });
+    this.youtubeZernio = youtubeZernio ?? new YouTubeZernio({ env, fetchImpl, binding: providerBinding(env, 'youtube'),
+      verifyPublishedVideo: args => this.verifyZernioYouTubeVideo(args) });
   }
 
+  zernioSelected(platform) { return ['tiktok', 'youtube'].includes(platform) && this.env[`YTFUN_${platform.toUpperCase()}_ZERNIO_PUBLISH_ENABLED`] === 'true'; }
+
+  zernioAdapter(platform) { return platform === 'tiktok' ? this.tiktokZernio : this.youtubeZernio; }
+
   capabilities() {
-    return { platforms: distributionCapabilities(this.env), youtubeAuth: this.youtubeAuth.readiness(), facebook: this.facebook.readiness(), facebookPageVideo: this.facebookPageVideo.readiness(), tiktokSession: this.tiktok.readiness() };
+    return { platforms: distributionCapabilities(this.env), youtubeAuth: this.youtubeAuth.readiness(), facebook: this.facebook.readiness(), facebookPageVideo: this.facebookPageVideo.readiness(), tiktokSession: this.tiktok.readiness(), tiktokZernio: this.tiktokZernio.readiness(), youtubeZernio: this.youtubeZernio.readiness() };
   }
 
   async plan(state, { episodeId, platform, privacy = 'private', publishAt, cadenceExceptionId, deliveryId }, now = Date.now()) {
@@ -233,7 +251,9 @@ export class Publisher {
     const project = state.projects.find((item) => item.id === episode.projectId);
     if (!project) throw new Error('Episode project not found.');
     const reasons = [];
-    if (platform === 'youtube' && youtubeBlocked(state, { YTFUN_YOUTUBE_GRANT_ID: this.youtubeGrantId })) reasons.push('YouTube is disconnected; obtain fresh consent and restart the MCP.');
+    const zernio = this.zernioSelected(platform);
+    const providerReadiness = zernio ? this.zernioAdapter(platform).readiness() : null;
+    if (platform === 'youtube' && !zernio && youtubeBlocked(state, { YTFUN_YOUTUBE_GRANT_ID: this.youtubeGrantId })) reasons.push('YouTube is disconnected; obtain fresh consent and restart the MCP.');
     if (project.status !== 'active') reasons.push('The episode project must be active before publishing or exporting.');
     if (project.mode === 'factual' && (!Array.isArray(episode.factualSources) || episode.factualSources.length === 0)) {
       reasons.push('Factual content requires claim-specific sources before publishing.');
@@ -255,7 +275,7 @@ export class Publisher {
     }
     let render;
     try {
-      render = await verifiedFile(this.store.directory, episode.render?.path, episode.render?.sha256, maxFileBytes(this.env), { noSymlinks: ['facebook', 'tiktok'].includes(platform) });
+      render = await verifiedFile(this.store.directory, episode.render?.path, episode.render?.sha256, maxFileBytes(this.env), { noSymlinks: zernio || ['facebook', 'tiktok'].includes(platform) });
       if (path.extname(render.absolutePath).toLowerCase() !== '.mp4') reasons.push('Publishing requires an MP4 render.');
     } catch {
       reasons.push('Render is missing, changed, outside studio storage, or exceeds the upload limit.');
@@ -315,8 +335,8 @@ export class Publisher {
     const cadence = exception ? cadenceIssues(state, project, platform, accountId, effectiveAt, { waiveFrequency: true }) : ordinaryCadence;
     if (platform === 'youtube') {
       if (!nonempty(accountId)) reasons.push('YOUTUBE_CHANNEL_ID must identify the intended channel.');
-      if (!this.youtubeAuth.readiness().ready) reasons.push('YouTube requires OAuth credentials with youtube.upload and youtube.readonly scopes.');
-      if ((privacy !== 'private' || publishAt !== undefined) && !publicEnabled(this.env)) {
+      if (!zernio && !this.youtubeAuth.readiness().ready) reasons.push('YouTube requires OAuth credentials with youtube.upload and youtube.readonly scopes.');
+      if (!zernio && (privacy !== 'private' || publishAt !== undefined) && !publicEnabled(this.env)) {
         reasons.push('External visibility requires confirmed YouTube API audit and explicit public publishing enablement.');
       }
       reasons.push(...cadence);
@@ -332,7 +352,7 @@ export class Publisher {
       reasons.push(...readiness.reasons, ...cadence, ...validate(episode.render ?? {}).reasons);
     }
     const tiktokSessionPost = platform === 'tiktok' && privacy === 'public';
-    if (tiktokSessionPost) {
+    if (tiktokSessionPost && !zernio) {
       const readiness = this.tiktok.readiness();
       if (readiness.accountId !== accountId) reasons.push('TikTok account configuration changed.');
       reasons.push(...readiness.reasons, ...cadence);
@@ -340,12 +360,22 @@ export class Publisher {
           !Number.isInteger(episode.render.width) || !Number.isInteger(episode.render.height) || episode.render.width < 256 || episode.render.height < 256 ||
           render?.sizeBytes > 8 * 1024 * 1024) reasons.push('The experimental TikTok route currently supports reviewed clips up to 180 seconds and 8 MiB with explicit dimensions.');
     }
+    if (zernio) {
+      if (privacy !== 'public' || publishAt !== undefined) reasons.push('Zernio requires immediate public publication; due times remain in the local queue.');
+      if (providerReadiness.accountId !== accountId) reasons.push('Zernio native account binding changed.');
+      reasons.push(...providerReadiness.reasons, ...(platform === 'tiktok' ? cadence : []));
+      if (platform === 'tiktok') {
+        reasons.push(...validateTikTokZernioRender({ ...episode.render, format: 'mp4', sizeBytes: render?.sizeBytes }).reasons);
+        const consent = state.zernioConsents?.find(item => item.episodeId === episode.id && item.accountId === accountId && item.reviewHash === reviewHash && item.renderSha256 === episode.render?.sha256);
+        if (!validateTikTokZernioAttestation(consent?.attestation, episode.render?.sha256)) reasons.push('Zernio requires actual owner preview and express consent for this exact TikTok render.');
+      } else if (episode.render?.durationSeconds < 1 || episode.render?.durationSeconds > providerReadiness.maxDurationSeconds) reasons.push('YouTube Zernio video duration exceeds the configured adapter profile.');
+    }
     const caption = metadata ? [metadata.title, metadata.description].filter(nonempty).join('\n\n') : '';
     if (platform === 'facebook' && caption.length > 5000) reasons.push('Facebook caption exceeds the studio 5000-character limit.');
     if (platform === 'tiktok' && caption.length > 2200) reasons.push('TikTok caption exceeds 2200 UTF-16 code units.');
     return {
       episodeId: episode.id, projectId: project.id, platform, accountId, reviewHash, privacy,
-      ...(platform === 'youtube' ? { youtubeGrantId: this.youtubeGrantId } : {}),
+      ...(platform === 'youtube' && !zernio ? { youtubeGrantId: this.youtubeGrantId } : {}),
       ...(platform === 'facebook' ? { facebookVideoKind } : {}),
       uploadPrivacy: publishAt === undefined ? privacy : 'private', effectiveAt,
       ...(publishAt !== undefined ? { publishAt: effectiveAt } : {}),
@@ -353,7 +383,7 @@ export class Publisher {
       reasons: [...new Set(reasons)], cadence: { warnings: cadence,
         ...(exception ? { exceptionId: exception.id, waivedWarnings: ordinaryCadence.filter(reason => !cadence.includes(reason)) } : {}) }, disclosure: { synthetic: true },
       capabilities: { directPost: ['youtube', 'facebook'].includes(platform) || tiktokSessionPost, requiresCreatorPublishing: ['tiktok', 'kwai'].includes(platform) && !tiktokSessionPost },
-      ...(tiktokSessionPost ? { deliveryMode: 'experimental_session_rest' } : {}),
+      ...(zernio ? { deliveryMode: 'zernio', providerAccountId: providerReadiness.providerAccountId, bindingSha256: providerReadiness.bindingSha256 ?? providerBinding(this.env, platform)?.evidenceSha256 } : tiktokSessionPost ? { deliveryMode: 'experimental_session_rest' } : {}),
       ...(render ? { render: { path: render.relativePath, sha256: episode.render.sha256, sizeBytes: render.sizeBytes, durationSeconds: episode.render.durationSeconds,
         ...(tiktokSessionPost ? { width: episode.render.width, height: episode.render.height } : {}) } } : {}),
       ...(metadata ? { metadata, caption } : {}), ...(existing ? { publication: existing } : {}),
@@ -423,8 +453,8 @@ export class Publisher {
           if (!record) throw new Error('Publication reservation not found.');
           // A late provider response must not recreate deleted API/user data.
           if (record.platform === 'youtube' && record.localOnly) return record;
-          if (record.platform === 'youtube' && youtubeBlocked(state, { YTFUN_YOUTUBE_GRANT_ID: this.youtubeGrantId })) return record;
-          if (record.platform === 'youtube' && (record.apiData?.grantId ?? 'legacy') !== this.youtubeGrantId) throw new Error('The publication belongs to another YouTube grant; a stale worker cannot replace its receipt.');
+          if (record.platform === 'youtube' && record.route !== 'zernio' && youtubeBlocked(state, { YTFUN_YOUTUBE_GRANT_ID: this.youtubeGrantId })) return record;
+          if (record.platform === 'youtube' && record.route !== 'zernio' && (record.apiData?.grantId ?? 'legacy') !== this.youtubeGrantId) throw new Error('The publication belongs to another YouTube grant; a stale worker cannot replace its receipt.');
           Object.assign(record, changes, { updatedAt: new Date().toISOString() });
           const episode = state.episodes.find((item) => item.id === record.episodeId);
           if (episode && ['youtube', 'facebook', 'tiktok'].includes(record.platform) && record.status !== 'exported') {
@@ -439,7 +469,120 @@ export class Publisher {
     }
   }
 
+  /** Record the provider's actual owner preview/consent, without changing editorial review. */
+  async recordTikTokZernioConsent({ episodeId, expectedReviewHash, attestation, interactionSettings }) {
+    if (!['allow_comment', 'allow_duet', 'allow_stitch'].every(key => typeof interactionSettings?.[key] === 'boolean')) throw new Error('Explicit TikTok interaction selections are required.');
+    return this.store.transaction(state => {
+      const episode = state.episodes.find(item => item.id === episodeId);
+      if (!episode || episodeReviewHash(episode) !== expectedReviewHash || !validateTikTokZernioAttestation(attestation, episode.render?.sha256)) throw new Error('Actual owner preview and consent must match this exact final media.');
+      state.zernioConsents ??= [];
+      const record = { episodeId, reviewHash: expectedReviewHash, accountId: this.env.TIKTOK_ACCOUNT_ID,
+        renderSha256: episode.render.sha256, attestation: { renderSha256: attestation.renderSha256,
+          contentPreviewConfirmed: true, expressConsentGiven: true, previewWitness: 'owner', consentSource: 'owner_explicit',
+          evidenceSha256: attestation.evidenceSha256, recordedAt: attestation.recordedAt },
+        interactionSettings: Object.fromEntries(['allow_comment', 'allow_duet', 'allow_stitch'].map(key => [key, interactionSettings[key]])) };
+      const prior = state.zernioConsents.find(item => item.episodeId === episodeId && item.accountId === record.accountId && item.renderSha256 === record.renderSha256 && item.reviewHash === expectedReviewHash);
+      if (prior) {
+        if (JSON.stringify(prior) !== JSON.stringify(record)) throw new Error('An existing provider consent cannot be silently replaced.');
+        return prior;
+      }
+      state.zernioConsents.push(record);
+      return record;
+    });
+  }
+
+  async verifyZernioYouTubeVideo({ videoId, channelId }) {
+    if (!/^[A-Za-z0-9_-]{11}$/.test(videoId ?? '') || channelId !== this.env.YOUTUBE_CHANNEL_ID) throw new Error('Exact YouTube video and intended channel are required.');
+    const token = await this.youtubeAuth.getAccessToken({ requiredScopes: [YOUTUBE_READONLY_SCOPE] });
+    const response = await this.fetch(`${GOOGLE_API}/youtube/v3/videos?part=snippet,status&id=${videoId}`, {
+      headers: { Authorization: `Bearer ${token}` }, redirect: 'error', signal: AbortSignal.timeout(30_000) });
+    const item = (await responseJson(response))?.items?.find(entry => entry.id === videoId);
+    return { confirmed: response.ok && item?.snippet?.channelId === channelId && item?.status?.privacyStatus === 'public' && item?.status?.uploadStatus === 'processed',
+      videoId, channelId: item?.snippet?.channelId ?? null, privacyStatus: item?.status?.privacyStatus ?? null, uploadStatus: item?.status?.uploadStatus ?? null };
+  }
+
+  async zernioReceipt(publicationId, receipt) {
+    return this.store.transaction(state => {
+      const item = state.publications.find(p => p.id === publicationId && p.route === 'zernio');
+      if (!item || receipt?.route !== 'zernio' || receipt.publicationId !== item.id || receipt.accountId !== item.accountId ||
+          receipt.providerAccountId !== item.providerAccountId || receipt.renderSha256 !== item.renderSha256) throw new Error('Zernio receipt does not match the exact reserved publication.');
+      if (item.providerPostId && receipt.providerPostId && item.providerPostId !== receipt.providerPostId) throw new Error('Provider post receipt changed.');
+      if (receipt.providerPostId !== undefined && !/^[a-f0-9]{24}$/.test(receipt.providerPostId)) throw new Error('Invalid provider post ID.');
+      const published = receipt.status === 'published' && receipt.confirmed === true && receipt.privacy === 'public' && Number.isFinite(Date.parse(receipt.publishedAt));
+      const expectedUrl = item.platform === 'youtube' ? safeZernioYouTubePermalink(receipt.url, receipt.videoId) : `https://www.tiktok.com/@${this.env.TIKTOK_ACCOUNT_HANDLE}/video/${receipt.postId}`;
+      if (published && (!expectedUrl || receipt.url !== expectedUrl || (item.platform === 'youtube' ? !/^[A-Za-z0-9_-]{11}$/.test(receipt.videoId ?? '') || receipt.nativeVisibilityVerified !== true : !/^[1-9]\d{0,63}$/.test(receipt.postId ?? '')))) throw new Error('Invalid confirmed public URL.');
+      // Store only bounded identifiers and states; never storage URLs or raw provider bodies.
+      if (item.status !== 'published') item.status = published ? 'published' : ['uploading', 'uploaded', 'processing', 'unknown', 'failed'].includes(receipt.status) ? receipt.status : 'unknown';
+      if (receipt.providerPostId) item.providerPostId = receipt.providerPostId;
+      if (typeof receipt.phase === 'string' && /^[a-z-]{1,32}$/.test(receipt.phase)) item.providerPhase = receipt.phase;
+      if (published) Object.assign(item, { url: receipt.url, publishedAt: receipt.publishedAt, effectiveAt: receipt.publishedAt,
+        providerPrivacyStatus: 'public', verifiedAt: new Date().toISOString(), error: null,
+        ...(item.platform === 'youtube' ? { videoId: receipt.videoId } : { postId: receipt.postId }) });
+      if (item.status === 'unknown') item.error = 'Zernio outcome requires GET-only reconciliation; never repeat the mutation automatically.';
+      item.updatedAt = new Date().toISOString();
+      const episode = state.episodes.find(e => e.id === item.episodeId);
+      if (episode) episode.status = item.status === 'unknown' ? 'publishing' : item.status === 'failed' ? 'approved' : item.status;
+      return item;
+    });
+  }
+
+  async publishZernio({ episodeId, platform, privacy, publishAt, expectedReviewHash, madeForKids, execute = false, deliveryId }) {
+    if (!this.zernioSelected(platform) || privacy !== 'public' || publishAt !== undefined || typeof execute !== 'boolean' ||
+        (platform === 'youtube' && typeof madeForKids !== 'boolean')) throw new Error('Zernio requires the selected public route and explicit audience/execute choices.');
+    const initial = await this.preflight({ episodeId, platform, privacy });
+    if (expectedReviewHash !== initial.reviewHash) throw new Error('Reviewed media changed.');
+    if (!execute) return { ...initial, execute: false };
+    if (initial.publication) return { duplicate: true, publication: initial.publication };
+    if (!initial.ready) throw new Error(initial.reasons.join(' '));
+    const adapter = this.zernioAdapter(platform);
+    const identity = await adapter.verifyAccount();
+    if (identity.accountId !== initial.accountId || identity.providerAccountId !== initial.providerAccountId || !Number.isFinite(identity.maxDurationSeconds) || initial.render.durationSeconds > identity.maxDurationSeconds) throw new Error('Zernio account identity or duration is not permitted.');
+    let media, consent;
+    const reserved = await this.store.transaction(async state => {
+      const plan = await this.plan(state, { episodeId, platform, privacy });
+      if (plan.publication) return { duplicate: true, publication: plan.publication };
+      if (!plan.ready || plan.reviewHash !== expectedReviewHash || plan.accountId !== identity.accountId || plan.providerAccountId !== identity.providerAccountId) throw new Error('Zernio reviewed identity or cadence changed.');
+      verifyDeliveryClaim(state, deliveryId, plan, { privacy, madeForKids });
+      if (platform === 'tiktok') {
+        consent = state.zernioConsents?.find(item => item.episodeId === episodeId && item.accountId === plan.accountId && item.reviewHash === expectedReviewHash && item.renderSha256 === plan.render.sha256);
+        if (!validateTikTokZernioAttestation(consent?.attestation, plan.render.sha256)) throw new Error('Zernio requires the actual owner preview and express consent for this final TikTok media.');
+      }
+      const file = await verifiedFile(this.store.directory, plan.render.path, plan.render.sha256, maxFileBytes(this.env), { noSymlinks: true });
+      media = await facebookMediaBody(this.store.directory, file, plan.render.sha256, maxFileBytes(this.env));
+      const publication = { id: randomUUID(), episodeId, projectId: plan.projectId, platform, accountId: plan.accountId,
+        providerAccountId: plan.providerAccountId, bindingSha256: plan.bindingSha256, reviewHash: plan.reviewHash,
+        renderSha256: plan.render.sha256, route: 'zernio', privacy: 'public', status: 'uploading',
+        effectiveAt: plan.effectiveAt, createdAt: new Date().toISOString(), ...(platform === 'youtube' ? { madeForKids } : {}), ...(deliveryId ? { deliveryId } : {}) };
+      state.publications.push(publication);
+      state.episodes.find(e => e.id === episodeId).status = 'publishing';
+      return { publication, plan };
+    });
+    if (reserved.duplicate) return reserved;
+    const { publication, plan } = reserved;
+    try {
+      const receipt = await adapter.upload({ media, caption: platform === 'youtube' ? plan.metadata.description : plan.caption,
+        title: plan.metadata.title, tags: plan.metadata.tags, madeForKids, render: { ...plan.render, format: 'mp4' }, publicationId: publication.id,
+        ...(platform === 'tiktok' ? { attestation: consent.attestation, interactionSettings: consent.interactionSettings } : {}),
+        onReceipt: r => this.zernioReceipt(publication.id, r) });
+      return { publication: await this.zernioReceipt(publication.id, receipt) };
+    } catch {
+      return { publication: await this.updatePublication(publication.id, { status: 'unknown', error: 'Zernio outcome requires GET-only reconciliation; no automatic retry.' }) };
+    }
+  }
+
+  async syncZernio({ publicationId }) {
+    const publication = (await this.store.read()).publications.find(p => p.id === publicationId && p.route === 'zernio');
+    if (!publication?.providerPostId || !['youtube', 'tiktok'].includes(publication.platform)) throw new Error('Original Zernio provider post receipt is required; no mutation is retried.');
+    const adapter = this.zernioAdapter(publication.platform), readiness = adapter.readiness();
+    if (readiness.accountId !== publication.accountId || readiness.providerAccountId !== publication.providerAccountId ||
+        providerBinding(this.env, publication.platform)?.evidenceSha256 !== publication.bindingSha256) throw new Error('Reconcile with the original provider account binding.');
+    const receipt = await adapter.status({ providerPostId: publication.providerPostId, publicationId: publication.id, renderSha256: publication.renderSha256,
+      ...(publication.postId ? { postId: publication.postId } : {}) });
+    return { verified: receipt.confirmed === true && receipt.status === 'published', publication: await this.zernioReceipt(publication.id, receipt) };
+  }
+
   async publishYouTube({ episodeId, privacy = 'private', publishAt, expectedReviewHash, madeForKids, execute = false, deliveryId }) {
+    if (this.zernioSelected('youtube')) return this.publishZernio({ episodeId, platform: 'youtube', privacy, publishAt, expectedReviewHash, madeForKids, execute, deliveryId });
     if (typeof madeForKids !== 'boolean') throw new Error('madeForKids must be explicitly selected as a boolean.');
     if (typeof execute !== 'boolean') throw new Error('execute must be a boolean.');
     const initial = await this.preflight({ episodeId, platform: 'youtube', privacy, publishAt });
@@ -533,6 +676,7 @@ export class Publisher {
   async syncPublication({ publicationId }) {
     const state = await this.store.read();
     const publication = state.publications.find(item => item.id === publicationId && item.platform === 'youtube');
+    if (publication?.route === 'zernio') return (await this.syncZernio({ publicationId })).publication;
     if (publication && (publication.apiData?.grantId ?? 'legacy') !== this.youtubeGrantId) throw new Error('Use the original YouTube grant to verify this receipt; another generation cannot replace its data.');
     if (!publication?.videoId) throw new Error('A confirmed YouTube video ID is required; unknown uploads without receipts require operator reconciliation.');
     if (!this.youtubeAuth.readiness().ready || publication.accountId !== this.env.YOUTUBE_CHANNEL_ID) throw new Error('Use the original channel and valid OAuth token to verify this publication.');
@@ -562,6 +706,7 @@ export class Publisher {
   }
 
   async publishTikTok({ episodeId, expectedReviewHash, privacy, execute = false, deliveryId }) {
+    if (this.zernioSelected('tiktok')) return this.publishZernio({ episodeId, platform: 'tiktok', privacy, expectedReviewHash, execute, deliveryId });
     if (privacy !== 'public' || typeof execute !== 'boolean') throw new Error('TikTok REST publishing requires public visibility and an explicit execute flag.');
     const initial = await this.preflight({ episodeId, platform: 'tiktok', privacy });
     if (!nonempty(expectedReviewHash) || initial.reviewHash !== expectedReviewHash) throw new Error('TikTok reviewed fingerprint changed.');
@@ -608,6 +753,8 @@ export class Publisher {
   }
 
   async syncTikTok({ publicationId }) {
+    const found = (await this.store.read()).publications.find(p => p.id === publicationId);
+    if (found?.platform === 'tiktok' && found.route === 'zernio') return this.syncZernio({ publicationId });
     const publication = (await this.store.read()).publications.find(p => p.id === publicationId && p.platform === 'tiktok' && p.route === 'experimental_session_rest');
     if (!publication?.creationId || publication.accountId !== this.env.TIKTOK_ACCOUNT_ID) throw new Error('The original TikTok account and REST receipt are required.');
     const receipt = await this.tiktok.status({ creationId: publication.creationId, projectId: publication.providerProjectId, postId: publication.postId, videoId: publication.videoId });
@@ -619,6 +766,7 @@ export class Publisher {
   }
 
   async resumeTikTokAllocation({ publicationId, expectedReviewHash, allocationPath, allocationSha256, observedBy, evidence }) {
+    if (this.zernioSelected('tiktok')) throw new Error('Keep the original session attempt intact; recovery mutations require its original route and explicit maintenance.');
     // Narrow operator recovery: the adapter's own target guard rejected before
     // transfer/commit/post. This is never a retry of an uncertain remote mutation.
     if (!nonempty(observedBy) || !nonempty(evidence) || !/^[a-f0-9]{64}$/.test(allocationSha256 ?? '')) throw new Error('Observed allocation recovery evidence is required.');

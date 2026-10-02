@@ -124,7 +124,19 @@ export function distributionCapabilities(env = {}) {
       ],
       sources: sources('kwai'),
     },
-  ]);
+  ].map(item => {
+    if (!['youtube', 'tiktok'].includes(item.platform) || env[`YTFUN_${item.platform.toUpperCase()}_ZERNIO_PUBLISH_ENABLED`] !== 'true') return item;
+    const required = ['ZERNIO_API_KEY', `ZERNIO_${item.platform.toUpperCase()}_ACCOUNT_ID`, `ZERNIO_${item.platform.toUpperCase()}_BINDING_JSON`,
+      item.platform === 'youtube' ? 'YOUTUBE_CHANNEL_ID' : 'TIKTOK_ACCOUNT_ID'];
+    const missing = missingVariables(env, required);
+    return { platform: item.platform, deliveryMode: 'zernio', directPost: true, exportSupported: true,
+      requiresCreatorPublishing: false, authorizationVerified: false, configuration: { complete: missing.length === 0, missing },
+      readyForPreflight: missing.length === 0, publicPostingEnabled: true,
+      blockers: [...missing.map(name => `Configure ${name}.`), 'Verify the exact connected provider/native account binding and current posting eligibility.',
+        ...(item.platform === 'tiktok' ? ['The provider requires actual owner content preview and express consent for the exact render.'] : [])],
+      restrictions: ['Public-only provider route; uploads and processing are not confirmed publications. Unknown mutations are reconciled by GET only.'],
+      sources: [`https://docs.zernio.com/platforms/${item.platform}`] };
+  }));
 }
 
 function relativeMediaPath(value, extension) {
