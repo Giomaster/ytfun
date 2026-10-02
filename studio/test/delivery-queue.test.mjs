@@ -31,6 +31,22 @@ async function fixture(t, { outcome = 'uploaded', throws = false } = {}) {
 
 function args(extra = {}) { return { episodeId: 'episode', platform: 'youtube', privacy: 'private', madeForKids: false, expectedReviewHash: HASH, dueAt: new Date(NOW).toISOString(), ...extra }; }
 
+test('a TikTok worker dispatches only its platform and a prior completed export does not replace a public delivery', async t => {
+  const f = await fixture(t);
+  await f.queue.enqueue(args({ platform: 'tiktok', privacy: 'private' }));
+  await f.queue.runDue({ platform: 'tiktok', execute: true });
+  f.queue.publisher.preflight = async ({ platform }) => ({ platform, accountId: 'channel', reviewHash: HASH, render: { sha256: RENDER }, ready: true, reasons: [] });
+  let tiktokPosts = 0;
+  f.queue.publisher.publishTikTok = async () => { tiktokPosts++; return { publication: { id: 'real-post', status: 'processing' } }; };
+  await f.queue.enqueue(args());
+  const queued = await f.queue.enqueue(args({ platform: 'tiktok', privacy: 'public' }));
+  assert.equal(queued.duplicate, undefined); assert.equal(queued.delivery.mode, 'experimental_session_rest');
+  const sent = await f.queue.runDue({ platform: 'tiktok', execute: true });
+  assert.equal(sent.delivery.platform, 'tiktok'); assert.equal(tiktokPosts, 1);
+  assert.equal((await f.queue.list()).find(d => d.platform === 'youtube').status, 'queued');
+  assert.equal((await f.queue.runDue({ platform: 'tiktok', execute: true })).idle, true);
+});
+
 test('a preflight released after disconnect cannot recreate a queued receipt or account binding', async t => {
   const f = await fixture(t);
   const original = f.queue.publisher.preflight;

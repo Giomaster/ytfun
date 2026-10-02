@@ -51,3 +51,5 @@ O dispatcher admite entregas TikTok públicas por esta rota e mantém os pacotes
 exportados distintos. A cadência é compartilhada por toda a conta e por todos os
 formatos. Não há fallback de publicação pelo navegador. Os testes de autenticação,
 isolamento de credenciais, reservas e falhas são executados só no GitHub Actions.
+Workers por rede chamam `ytfun_delivery_run_due` com sua plataforma explícita;
+um pacote exportado concluído não ocupa o lugar de uma entrega pública posterior.

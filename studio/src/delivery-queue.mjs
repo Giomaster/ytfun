@@ -37,6 +37,7 @@ export class DeliveryQueue {
       if (platform === 'youtube') assertYouTubeConnected(state, { YTFUN_YOUTUBE_GRANT_ID: plan.youtubeGrantId ?? 'legacy' });
       state.deliveries ??= [];
       const existing = state.deliveries.find(item => item.episodeId === episodeId && item.platform === platform &&
+        item.privacy === privacy &&
         (ACTIVE.has(item.status) || (item.reviewHash === expectedReviewHash && item.status === 'completed')));
       if (existing) return { duplicate: true, delivery: existing };
       const episode = state.episodes.find(item => item.id === episodeId);
@@ -80,12 +81,13 @@ export class DeliveryQueue {
     });
   }
 
-  async runDue({ execute = false } = {}) {
+  async runDue({ execute = false, platform } = {}) {
     if (typeof execute !== 'boolean') throw new Error('execute must be a boolean.');
+    if (platform !== undefined && !PLATFORMS.includes(platform)) throw new Error('Unsupported delivery platform filter.');
     const state = await this.store.read();
     // A worker crash leaves an inspectable record. Never infer it is safe to repeat a request.
     if (state.deliveries?.some(item => item.status === 'running')) return { blocked: true, reason: 'A running delivery needs operator reconciliation before the worker continues.' };
-    const candidate = (state.deliveries ?? []).filter(item => item.status === 'queued' && Date.parse(item.dueAt) <= this.now())
+    const candidate = (state.deliveries ?? []).filter(item => item.status === 'queued' && (platform === undefined || item.platform === platform) && Date.parse(item.dueAt) <= this.now())
       .sort((a, b) => a.dueAt.localeCompare(b.dueAt) || a.id.localeCompare(b.id))[0];
     if (!candidate) return { idle: true };
     if (!execute) return { execute: false, delivery: candidate, plan: await this.publisher.preflight({ episodeId: candidate.episodeId, platform: candidate.platform, privacy: candidate.privacy }) };
