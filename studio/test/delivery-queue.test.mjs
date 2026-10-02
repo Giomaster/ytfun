@@ -31,6 +31,32 @@ async function fixture(t, { outcome = 'uploaded', throws = false } = {}) {
 
 function args(extra = {}) { return { episodeId: 'episode', platform: 'youtube', privacy: 'private', madeForKids: false, expectedReviewHash: HASH, dueAt: new Date(NOW).toISOString(), ...extra }; }
 
+function rescheduleClaim(delivery) {
+  return Object.fromEntries(['dueAt', 'platform', 'privacy', 'madeForKids', 'reviewHash', 'renderSha256', 'accountId', 'mode', 'providerAccountId', 'bindingSha256']
+    .map(key => [key, ['madeForKids', 'providerAccountId', 'bindingSha256'].includes(key) ? delivery[key] ?? null : delivery[key]]));
+}
+
+test('rescheduling a legacy YouTube claim preserves its original consent generation without uploading', async t => {
+  const f = await fixture(t);
+  const original = f.queue.publisher.preflight;
+  f.queue.publisher.youtubeGrantId = 'grant-A';
+  f.queue.publisher.preflight = async input => ({ ...await original(input), youtubeGrantId: f.queue.publisher.youtubeGrantId });
+  f.queue.publisher.plan = async (_state, input) => f.queue.publisher.preflight(input);
+  const delivery = (await f.queue.enqueue(args({ dueAt: new Date(NOW + 18 * 3_600_000).toISOString() }))).delivery;
+  const input = { deliveryId: delivery.id, expectedClaim: rescheduleClaim(delivery), dueAt: new Date(NOW).toISOString(), reason: 'Owner changed editorial timing; the original grant stays bound.' };
+  const retimed = await f.queue.rescheduleUnstarted(input);
+  assert.equal(retimed.id, delivery.id);
+  assert.deepEqual(retimed.apiData, delivery.apiData);
+  assert.equal(retimed.madeForKids, false);
+  assert.equal(retimed.rescheduleHistory.length, 1);
+  assert.equal(f.calls(), 0);
+  f.queue.publisher.youtubeGrantId = 'grant-B';
+  const before = await f.store.read();
+  await assert.rejects(f.queue.rescheduleUnstarted({ ...input, expectedClaim: rescheduleClaim(retimed), dueAt: new Date(NOW + 3_600_000).toISOString() }), /original YouTube consent generation/);
+  assert.deepEqual(await f.store.read(), before);
+  assert.equal(f.calls(), 0);
+});
+
 test('a TikTok worker dispatches only its platform and a prior completed export does not replace a public delivery', async t => {
   const f = await fixture(t);
   await f.queue.enqueue(args({ platform: 'tiktok', privacy: 'private' }));

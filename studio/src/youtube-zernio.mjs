@@ -56,9 +56,13 @@ function uploadUrls(data) {
       !Number.isInteger(data.expiresIn) || data.expiresIn < 1 || data.expiresIn > 3600) return null;
   const target = httpsUrl(data.uploadUrl);
   const publicUrl = httpsUrl(data.publicUrl);
-  if (!target || !/^[a-f0-9]{32}\.r2\.cloudflarestorage\.com$/.test(target.hostname) || !target.search ||
+  const objectPaths = target ? [`/${data.key}`, ...(/^\/[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}\//.test(target.pathname) ?
+    [`/${target.pathname.split('/')[1]}/${data.key}`] : [])] : [];
+  if (!target || !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.r2\.cloudflarestorage\.com$/.test(target.hostname) ||
+      !/^[a-f0-9]{64}$/i.test(target.searchParams.get('X-Amz-Signature') ?? '') ||
+      target.searchParams.getAll('X-Amz-Signature').length !== 1 ||
       !publicUrl || publicUrl.hostname !== 'media.zernio.com' || publicUrl.search || publicUrl.pathname !== `/${data.key}` ||
-      !target.pathname.endsWith(`/${data.key}`) || !/^\/[a-zA-Z0-9_-]+\/temp\/[a-zA-Z0-9_-]+\.mp4$/.test(target.pathname)) return null;
+      !objectPaths.includes(target.pathname)) return null;
   return { uploadUrl: target.href, publicUrl: publicUrl.href };
 }
 
@@ -125,11 +129,14 @@ export class YouTubeZernio {
     try {
       const response = await this.#fetch(`${BASE}${path}`, { method, redirect: 'error', signal: AbortSignal.timeout(30_000),
         headers: { Authorization: `Bearer ${this.#env.ZERNIO_API_KEY}`, ...headers }, ...(body !== undefined ? { body } : {}) });
-      if (response.redirected || !Number.isInteger(response.status)) return { ok: false, httpStatus: null };
-      if (!response.ok) { await response.body?.cancel().catch(() => {}); return { ok: false, httpStatus: response.status }; }
+      if (response.redirected || !Number.isInteger(response.status) || response.status < 100 || response.status > 599) {
+        await response.body?.cancel().catch(() => {});
+        return { ok: false, httpStatus: Number.isInteger(response.status) && response.status >= 100 && response.status <= 599 ? response.status : null, code: 'ZERNIO_REDIRECT_OR_STATUS_REJECTED' };
+      }
+      if (!response.ok) { await response.body?.cancel().catch(() => {}); return { ok: false, httpStatus: response.status, code: 'ZERNIO_HTTP_REJECTED' }; }
       const data = await boundedJson(response);
-      return { ok: data !== null, httpStatus: response.status, data };
-    } catch { return { ok: false, httpStatus: null }; }
+      return { ok: data !== null, httpStatus: response.status, code: data === null ? 'ZERNIO_RESPONSE_INVALID' : 'ZERNIO_HTTP_ACCEPTED', data };
+    } catch { return { ok: false, httpStatus: null, code: 'ZERNIO_TRANSPORT_UNCONFIRMED' }; }
   }
 
   async verifyAccount() {
@@ -168,24 +175,33 @@ export class YouTubeZernio {
     const preserve = async value => { if (onReceipt) await onReceipt(value); return value; };
     let phase = 'presign';
     let providerPostId;
+    let diagnostic = { code: 'ZERNIO_PRESIGN_REQUEST_PENDING', httpStatus: null };
     try {
       // A persisted intent precedes any mutation. There are no automatic POST/PUT retries.
-      await preserve(this.#receipt('uploading', phase, context));
+      await preserve(this.#receipt('uploading', phase, context, diagnostic));
       const presign = await this.#request('/media/presign', { method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ filename: `ai-meow-${publicationId}.mp4`, contentType: 'video/mp4', size: media.length }) });
+      diagnostic = { code: presign.code, httpStatus: presign.httpStatus };
+      await preserve(this.#receipt('uploading', phase, context, diagnostic));
       const urls = presign.ok ? uploadUrls(presign.data) : null;
-      if (!urls) return preserve(this.#receipt('unknown', phase, context, { error: 'YouTube Zernio did not confirm a safe upload target; no publish request was sent.' }));
+      if (!urls) return preserve(this.#receipt('unknown', phase, context, { ...diagnostic,
+        ...(presign.ok ? { code: 'ZERNIO_STORAGE_TARGET_REJECTED' } : {}), error: 'YouTube Zernio did not confirm a safe upload target; no publish request was sent.' }));
       phase = 'transfer';
-      await preserve(this.#receipt('uploading', phase, context));
+      diagnostic = { code: 'ZERNIO_TRANSFER_REQUEST_PENDING', httpStatus: null };
+      await preserve(this.#receipt('uploading', phase, context, diagnostic));
       let transferred;
       try {
         transferred = await this.#fetch(urls.uploadUrl, { method: 'PUT', redirect: 'error', signal: AbortSignal.timeout(120_000),
           headers: { 'Content-Type': 'video/mp4' }, body: media });
-      } catch { return preserve(this.#receipt('unknown', phase, context, { error: 'YouTube Zernio media transfer was not confirmed; no publish request was sent.' })); }
+      } catch { return preserve(this.#receipt('unknown', phase, context, { code: 'ZERNIO_TRANSPORT_UNCONFIRMED', httpStatus: null, error: 'YouTube Zernio media transfer was not confirmed; no publish request was sent.' })); }
+      diagnostic = { httpStatus: Number.isInteger(transferred.status) && transferred.status >= 100 && transferred.status <= 599 ? transferred.status : null,
+        code: transferred.redirected ? 'ZERNIO_REDIRECT_OR_STATUS_REJECTED' : transferred.ok ? 'ZERNIO_HTTP_ACCEPTED' : 'ZERNIO_HTTP_REJECTED' };
       await transferred.body?.cancel().catch(() => {});
-      if (transferred.redirected || !transferred.ok) return preserve(this.#receipt('unknown', phase, context, { error: 'YouTube Zernio media transfer was not confirmed; no publish request was sent.' }));
+      await preserve(this.#receipt('uploading', phase, context, diagnostic));
+      if (transferred.redirected || !transferred.ok || diagnostic.httpStatus === null) return preserve(this.#receipt('unknown', phase, context, { ...diagnostic, error: 'YouTube Zernio media transfer was not confirmed; no publish request was sent.' }));
       phase = 'create-post';
-      await preserve(this.#receipt('uploading', phase, context));
+      diagnostic = { code: 'ZERNIO_POST_REQUEST_PENDING', httpStatus: null };
+      await preserve(this.#receipt('uploading', phase, context, diagnostic));
       const result = await this.#request('/posts', { method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Idempotency-Key': publicationId },
         body: JSON.stringify({ content: caption, tags, publishNow: true,
@@ -194,15 +210,17 @@ export class YouTubeZernio {
           platforms: [{ platform: 'youtube', accountId: this.#binding.providerAccountId,
             platformSpecificData: { title, visibility: 'public', madeForKids, containsSyntheticMedia: true, categoryId: '24' } }] }) });
       const post = result.data?.post;
-      if (!result.ok || !id(post?._id)) return preserve(this.#receipt('unknown', phase, context, { error: 'YouTube Zernio did not return a durable post receipt; reconcile before any further mutation.' }));
+      diagnostic = { code: result.code, httpStatus: result.httpStatus };
+      if (!result.ok || !id(post?._id)) return preserve(this.#receipt('unknown', phase, context, { ...diagnostic,
+        ...(result.ok ? { code: 'ZERNIO_POST_RECEIPT_MISSING' } : {}), error: 'YouTube Zernio did not return a durable post receipt; reconcile before any further mutation.' }));
       providerPostId = post._id;
       // The provider post ID survives even a 207 or later failed GET/validation.
-      await preserve(this.#receipt('processing', phase, { ...context, providerPostId }));
-      if (!this.#postMatches(post, { providerPostId, ...context })) return preserve(this.#receipt('unknown', phase, { ...context, providerPostId }, { error: 'YouTube Zernio returned a post that did not match the exact publication intent.' }));
-      if (post.platforms[0].status === 'failed' || post.status === 'failed') return preserve(this.#receipt('failed', phase, { ...context, providerPostId }, { error: 'YouTube Zernio recorded a platform publishing failure; the provider post is retained.' }));
-      return preserve(this.#receipt('processing', phase, { ...context, providerPostId }));
+      await preserve(this.#receipt('processing', phase, { ...context, providerPostId }, diagnostic));
+      if (!this.#postMatches(post, { providerPostId, ...context })) return preserve(this.#receipt('unknown', phase, { ...context, providerPostId }, { ...diagnostic, code: 'ZERNIO_POST_BINDING_REJECTED', error: 'YouTube Zernio returned a post that did not match the exact publication intent.' }));
+      if (post.platforms[0].status === 'failed' || post.status === 'failed') return preserve(this.#receipt('failed', phase, { ...context, providerPostId }, { ...diagnostic, code: 'ZERNIO_PLATFORM_FAILURE', error: 'YouTube Zernio recorded a platform publishing failure; the provider post is retained.' }));
+      return preserve(this.#receipt('processing', phase, { ...context, providerPostId }, diagnostic));
     } catch {
-      return this.#receipt('unknown', phase, { ...context, ...(providerPostId ? { providerPostId } : {}) }, { error: 'YouTube Zernio operation or receipt persistence was not confirmed; reconcile without replaying mutations.' });
+      return this.#receipt('unknown', phase, { ...context, ...(providerPostId ? { providerPostId } : {}) }, { ...diagnostic, code: 'ZERNIO_RECEIPT_PERSISTENCE_UNCONFIRMED', error: 'YouTube Zernio operation or receipt persistence was not confirmed; reconcile without replaying mutations.' });
     }
   }
 

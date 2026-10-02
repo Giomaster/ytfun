@@ -93,6 +93,17 @@ function number(value, name, minimum, maximum = Infinity) {
   return value;
 }
 
+/** null removes the editorial count cap; only absent fields get legacy defaults. */
+export function normalizeProjectCadence(value, { defaults = false, prefix = 'cadence' } = {}) {
+  if (value === undefined && defaults) value = {};
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${prefix} must be an object`);
+  const min = defaults && !Object.hasOwn(value, 'minHoursBetweenPosts') ? 24 : value.minHoursBetweenPosts;
+  const max = defaults && !Object.hasOwn(value, 'maxPostsPerRollingDay') ? 1 : value.maxPostsPerRollingDay;
+  number(min, `${prefix}.minHoursBetweenPosts`, 0);
+  if (max !== null && (!Number.isSafeInteger(max) || max < 1)) throw new Error(`${prefix}.maxPostsPerRollingDay must be a positive safe integer or null`);
+  return { minHoursBetweenPosts: min, maxPostsPerRollingDay: max };
+}
+
 function calendarDay(value, name) {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) throw new Error(`${name} must be an ISO calendar date`);
   const [year, month, day] = value.split('-').map(Number);
@@ -342,11 +353,7 @@ export class Studio {
     rejectClientId(input);
     const mode = input.mode ?? 'fiction';
     if (!['fiction', 'factual'].includes(mode)) throw new Error('mode must be fiction or factual');
-    const cadence = {
-      minHoursBetweenPosts: number(input.cadence?.minHoursBetweenPosts ?? 24, 'minHoursBetweenPosts', 12),
-      maxPostsPerRollingDay: number(input.cadence?.maxPostsPerRollingDay ?? 1, 'maxPostsPerRollingDay', 1, 3),
-    };
-    if (!Number.isInteger(cadence.maxPostsPerRollingDay)) throw new Error('maxPostsPerRollingDay must be an integer');
+    const cadence = normalizeProjectCadence(input.cadence, { defaults: true });
     const budgetMonthlyUsd = input.budgetMonthlyUsd ?? null;
     if (budgetMonthlyUsd !== null) number(budgetMonthlyUsd, 'budgetMonthlyUsd', 0);
     if (input.costPolicy !== undefined && input.costPolicy !== 'free_first') throw new Error('costPolicy must be free_first');
@@ -365,22 +372,16 @@ export class Studio {
 
   async updateProjectCadence(input) {
     const projectId = text(input.projectId, 'projectId', 100);
-    const cadence = {
-      minHoursBetweenPosts: number(input.cadence?.minHoursBetweenPosts, 'minHoursBetweenPosts', 12),
-      maxPostsPerRollingDay: number(input.cadence?.maxPostsPerRollingDay, 'maxPostsPerRollingDay', 1, 3),
-    };
-    if (!Number.isInteger(cadence.maxPostsPerRollingDay)) throw new Error('maxPostsPerRollingDay must be an integer');
-    const expectedCadence = {
-      minHoursBetweenPosts: number(input.expectedCadence?.minHoursBetweenPosts, 'expectedCadence.minHoursBetweenPosts', 12),
-      maxPostsPerRollingDay: number(input.expectedCadence?.maxPostsPerRollingDay, 'expectedCadence.maxPostsPerRollingDay', 1, 3),
-    };
+    const cadence = normalizeProjectCadence(input.cadence);
+    const expectedCadence = normalizeProjectCadence(input.expectedCadence, { prefix: 'expectedCadence' });
     const reason = text(input.reason, 'reason');
     return this.store.transaction((state) => {
       const project = requireProject(state, projectId);
-      if (project.cadence.minHoursBetweenPosts !== expectedCadence.minHoursBetweenPosts || project.cadence.maxPostsPerRollingDay !== expectedCadence.maxPostsPerRollingDay) throw new Error('Project cadence changed; read the current policy before updating');
-      if (project.cadence.minHoursBetweenPosts === cadence.minHoursBetweenPosts && project.cadence.maxPostsPerRollingDay === cadence.maxPostsPerRollingDay) return project;
+      const previous = normalizeProjectCadence(project.cadence, { defaults: true });
+      if (previous.minHoursBetweenPosts !== expectedCadence.minHoursBetweenPosts || previous.maxPostsPerRollingDay !== expectedCadence.maxPostsPerRollingDay) throw new Error('Project cadence changed; read the current policy before updating');
+      if (previous.minHoursBetweenPosts === cadence.minHoursBetweenPosts && previous.maxPostsPerRollingDay === cadence.maxPostsPerRollingDay) return project;
       project.cadenceHistory ??= [];
-      project.cadenceHistory.push({ previous: { ...project.cadence }, next: { ...cadence }, reason, changedAt: new Date().toISOString() });
+      project.cadenceHistory.push({ previous, next: { ...cadence }, reason, changedAt: new Date().toISOString() });
       project.cadence = cadence;
       return project;
     });

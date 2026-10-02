@@ -62,13 +62,46 @@ test('cadence updates preserve publication records, audit the change and reject 
   assert.equal(unchanged.cadenceHistory.length, 1);
 });
 
-test('cadence updates cannot bypass the runtime frequency floor or rolling-day cap', async (t) => {
+test('owner cadence can remove the editorial spacing and count cap without changing unknown reservations', async (t) => {
+  const f = await fixture(t);
+  await f.store.transaction(state => state.publications.push({ id: randomUUID(), projectId: f.project.id, platform: 'tiktok', status: 'unknown', accountId: 'owned-channel', createdAt: new Date().toISOString() }));
+  const before = await f.store.read();
+  const input = { projectId: f.project.id, expectedCadence: f.project.cadence, cadence: { minHoursBetweenPosts: 0, maxPostsPerRollingDay: null }, reason: 'Owner authorizes multiple distinct beneficial works per dispatch; eighteen hours is a minimum presence target.' };
+  const changed = await f.studio.updateProjectCadence(input);
+  assert.deepEqual(changed.cadence, input.cadence);
+  assert.deepEqual(changed.cadenceHistory[0].previous, f.project.cadence);
+  assert.deepEqual(changed.cadenceHistory[0].next, input.cadence);
+  assert.deepEqual((await f.store.read()).publications, before.publications);
+  await assert.rejects(f.studio.updateProjectCadence(input), /cadence changed/);
+  const repeated = await f.studio.updateProjectCadence({ ...input, expectedCadence: input.cadence });
+  assert.equal(repeated.cadenceHistory.length, 1);
+  const limited = await f.studio.updateProjectCadence({ ...input, expectedCadence: input.cadence, cadence: { minHoursBetweenPosts: 0.5, maxPostsPerRollingDay: 4 } });
+  assert.deepEqual(limited.cadence, { minHoursBetweenPosts: 0.5, maxPostsPerRollingDay: 4 });
+  assert.equal(limited.cadenceHistory.length, 2);
+});
+
+test('cadence updates reject malformed policies rather than imposing an arbitrary editorial floor or cap', async (t) => {
   const f = await fixture(t);
   const input = { projectId: f.project.id, expectedCadence: f.project.cadence, reason: 'Frequency experiment' };
-  for (const cadence of [{ minHoursBetweenPosts: 11, maxPostsPerRollingDay: 2 }, { minHoursBetweenPosts: 18, maxPostsPerRollingDay: 4 }, { minHoursBetweenPosts: 18, maxPostsPerRollingDay: 1.5 }]) {
+  const invalid = [
+    ...[-1, null, NaN, Infinity, '0'].map(minHoursBetweenPosts => ({ minHoursBetweenPosts, maxPostsPerRollingDay: null })),
+    ...[0, -1, 1.5, Infinity, NaN, Number.MAX_SAFE_INTEGER + 1, '4', undefined].map(maxPostsPerRollingDay => ({ minHoursBetweenPosts: 0, maxPostsPerRollingDay })),
+    { maxPostsPerRollingDay: null }, null, [],
+  ];
+  for (const cadence of invalid) {
     await assert.rejects(f.studio.updateProjectCadence({ ...input, cadence }));
   }
+  await assert.rejects(f.studio.updateProjectCadence({ ...input, expectedCadence: { minHoursBetweenPosts: 24 }, cadence: { minHoursBetweenPosts: 0, maxPostsPerRollingDay: null } }));
   assert.deepEqual((await f.studio.listProjects())[0].cadence, f.project.cadence);
+});
+
+test('a legacy project with absent cadence fields keeps its effective defaults until an explicit compare-and-set update', async t => {
+  const f = await fixture(t);
+  await f.store.transaction(state => { delete state.projects[0].cadence; });
+  const changed = await f.studio.updateProjectCadence({ projectId: f.project.id, expectedCadence: { minHoursBetweenPosts: 24, maxPostsPerRollingDay: 1 },
+    cadence: { minHoursBetweenPosts: 0, maxPostsPerRollingDay: null }, reason: 'Explicit owner policy replaces historical defaults.' });
+  assert.deepEqual(changed.cadenceHistory[0].previous, { minHoursBetweenPosts: 24, maxPostsPerRollingDay: 1 });
+  assert.deepEqual(changed.cadence, { minHoursBetweenPosts: 0, maxPostsPerRollingDay: null });
 });
 
 test('asset review hashing retains the legacy wire format without a quality review and binds an added rejection', () => {
@@ -137,8 +170,14 @@ test('projects default to free-first with no fixed budget and conservative edito
   assert.equal(f.project.budgetMonthlyUsd, null);
   assert.equal(f.project.costPolicy, 'free_first');
   assert.deepEqual(f.project.cadence, { minHoursBetweenPosts: 24, maxPostsPerRollingDay: 1 });
-  await assert.rejects(f.studio.createProject({ ...projectInput, cadence: { minHoursBetweenPosts: 11 } }), /minHoursBetweenPosts/);
-  await assert.rejects(f.studio.createProject({ ...projectInput, cadence: { maxPostsPerRollingDay: 4 } }), /maxPostsPerRollingDay/);
+  assert.deepEqual((await f.studio.createProject({ ...projectInput, cadence: { minHoursBetweenPosts: 0 } })).cadence, { minHoursBetweenPosts: 0, maxPostsPerRollingDay: 1 });
+  assert.deepEqual((await f.studio.createProject({ ...projectInput, cadence: { maxPostsPerRollingDay: null } })).cadence, { minHoursBetweenPosts: 24, maxPostsPerRollingDay: null });
+  assert.deepEqual((await f.studio.createProject({ ...projectInput, cadence: { minHoursBetweenPosts: 11, maxPostsPerRollingDay: 4 } })).cadence, { minHoursBetweenPosts: 11, maxPostsPerRollingDay: 4 });
+  await assert.rejects(f.studio.createProject({ ...projectInput, cadence: { minHoursBetweenPosts: -1 } }), /minHoursBetweenPosts/);
+  await assert.rejects(f.studio.createProject({ ...projectInput, cadence: { maxPostsPerRollingDay: 0 } }), /maxPostsPerRollingDay/);
+  await assert.rejects(f.studio.createProject({ ...projectInput, cadence: { minHoursBetweenPosts: null } }), /minHoursBetweenPosts/);
+  await assert.rejects(f.studio.createProject({ ...projectInput, cadence: { maxPostsPerRollingDay: undefined } }), /maxPostsPerRollingDay/);
+  await assert.rejects(f.studio.createProject({ ...projectInput, cadence: null }), /object/);
   await assert.rejects(f.studio.createProject({ ...projectInput, id: 'client-id' }), /generated/);
 });
 

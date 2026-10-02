@@ -3,7 +3,7 @@ import { constants, createReadStream } from 'node:fs';
 import { lstat, mkdir, open, realpath, rename, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { episodeAssetHash, episodeReviewHash, validateEpisodeDerivation } from './domain.mjs';
+import { episodeAssetHash, episodeReviewHash, validateEpisodeDerivation, normalizeProjectCadence } from './domain.mjs';
 import { YouTubeAuth, YOUTUBE_UPLOAD_SCOPE, YOUTUBE_READONLY_SCOPE } from './oauth.mjs';
 import { FacebookPageVideo, FacebookReels, safeFacebookVideoPermalink, validateFacebookPageVideo, validateFacebookReel } from './facebook.mjs';
 import { distributionCapabilities, publicationPackage } from './distribution.mjs';
@@ -154,24 +154,20 @@ function metadataFor(episode) {
 }
 
 function cadenceIssues(state, project, platform, accountId, effectiveAt, { waiveFrequency = false } = {}) {
-  const minHours = project.cadence?.minHoursBetweenPosts ?? 24;
-  const maxPosts = project.cadence?.maxPostsPerRollingDay ?? 1;
-  if (!Number.isFinite(minHours) || minHours < 12 || !Number.isInteger(maxPosts) || maxPosts < 1 || maxPosts > 3) {
-    return ['Project cadence must have at least 12 hours between posts and at most three posts per rolling day.'];
-  }
+  let cadence;
+  try { cadence = normalizeProjectCadence(project.cadence, { defaults: true }); }
+  catch { return ['Project cadence requires nonnegative finite spacing and a positive integer count cap or explicit null.']; }
   const candidate = Date.parse(effectiveAt);
   const peers = state.publications.filter((entry) => entry.platform === platform && entry.accountId === accountId && RESERVED_STATUSES.has(entry.status));
   if (peers.some((entry) => !Number.isFinite(Date.parse(entry.effectiveAt ?? entry.createdAt)))) {
     return ['A channel publication has an invalid reservation time and requires reconciliation.'];
   }
   // Enforce the stricter policy of each involved project across their shared channel.
-  const limits = peers.map((entry) => state.projects.find((item) => item.id === entry.projectId)?.cadence ?? {});
-  if (limits.some((limit) => !Number.isFinite(limit.minHoursBetweenPosts ?? 24) || (limit.minHoursBetweenPosts ?? 24) < 12 ||
-      !Number.isInteger(limit.maxPostsPerRollingDay ?? 1) || (limit.maxPostsPerRollingDay ?? 1) < 1 || (limit.maxPostsPerRollingDay ?? 1) > 3)) {
-    return ['A shared-channel project has an invalid cadence policy and requires reconciliation.'];
-  }
-  const channelMinHours = Math.max(minHours, ...limits.map((limit) => limit.minHoursBetweenPosts ?? 24));
-  const channelMaxPosts = Math.min(maxPosts, ...limits.map((limit) => limit.maxPostsPerRollingDay ?? 1));
+  let limits;
+  try { limits = [cadence, ...peers.map(entry => normalizeProjectCadence(state.projects.find(item => item.id === entry.projectId)?.cadence, { defaults: true }))]; }
+  catch { return ['A shared-channel project has an invalid cadence policy and requires reconciliation.']; }
+  const channelMinHours = Math.max(...limits.map(limit => limit.minHoursBetweenPosts));
+  const channelMaxPosts = Math.min(...limits.map(limit => limit.maxPostsPerRollingDay === null ? Infinity : limit.maxPostsPerRollingDay));
   const times = peers.map((entry) => Date.parse(entry.effectiveAt ?? entry.createdAt));
   const reasons = [];
   if (!waiveFrequency && times.some((time) => Math.abs(time - candidate) < channelMinHours * 3_600_000)) {
@@ -515,6 +511,20 @@ export class Publisher {
       if (item.status !== 'published') item.status = published ? 'published' : ['uploading', 'uploaded', 'processing', 'unknown', 'failed'].includes(receipt.status) ? receipt.status : 'unknown';
       if (receipt.providerPostId) item.providerPostId = receipt.providerPostId;
       if (typeof receipt.phase === 'string' && /^[a-z-]{1,32}$/.test(receipt.phase)) item.providerPhase = receipt.phase;
+      const safeCode = typeof receipt.code === 'string' && /^(?:TIKTOK_)?ZERNIO_[A-Z0-9_]{1,80}$/.test(receipt.code) ? receipt.code : undefined;
+      const safeHttp = receipt.httpStatus === null || Number.isInteger(receipt.httpStatus) && receipt.httpStatus >= 100 && receipt.httpStatus <= 599;
+      if (safeCode !== undefined) item.providerCode = safeCode;
+      if (safeHttp) item.httpStatus = receipt.httpStatus;
+      if (safeCode !== undefined || safeHttp) {
+        const diagnostic = { phase: item.providerPhase ?? 'unknown', ...(safeCode !== undefined ? { code: safeCode } : {}),
+          ...(safeHttp ? { httpStatus: receipt.httpStatus } : {}) };
+        const previous = item.phaseDiagnostics?.at(-1);
+        if (!previous || previous.phase !== diagnostic.phase || previous.code !== diagnostic.code || previous.httpStatus !== diagnostic.httpStatus) {
+          item.phaseDiagnostics ??= [];
+          item.phaseDiagnostics.push({ ...diagnostic, observedAt: new Date().toISOString() });
+          if (item.phaseDiagnostics.length > 64) item.phaseDiagnostics.splice(0, item.phaseDiagnostics.length - 64);
+        }
+      }
       if (published) Object.assign(item, { url: receipt.url, publishedAt: receipt.publishedAt, effectiveAt: receipt.publishedAt,
         providerPrivacyStatus: 'public', verifiedAt: new Date().toISOString(), error: null,
         ...(item.platform === 'youtube' ? { videoId: receipt.videoId } : { postId: receipt.postId }) });

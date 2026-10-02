@@ -139,7 +139,7 @@ worker vivo e ajustar o timeout do cliente.
 | Produção demorada | `ytfun_production_job_start`, `ytfun_production_job_get`, `ytfun_production_job_reconcile` |
 | Revisão | `ytfun_episode_review`, `ytfun_episode_approve` |
 | Distribuição | `ytfun_distribution_capabilities`, `ytfun_publish_plan`, `ytfun_youtube_publish`, `ytfun_youtube_publication_sync`, `ytfun_facebook_publish`, `ytfun_facebook_publication_sync`, `ytfun_tiktok_export`, `ytfun_tiktok_publish`, `ytfun_tiktok_publication_sync`, `ytfun_kwai_export` |
-| Fila de entrega | `ytfun_delivery_enqueue`, `ytfun_delivery_list`, `ytfun_delivery_run_due`, `ytfun_delivery_cancel`, `ytfun_delivery_reconcile` |
+| Fila de entrega | `ytfun_delivery_enqueue`, `ytfun_delivery_list`, `ytfun_delivery_run_due`, `ytfun_delivery_reschedule`, `ytfun_delivery_cancel`, `ytfun_delivery_reconcile` |
 | Resultados | `ytfun_metrics_record`, `ytfun_youtube_metrics_sync` |
 | Dados YouTube | `ytfun_youtube_data_maintenance`, `ytfun_youtube_disconnect` (preview por padrão) |
 
@@ -204,11 +204,20 @@ fatura. Uma estimativa zero não prova que a inferência é gratuita. Confirme o
 saldo/crédito e termos do provider antes de usar modelos. Não há modelo fixo,
 tarifa presumida, promessa de crédito suficiente ou migração automática para pago.
 
-A cadência inicial de 1 publicação em 24 horas, com intervalo de 24 horas, é
-hipótese editorial conservadora. Pode ser escolhida por projeto, respeitando
-intervalo mínimo de 12 horas e até 3 uploads por janela de 24 horas. O publisher
-aplica a regra mais restritiva dos projetos que compartilham o mesmo canal, conta
-reservas/futuros e não faz afirmações sobre uma frequência oficial antispam.
+Projetos sem configuração de cadência mantêm o padrão legado de 24 horas/uma
+publicação. A configuração explícita aceita intervalo não negativo e contagem
+positiva inteira ou `null` (sem teto editorial de quantidade). `0/null` permite
+que as especialistas escolham a frequência conforme rede, modo e estratégia.
+O publisher aplica políticas numéricas mais restritivas de projetos que compartilham
+o canal e preserva reservas/futuros e limites reais do provider. A meta de presença
+da operação AI Meow pertence à política editorial; não é um cooldown do uploader.
+
+`ytfun_delivery_reschedule` ajusta somente uma entrega comprovadamente não iniciada,
+sem reserva de publicação, após preflight atual. Exige snapshot exato de data,
+rede, visibilidade, audiência, conta, rota, hashes e binding anterior; conserva ID,
+histórico de provider e consentimentos. Não cancela/recria a entrega nem libera
+tentativas desconhecidas. O reagendamento local não é uma agenda confirmada pelo
+provider; cada envio é revalidado pelo publisher.
 
 Geração de vídeo aceita `videoParameters` opcional na ferramenta direta e no job.
 O subconjunto explícito admite resolução 480p/580p/720p, proporção 16:9/9:16,

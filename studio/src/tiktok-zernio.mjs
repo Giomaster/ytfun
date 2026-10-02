@@ -44,10 +44,11 @@ export function zernioTikTokUploadTarget(data) {
   let upload, publicUrl;
   try { upload = new URL(data?.uploadUrl); publicUrl = new URL(data?.publicUrl); } catch { return null; }
   const key = data?.key;
+  const storagePaths = [`/${key}`, ...(/^\/[A-Za-z0-9][A-Za-z0-9_-]{0,62}\//.test(upload.pathname) ? [`/${upload.pathname.split('/')[1]}/${key}`] : [])];
   if (typeof key !== 'string' || !/^temp\/[A-Za-z0-9][A-Za-z0-9_.-]{1,240}\.mp4$/.test(key) || key.includes('..') ||
       !Number.isInteger(data?.expiresIn) || data.expiresIn < 1 || data.expiresIn > 3600 ||
-      upload.protocol !== 'https:' || !/^[a-z0-9][a-z0-9-]{0,62}\.r2\.cloudflarestorage\.com$/.test(upload.hostname) ||
-      upload.port || upload.username || upload.password || upload.hash || upload.pathname !== `/${key}` ||
+      upload.protocol !== 'https:' || !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.r2\.cloudflarestorage\.com$/.test(upload.hostname) ||
+      upload.port || upload.username || upload.password || upload.hash || !storagePaths.includes(upload.pathname) ||
       !/^[a-f0-9]{64}$/i.test(upload.searchParams.get('X-Amz-Signature') ?? '') ||
       upload.searchParams.getAll('X-Amz-Signature').length !== 1 ||
       publicUrl.protocol !== 'https:' || publicUrl.hostname !== 'media.zernio.com' || publicUrl.port ||
@@ -108,20 +109,22 @@ export class TikTokZernio {
       remoteAuthorizationVerified: false, syntheticDisclosureSupported: true, maxBytes: MAX_BYTES };
   }
 
-  async #api(path, { method = 'GET', body, headers = {} } = {}) {
+  async #api(path, { method = 'GET', body, headers = {}, withHttpStatus = false } = {}) {
     let response;
     try {
       response = await this.#fetch(`${API}${path}`, { method, redirect: 'error', signal: AbortSignal.timeout(30_000),
         headers: { Authorization: `Bearer ${this.#env.ZERNIO_API_KEY}`, ...(body ? { 'Content-Type': 'application/json' } : {}), ...headers },
         ...(body ? { body: JSON.stringify(body) } : {}) });
-    } catch { throw new Error('TIKTOK_ZERNIO_REQUEST_OUTCOME_UNCONFIRMED'); }
-    if (!response.ok || response.redirected) {
+    } catch { const error = new Error('TIKTOK_ZERNIO_REQUEST_OUTCOME_UNCONFIRMED'); error.httpStatus = null; throw error; }
+    const httpStatus = Number.isInteger(response.status) && response.status >= 100 && response.status <= 599 ? response.status : null;
+    if (!response.ok || response.redirected || httpStatus === null) {
       void response.body?.cancel().catch(() => {});
-      throw new Error('TIKTOK_ZERNIO_RESPONSE_NOT_CONFIRMED');
+      const error = new Error(response.redirected || httpStatus === null ? 'TIKTOK_ZERNIO_REDIRECT_OR_STATUS_REJECTED' : 'TIKTOK_ZERNIO_HTTP_REJECTED');
+      error.httpStatus = httpStatus; throw error;
     }
     const data = await boundedJson(response);
-    if (!data) throw new Error('TIKTOK_ZERNIO_RESPONSE_NOT_CONFIRMED');
-    return data;
+    if (!data) { const error = new Error('TIKTOK_ZERNIO_RESPONSE_INVALID'); error.httpStatus = httpStatus; throw error; }
+    return withHttpStatus ? { data, httpStatus } : data;
   }
 
   async #identity() {
@@ -156,34 +159,45 @@ export class TikTokZernio {
     const account = await this.verifyAccount();
     if (render.durationSeconds > account.maxDurationSeconds || TOGGLES.some(k => interactionSettings[k] && !account.interactionSettings[k].enabled)) throw new Error('TIKTOK_ZERNIO_CREATOR_LIMIT_EXCEEDED');
     let phase = 'presign', providerPostId;
+    let diagnostic = { code: 'TIKTOK_ZERNIO_PRESIGN_REQUEST_PENDING', httpStatus: null };
     const receipt = status => ({ route: 'zernio', publicationId, providerAccountId: account.providerAccountId, accountId: account.accountId,
-      handle: account.handle, renderSha256, ...(providerPostId ? { providerPostId } : {}), status, phase, confirmed: false });
+      handle: account.handle, renderSha256, ...(providerPostId ? { providerPostId } : {}), status, phase, confirmed: false, ...diagnostic });
     try {
       // Notify before each mutation. A persistence failure stops the next request.
       await onReceipt(receipt('uploading'));
-      const presigned = await this.#api('/media/presign', { method: 'POST', body: { filename: `${publicationId}.mp4`, contentType: 'video/mp4', size: media.length } });
-      const target = zernioTikTokUploadTarget(presigned);
+      const presigned = await this.#api('/media/presign', { method: 'POST', withHttpStatus: true, body: { filename: `${publicationId}.mp4`, contentType: 'video/mp4', size: media.length } });
+      diagnostic = { code: 'TIKTOK_ZERNIO_HTTP_ACCEPTED', httpStatus: presigned.httpStatus };
+      await onReceipt(receipt('uploading'));
+      const target = zernioTikTokUploadTarget(presigned.data);
       if (!target) throw new Error('TIKTOK_ZERNIO_STORAGE_TARGET_NOT_CONFIRMED');
-      phase = 'transfer'; await onReceipt(receipt('uploading'));
+      phase = 'transfer'; diagnostic = { code: 'TIKTOK_ZERNIO_TRANSFER_REQUEST_PENDING', httpStatus: null }; await onReceipt(receipt('uploading'));
       const transfer = await this.#fetch(target.uploadUrl, { method: 'PUT', headers: { 'Content-Type': 'video/mp4' }, body: media,
         redirect: 'error', signal: AbortSignal.timeout(120_000) });
       void transfer.body?.cancel().catch(() => {});
-      if (!transfer.ok || transfer.redirected) throw new Error('TIKTOK_ZERNIO_TRANSFER_NOT_CONFIRMED');
-      phase = 'post'; await onReceipt(receipt('uploaded'));
-      const created = await this.#api('/posts', { method: 'POST', headers: { 'Idempotency-Key': publicationId }, body: {
+      diagnostic = { httpStatus: Number.isInteger(transfer.status) && transfer.status >= 100 && transfer.status <= 599 ? transfer.status : null,
+        code: transfer.redirected ? 'TIKTOK_ZERNIO_REDIRECT_OR_STATUS_REJECTED' : transfer.ok ? 'TIKTOK_ZERNIO_HTTP_ACCEPTED' : 'TIKTOK_ZERNIO_HTTP_REJECTED' };
+      await onReceipt(receipt('uploading'));
+      if (!transfer.ok || transfer.redirected || diagnostic.httpStatus === null) throw new Error('TIKTOK_ZERNIO_TRANSFER_NOT_CONFIRMED');
+      phase = 'post'; diagnostic = { code: 'TIKTOK_ZERNIO_POST_REQUEST_PENDING', httpStatus: null }; await onReceipt(receipt('uploaded'));
+      const createdResponse = await this.#api('/posts', { method: 'POST', withHttpStatus: true, headers: { 'Idempotency-Key': publicationId }, body: {
         content: caption, mediaItems: [{ type: 'video', url: target.publicUrl }],
         platforms: [{ platform: 'tiktok', accountId: account.providerAccountId }], publishNow: true, visibility: 'public',
         tiktokSettings: { privacy_level: 'PUBLIC_TO_EVERYONE', ...Object.fromEntries(TOGGLES.map(k => [k, interactionSettings[k]])),
           content_preview_confirmed: true, express_consent_given: true, video_made_with_ai: true, draft: false, isAdsOnly: false },
         metadata: { ytfunPublicationId: publicationId, ytfunRenderSha256: renderSha256, ytfunRoute: 'tiktok_zernio' },
       } });
+      const created = createdResponse.data;
+      diagnostic = { code: 'TIKTOK_ZERNIO_HTTP_ACCEPTED', httpStatus: createdResponse.httpStatus };
       // Save a returned ID even when the rest of the create response is inconclusive.
       providerPostId = OID.test(created.post?._id ?? '') ? created.post._id : OID.test(created.postId ?? '') ? created.postId : undefined;
       if (!providerPostId) return { ...receipt('unknown'), code: 'TIKTOK_ZERNIO_POST_RECEIPT_MISSING' };
       await onReceipt(receipt('processing'));
       return this.status({ providerPostId, publicationId, renderSha256 });
     } catch (error) {
-      return { ...receipt('unknown'), code: /^TIKTOK_ZERNIO_[A-Z_]+$/.test(error?.message ?? '') ? error.message : 'TIKTOK_ZERNIO_REQUEST_OUTCOME_UNCONFIRMED' };
+      const code = /^TIKTOK_ZERNIO_[A-Z_]{1,100}$/.test(error?.message ?? '') ? error.message : 'TIKTOK_ZERNIO_REQUEST_OUTCOME_UNCONFIRMED';
+      return { ...receipt('unknown'), code, ...(Object.hasOwn(error ?? {}, 'httpStatus') ? {
+        httpStatus: Number.isInteger(error.httpStatus) && error.httpStatus >= 100 && error.httpStatus <= 599 ? error.httpStatus : null,
+      } : {}) };
     }
   }
 

@@ -24,6 +24,7 @@ const license = z.object({ url, notes: text });
 const kind = z.enum(['image', 'video', 'audio']);
 const operationPolicy = () => readFile(new URL('../docs/ai-meow-operation.md', import.meta.url), 'utf8');
 const platform = z.enum(['youtube', 'facebook', 'tiktok', 'kwai']);
+const cadence = z.object({ minHoursBetweenPosts: z.number().finite().min(0), maxPostsPerRollingDay: z.number().int().positive().nullable() });
 const metadata = z.object({ description: z.string().max(5000), hashtags: z.array(z.string().trim().min(1).max(60).regex(/^#[\p{L}\p{N}_]+$/u)).max(8) });
 const assetProvenance = z.object({ provider: text, model: text, prompt: text, commercialLicense: license, synthetic: z.literal(true) });
 const generationSchema = {
@@ -81,14 +82,13 @@ export function createServer({ directory = process.env.YTFUN_STUDIO_DIR, env = p
   }, { readOnly: true });
   register('ytfun_project_create', 'Persist an agreed original AI series: premise, audience, continuity and editorial cadence. Do not create an approved project before the user agrees to the concept.', {
     title: z.string().trim().min(1).max(160), premise: text, audience: text, language: z.string().min(2).max(30), continuity: text.optional(), mode: z.enum(['fiction', 'factual']).default('fiction'),
-    cadence: z.object({ minHoursBetweenPosts: z.number().min(12), maxPostsPerRollingDay: z.number().int().min(1).max(3) }).optional(),
+    cadence: cadence.optional(),
     budgetMonthlyUsd: z.number().finite().nonnegative().nullable().optional(),
   }, input => studio.createProject(input));
   register('ytfun_project_list', 'Read agreed series before proposing episodes. No automatically invented projects.', {}, () => studio.listProjects(), { readOnly: true });
   register('ytfun_project_cadence_update', 'Change an authorized editorial cadence experiment with a recorded reason and expected previous policy. Existing uploads, reservations and account-wide cadence checks remain intact.', {
     projectId: id,
-    cadence: z.object({ minHoursBetweenPosts: z.number().finite().min(12), maxPostsPerRollingDay: z.number().int().min(1).max(3) }),
-    expectedCadence: z.object({ minHoursBetweenPosts: z.number().finite().min(12), maxPostsPerRollingDay: z.number().int().min(1).max(3) }),
+    cadence, expectedCadence: cadence,
     reason: text,
   }, input => studio.updateProjectCadence(input));
   register('ytfun_trend_record', 'Persist a researched trend with exact source and observation time. Evidence is metadata, never media reuse clearance.', { topic: text, sourceUrl: url, observedAt: z.iso.datetime(), evidence: text, projectId: id.optional() }, input => studio.addTrend(input));
@@ -141,6 +141,13 @@ export function createServer({ directory = process.env.YTFUN_STUDIO_DIR, env = p
   register('ytfun_delivery_list', 'Read persistent queued, running, completed and attention deliveries. Interrupted attempts are never replayed automatically.', {}, () => deliveries.list(), { readOnly: true });
   register('ytfun_delivery_run_due', 'Preview or execute one due delivery. Per-platform workers must select their platform. API uploads have external effects; creator exports remain distinct from public posts.', { execute: z.boolean().default(false), platform: platform.optional() }, input => deliveries.runDue(input), { external: true });
   register('ytfun_delivery_cancel', 'Cancel an unstarted queued delivery; never cancels or deletes provider media.', { deliveryId: id }, input => deliveries.cancel(input));
+  register('ytfun_delivery_reschedule', 'Re-time an exact unstarted delivery after current media/account/provider preflight. Preserves its ID and history; never resets an unknown or reserved provider attempt. Separate from publishing and provider scheduling.', {
+    deliveryId: id, expectedClaim: z.object({ dueAt: z.iso.datetime(), platform, privacy: z.enum(['private', 'unlisted', 'public']), madeForKids: z.boolean().nullable(),
+      reviewHash: z.string().regex(/^[a-f0-9]{64}$/), renderSha256: z.string().regex(/^[a-f0-9]{64}$/),
+      accountId: z.string().trim().min(1).max(128), mode: z.enum(['official_api', 'experimental_session_rest', 'creator_export', 'zernio']),
+      providerAccountId: z.string().regex(/^[a-f0-9]{24}$/).nullable(), bindingSha256: z.string().regex(/^[a-f0-9]{64}$/).nullable() }).strict(),
+    dueAt: z.iso.datetime(), reason: z.string().trim().min(1).max(1000),
+  }, input => deliveries.rescheduleUnstarted(input));
   register('ytfun_delivery_reconcile', 'Close an interrupted delivery only after its exact publication receipt is reconciled and the operator verifies the original worker is stopped. Never resets unknown attempts for retry.', { deliveryId: id, workerStopped: z.literal(true), confirmedBy: text, evidence: text }, input => deliveries.reconcile(input));
   register('ytfun_metrics_record', 'Record a real performance observation from a platform/export with timestamp and source. Keep unknown values absent and platform metrics separate. Ratios may exceed 1 for loops.', { episodeId: id, platform, observedAt: z.iso.datetime(), sourceUrl: url, views: z.number().int().nonnegative().optional(), retentionRatio: z.number().finite().nonnegative().optional(), completionRate: z.number().min(0).max(1).optional(), revenueUsd: z.number().finite().nonnegative().optional(), periodStart: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), periodEnd: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional() }, input => studio.recordMetrics(input));
   register('ytfun_youtube_metrics_sync', 'Fetch period-level YouTube Analytics with yt-analytics.readonly OAuth. Empty data stays unknown. Does not establish qualified monetization views.', { episodeId: id, startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) }, input => research.syncYouTubeMetrics(input), { external: true });

@@ -70,6 +70,116 @@ async function fixture(t, { delivery = {}, publications = [], otherDeliveries = 
 const migrate = (f, extra = {}) => f.queue.migrateUnstartedToZernio({ deliveryId: DELIVERY,
   expectedMode: f.original.mode, expectedReviewHash: HASH, reason: 'Owner authorized the supported Zernio integration.', ...extra });
 
+function expectedClaim(delivery) {
+  return Object.fromEntries(['dueAt', 'platform', 'privacy', 'madeForKids', 'reviewHash', 'renderSha256', 'accountId', 'mode', 'providerAccountId', 'bindingSha256']
+    .map(key => [key, ['madeForKids', 'providerAccountId', 'bindingSha256'].includes(key) ? delivery[key] ?? null : delivery[key]]));
+}
+
+const reschedule = (f, extra = {}) => f.queue.rescheduleUnstarted({ deliveryId: DELIVERY, expectedClaim: expectedClaim(f.original),
+  dueAt: new Date(NOW).toISOString(), reason: 'Owner permits multiple distinct beneficial works in this dispatch; update the unstarted queue only.', ...extra });
+
+test('owner can re-time an exact unstarted Zernio claim without replacing its ID, consent or provider history', async t => {
+  const history = [{ mode: 'experimental_session_rest', previousStatus: 'queued', at: new Date(NOW - 3_600_000).toISOString(), reason: 'Explicit unstarted route migration.' }];
+  const f = await fixture(t, { delivery: { mode: 'zernio', providerAccountId: PROVIDER, bindingSha256: BINDING,
+    dueAt: new Date(NOW + 18 * 3_600_000).toISOString(), providerHistory: history } });
+  const before = await f.store.read();
+  const ownerEvidence = { episodeId: EPISODE, accountId: ACCOUNT, reviewHash: HASH, renderSha256: RENDER,
+    attestation: { contentPreviewConfirmed: true, expressConsentGiven: true, renderSha256: RENDER, evidenceSha256: 'd'.repeat(64),
+      previewWitness: 'owner', consentSource: 'owner_explicit', recordedAt: new Date(NOW).toISOString() },
+    interactionSettings: { allow_comment: true, allow_duet: false, allow_stitch: false } };
+  await f.store.transaction(state => { state.zernioConsents = [ownerEvidence]; });
+  const result = await reschedule(f);
+  assert.equal(result.id, DELIVERY);
+  assert.equal(result.mode, 'zernio');
+  assert.equal(result.dueAt, new Date(NOW).toISOString());
+  assert.equal(result.status, 'queued');
+  for (const key of ['accountId', 'reviewHash', 'renderSha256', 'privacy', 'providerAccountId', 'bindingSha256', 'createdAt']) assert.equal(result[key], f.original[key]);
+  assert.deepEqual(result.providerHistory, history);
+  assert.deepEqual(result.rescheduleHistory, [{ previousDueAt: f.original.dueAt, nextDueAt: new Date(NOW).toISOString(), previousStatus: 'queued',
+    reason: 'Owner permits multiple distinct beneficial works in this dispatch; update the unstarted queue only.', changedAt: new Date(NOW).toISOString() }]);
+  const after = await f.store.read();
+  assert.deepEqual(after.publications, before.publications);
+  assert.deepEqual(after.zernioConsents, [ownerEvidence]);
+  assert.deepEqual(f.calls, ['plan']);
+  const stale = await f.store.read();
+  await assert.rejects(reschedule(f), /claim changed/);
+  assert.deepEqual(await f.store.read(), stale);
+  const noOp = await reschedule(f, { expectedClaim: expectedClaim(result) });
+  assert.equal(noOp.rescheduleHistory.length, 1);
+});
+
+test('re-timing attention/preflight requires current media, identity, selected route and provider binding', async t => {
+  const delivery = { mode: 'zernio', providerAccountId: PROVIDER, bindingSha256: BINDING,
+    status: 'attention', phase: 'preflight', error: 'A previous preflight stopped without reservation.' };
+  const safe = await fixture(t, { delivery });
+  const updated = await reschedule(safe);
+  assert.equal(updated.status, 'queued');
+  assert.equal(updated.phase, undefined);
+  assert.equal(updated.error, undefined);
+  assert.equal(updated.rescheduleHistory[0].previousStatus, 'attention');
+  for (const change of [f => { f.config.ready = false; }, f => { f.config.accountId = '7474000000000000000'; },
+    f => { f.config.reviewHash = 'e'.repeat(64); }, f => { f.config.renderSha256 = 'f'.repeat(64); },
+    f => { f.config.providerAccountId = '66b2e19d8c3f5a7e9d0b1c2e'; }, f => { f.config.bindingSha256 = 'd'.repeat(64); },
+    f => { f.config.selected = false; }]) {
+    const f = await fixture(t, { delivery });
+    change(f);
+    const before = await f.store.read();
+    await assert.rejects(reschedule(f), /preflight/);
+    assert.deepEqual(await f.store.read(), before);
+    assert.ok(!f.calls.includes('upload'));
+  }
+});
+
+test('reschedule compare-and-set rejects every changed destination or content field and arbitrary raw patches', async t => {
+  const f = await fixture(t, { delivery: { mode: 'zernio', providerAccountId: PROVIDER, bindingSha256: BINDING, dueAt: new Date(NOW + 18 * 3_600_000).toISOString() } });
+  const claim = expectedClaim(f.original);
+  const before = await f.store.read();
+  const changes = { dueAt: new Date(NOW + 19 * 3_600_000).toISOString(), platform: 'facebook', privacy: 'private', madeForKids: false,
+    reviewHash: 'd'.repeat(64), renderSha256: 'e'.repeat(64), accountId: '7474000000000000000', mode: 'experimental_session_rest',
+    providerAccountId: null, bindingSha256: null };
+  for (const [key, value] of Object.entries(changes)) {
+    await assert.rejects(reschedule(f, { expectedClaim: { ...claim, [key]: value } }));
+    assert.deepEqual(await f.store.read(), before);
+  }
+  await assert.rejects(reschedule(f, { expectedClaim: { ...claim, status: 'queued' } }));
+  const { bindingSha256: _missing, ...incomplete } = claim;
+  await assert.rejects(reschedule(f, { expectedClaim: incomplete }));
+  await assert.rejects(reschedule(f, { dueAt: new Date(NOW - 61_000).toISOString() }));
+  assert.deepEqual(await f.store.read(), before);
+  assert.deepEqual(f.calls, []);
+  const youtube = await fixture(t, { delivery: { platform: 'youtube', madeForKids: true, mode: 'zernio', providerAccountId: PROVIDER, bindingSha256: BINDING } });
+  await assert.rejects(reschedule(youtube, { expectedClaim: { ...expectedClaim(youtube.original), madeForKids: false } }), /claim changed/);
+});
+
+test('rescheduling never releases queued reservations or a running claim even when a delivery is labelled preflight', async t => {
+  for (const options of [
+    { delivery: { publicationId: PUBLICATION } },
+    { publications: [{ id: PUBLICATION, deliveryId: DELIVERY, episodeId: 'different-episode', platform: 'youtube', status: 'reserved' }] },
+    { delivery: { status: 'attention', phase: 'preflight' }, publications: [{ id: PUBLICATION, episodeId: EPISODE, platform: 'tiktok', status: 'unknown' }] },
+    { otherDeliveries: [{ id: 'another-running-claim', episodeId: 'another-episode', platform: 'facebook', status: 'running' }] },
+    { delivery: { status: 'attention', phase: 'delivery' } }, { delivery: { status: 'running', phase: 'preflight' } },
+    { delivery: { status: 'completed' } }, { delivery: { status: 'cancelled' } },
+  ]) {
+    const f = await fixture(t, options);
+    const before = await f.store.read();
+    await assert.rejects(reschedule(f), /proved unstarted/);
+    assert.deepEqual(await f.store.read(), before);
+    assert.deepEqual(f.calls, []);
+  }
+});
+
+test('competing reschedule requests cannot both replace the same observed due time', async t => {
+  const f = await fixture(t, { delivery: { mode: 'zernio', providerAccountId: PROVIDER, bindingSha256: BINDING, dueAt: new Date(NOW + 18 * 3_600_000).toISOString() } });
+  const outcomes = await Promise.allSettled([reschedule(f), reschedule(f, { dueAt: new Date(NOW + 3_600_000).toISOString() })]);
+  assert.equal(outcomes.filter(outcome => outcome.status === 'fulfilled').length, 1);
+  assert.equal(outcomes.filter(outcome => outcome.status === 'rejected').length, 1);
+  const after = await f.store.read();
+  assert.equal(after.deliveries[0].rescheduleHistory.length, 1);
+  assert.equal(after.deliveries[0].id, DELIVERY);
+  assert.deepEqual(after.publications, []);
+  assert.ok(!f.calls.includes('upload'));
+});
+
 test('unstarted public migration preserves exact identity, media, due time and prior route history', async t => {
   const originalApiData = { grantId: 'old-provider-authorization', authorized: true };
   const history = [{ at: '2026-10-01T00:00:00Z', mode: 'legacy', reason: 'Earlier recorded transition.' }];
@@ -103,6 +213,7 @@ test('original 004 unknown allocation reservation cannot migrate, reset or dispa
   const f = await fixture(t, { delivery: { status: 'attention', phase: 'delivery', publicationId: PUBLICATION }, publications: [unknown] });
   const before = await f.store.read();
   await assert.rejects(migrate(f), /proved unstarted/);
+  await assert.rejects(reschedule(f), /proved unstarted/);
   assert.deepEqual(await f.store.read(), before);
   assert.equal((await f.queue.runDue({ execute: true, platform: 'tiktok' })).idle, true);
   assert.ok(!f.calls.includes('upload'));

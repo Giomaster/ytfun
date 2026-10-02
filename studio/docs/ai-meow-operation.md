@@ -145,7 +145,12 @@ deve trazer uma nova recompensa, informação ou avanço da sequência.
 ## Pesquisa, ciclos e retorno das redes
 
 A MESTRE desperta a cada 18 horas para analisar demandas, resultados e estoque.
-O despertar inicia uma decisão de produção, sem obrigação de gerar ou publicar.
+O despertar não obriga geração paga. Cada rede tem como mínimo operacional uma
+publicação pública confirmada a cada 18 horas, aproveitando o acervo existente.
+Esse prazo é uma meta de presença, nunca um intervalo mínimo entre envios ou um
+teto de uma publicação por despertar. Se faltar condição técnica real para enviar,
+registre o impedimento e encaminhe a manutenção, sem contabilizar exportação,
+agendamento, falha ou processamento como publicação confirmada.
 Evite acumular material além da capacidade de lançamento ou tornar uma tendência
 obsoleta na fila. A MESTRE é a única sessão com agendamento periódico ativo.
 Em cada ciclo, ela aciona as três especialistas atuais de Operação/threads.json
@@ -165,7 +170,9 @@ Cada especialista mantém sua própria fila e cadência de publicação. Essa ag
 não é o relógio de despertar da conversa. Sem um executor de fila independente
 comprovadamente ativo ou agendamento confirmado pelo provider, uma entrega elegível
 é tratada no próximo despacho da MESTRE; não prometer envio no minuto planejado.
-Preserve reservas, estados e recibos, sem rajadas para compensar atraso. A pausa
+Preserve reservas, estados e recibos. Quantidade e espaçamento seguem a decisão
+editorial por rede, modo e benefício esperado, sem um teto fixo de uma postagem.
+A pausa
 do heartbeat de uma especialista não pausa a operação nem elimina suas entregas.
 
 Antes de gerar, cada especialista informa temas promissores, evidências recentes,
@@ -333,8 +340,10 @@ título, descrição, capa e identificação de IA conforme sua rede e modo.
 Giovanni autoriza produzir, montar e enfileirar VÁRIAS obras distintas por ciclo,
 incluindo múltiplos Shorts, regulares e compilações quando úteis. Não existe teto
 editorial de uma obra, um formato ou uma publicação por sessão/ciclo/dia.
-Quantidade produzida e frequência de envio são decisões separadas: uma sessão
-pode preparar uma fila completa e agendar várias entregas espaçadas de uma vez.
+Quantidade produzida e frequência de envio são decisões separadas. Em cada
+despertar, a especialista pode publicar quantas obras distintas considerar
+benéficas, em sequência ou com o espaçamento que justificar para sua rede.
+Não limitar o envio a uma postagem por 18 horas nem a duas por 24 horas.
 Cada composição deve trazer finalidade/experiência própria; simples mudança de
 ordem, título ou embalagem não autoriza duplicatas. Reuso de fontes entre formatos
 e redes é esperado e registrado, respeitando exclusões do dono.
@@ -346,14 +355,11 @@ algorítmico. Registrar hipótese, evidência datada, agenda e ponto de reavalia
 sem métricas suficientes, declarar experimento e evitar conclusões definitivas.
 Não pedir novo aval editorial para cada vídeo ou ajuste dentro dessa autorização.
 
-18 horas entre envios e até 2 por janela móvel de 24 horas são o experimento
-inicial registrado, não um ótimo universal nem um limite editorial permanente.
-Atualização humana de 02/10/2026 para o Facebook: a especialista pode publicar
-quantas obras distintas considerar úteis para o engajamento da Página. Não há
-teto de uma entrega por exceção, ciclo ou dia, nem obrigação de preencher uma
-quantidade. Os números iniciais 18h/2 não impedem um plano do Facebook justificado
-sob essa autorização; use a API de autorizações por entrega, preservando a
-cadência compartilhada das outras redes. Cada escolha e horário registra sua
+Atualização humana de 02/10/2026, válida para Facebook, TikTok e YouTube:
+quantidade e espaçamento não têm um teto editorial fixo. O mínimo operacional
+é uma publicação por rede a cada 18 horas; 118 horas foi corrigido pelo dono.
+A MESTRE mantém seu despertar de 18 horas e cobra esse mínimo nas três redes.
+Cada escolha e horário registra sua
 finalidade, experiência própria, hipótese de benefício, evidência disponível e
 forma de avaliar o resultado. Posição na fila, backlog ou mera permissão técnica
 não são motivos editoriais. Sem métricas suficientes, execute experimentos
@@ -361,8 +367,9 @@ justificados e declare a incerteza, sem transformar ausência de métricas num
 novo bloqueio nem prometer que a escolha será melhor. Proteções de conta,
 PUBLIC, direitos, integridade, exclusões, duplicatas e resultados incertos
 continuam obrigatórias. Cada reserva e autorização é revalidada atomicamente;
-várias entregas podem compartilhar o mesmo despacho, com uma autorização de
-uso único por entrega, sem reutilizar recibos ou pedidos consumidos.
+várias entregas podem compartilhar o mesmo despacho. Autorizações técnicas de
+uso único por entrega, quando usadas pela rota, são criadas autonomamente sob
+a permissão permanente do dono, sem pedir um novo aval humano por postagem.
 Ler a cadência EFETIVA do domínio e contar todos os formatos e reservas do canal.
 Mudanças usam Studio.updateProjectCadence com política anterior esperada e motivo,
 sem editar o store à mão ou ignorar os limites técnicos implementados. Essa API
@@ -373,12 +380,19 @@ registrar manutenção para a root. Não reduzir proteções
 por conveniência nem confundir restrição técnica atual com regra da plataforma.
 Não há cap editorial de uma entrega por execução: despachar somente o que for
 realmente elegível na política vigente, revalidando reservas atomicamente por item.
-Nunca compensar atraso com rajadas; um grande backlog não é razão para acelerar.
+Backlog sozinho não demonstra benefício; várias publicações no ciclo precisam
+de uma hipótese editorial para a rede, sem esperar métricas inexistentes para
+iniciar um experimento. Não repetir uma obra ou uma mutação incerta para atingir
+o mínimo de presença.
 Filas locais e heartbeats não equivalem a agendamento confirmado pelo provider.
 
 Publique pela integração da conta AI Meow com visibilidade pública, adaptação
 editorial autônoma e declarações exigidas, aceitando os defeitos do resultado.
-Não peça aprovação humana de cada vídeo nem use qualidade estética como bloqueio.
+Giovanni dá autorização permanente de publicação: produzido ou adaptado o conteúdo,
+a especialista decide a adequação à rede e publica autonomamente. Não peça
+permissão a pessoas, ao dono ou à MESTRE para cada postagem ou lote dentro do
+escopo; não use qualidade estética como bloqueio. A MESTRE fornece material e
+coordena demandas, sem ser uma etapa de aprovação editorial das filhas.
 Verifique conta, capacidade técnica e estado real da integração; agenda,
 exportação ou upload em processamento não comprovam publicação pública.
 

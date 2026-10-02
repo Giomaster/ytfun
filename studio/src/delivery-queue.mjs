@@ -63,6 +63,44 @@ export class DeliveryQueue {
     });
   }
 
+  /** Re-time an exact unstarted claim, preserving its identity and provider history. */
+  async rescheduleUnstarted({ deliveryId, expectedClaim, dueAt, reason }) {
+    const fields = ['dueAt', 'platform', 'privacy', 'madeForKids', 'reviewHash', 'renderSha256', 'accountId', 'mode', 'providerAccountId', 'bindingSha256'];
+    if (typeof deliveryId !== 'string' || !deliveryId.trim() || !expectedClaim || typeof expectedClaim !== 'object' || Array.isArray(expectedClaim) ||
+        fields.some(key => !Object.hasOwn(expectedClaim, key)) || Object.keys(expectedClaim).some(key => !fields.includes(key)) ||
+        !validTime(expectedClaim.dueAt) || !PLATFORMS.includes(expectedClaim.platform) || !['private', 'unlisted', 'public'].includes(expectedClaim.privacy) ||
+        !(expectedClaim.platform === 'youtube' ? typeof expectedClaim.madeForKids === 'boolean' : expectedClaim.madeForKids === null) ||
+        !/^[a-f0-9]{64}$/.test(expectedClaim.reviewHash ?? '') || !/^[a-f0-9]{64}$/.test(expectedClaim.renderSha256 ?? '') ||
+        typeof expectedClaim.accountId !== 'string' || !expectedClaim.accountId.trim() ||
+        !['official_api', 'experimental_session_rest', 'creator_export', 'zernio'].includes(expectedClaim.mode) ||
+        !(expectedClaim.providerAccountId === null || typeof expectedClaim.providerAccountId === 'string' && /^[a-f0-9]{24}$/.test(expectedClaim.providerAccountId)) ||
+        !(expectedClaim.bindingSha256 === null || typeof expectedClaim.bindingSha256 === 'string' && /^[a-f0-9]{64}$/.test(expectedClaim.bindingSha256)) ||
+        !validTime(dueAt) || Date.parse(dueAt) < this.now() - 60_000 || typeof reason !== 'string' || !reason.trim() || reason.length > 1000) throw new Error('Exact expected delivery claim, current/future due time and rescheduling reason are required.');
+    return this.store.transaction(async state => {
+      const item = state.deliveries?.find(entry => entry.id === deliveryId);
+      if (!item || !(item.status === 'queued' || item.status === 'attention' && item.phase === 'preflight') || item.publicationId ||
+          state.deliveries.some(entry => entry.status === 'running') ||
+          state.publications.some(publication => publication.deliveryId === item.id || publication.episodeId === item.episodeId && publication.platform === item.platform)) throw new Error('Only a proved unstarted delivery without publication reservations can be rescheduled.');
+      if (fields.some(key => (['providerAccountId', 'bindingSha256', 'madeForKids'].includes(key) ? item[key] ?? null : item[key]) !== expectedClaim[key])) throw new Error('Delivery claim changed; read its current binding before rescheduling.');
+      const plan = await this.publisher.plan(state, { episodeId: item.episodeId, platform: item.platform, privacy: item.privacy,
+        ...(item.cadenceExceptionId ? { cadenceExceptionId: item.cadenceExceptionId, deliveryId: item.id } : {}) }, Math.max(this.now(), Date.parse(dueAt)));
+      const mode = plan.deliveryMode ?? (['youtube', 'facebook'].includes(item.platform) ? 'official_api' : item.platform === 'tiktok' && item.privacy === 'public' ? 'experimental_session_rest' : 'creator_export');
+      if ((!plan.ready && !plan.readyToExport) || plan.publication || plan.accountId !== item.accountId || plan.reviewHash !== item.reviewHash ||
+          plan.render?.sha256 !== item.renderSha256 || mode !== item.mode ||
+          mode === 'zernio' && (plan.providerAccountId !== item.providerAccountId || plan.bindingSha256 !== item.bindingSha256)) throw new Error('Current media, account, provider or publication preflight does not permit rescheduling.');
+      if (item.platform === 'youtube' && mode !== 'zernio') {
+        assertYouTubeConnected(state, { YTFUN_YOUTUBE_GRANT_ID: plan.youtubeGrantId ?? 'legacy' });
+        if ((item.apiData?.grantId ?? 'legacy') !== (plan.youtubeGrantId ?? 'legacy')) throw new Error('Reschedule only the original YouTube consent generation.');
+      }
+      if (item.dueAt === dueAt && item.status === 'queued') return item;
+      item.rescheduleHistory ??= [];
+      item.rescheduleHistory.push({ previousDueAt: item.dueAt, nextDueAt: dueAt, previousStatus: item.status, reason: reason.trim(), changedAt: new Date(this.now()).toISOString() });
+      Object.assign(item, { dueAt, status: 'queued', updatedAt: new Date(this.now()).toISOString() });
+      delete item.phase; delete item.error;
+      return item;
+    });
+  }
+
   /** Explicit route migration; never resets or replaces an externally started attempt. */
   async migrateUnstartedToZernio({ deliveryId, expectedMode, expectedReviewHash, reason }) {
     if (!['official_api', 'experimental_session_rest'].includes(expectedMode) || !/^[a-f0-9]{64}$/.test(expectedReviewHash ?? '') || typeof reason !== 'string' || !reason.trim() || reason.length > 1000) throw new Error('Explicit old route, fingerprint and migration reason are required.');

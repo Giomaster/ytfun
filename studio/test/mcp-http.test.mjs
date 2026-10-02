@@ -113,12 +113,12 @@ test('HTTP cloud transport negotiates OAuth and isolates read/write/publish gran
   };
   const read = await clientFor('ytfun/read');
   const tools = await read.listTools();
-  assert.equal(tools.tools.length, 43);
+  assert.equal(tools.tools.length, 44);
   assert.deepEqual(tools.tools.find(x => x.name === 'ytfun_facebook_publish')._meta.securitySchemes,
     [{ type: 'oauth2', scopes: ['ytfun/publish'] }]);
   assert.deepEqual(tools.tools.find(x => x.name === 'ytfun_tiktok_publish')._meta.securitySchemes,
     [{ type: 'oauth2', scopes: ['ytfun/publish'] }]);
-  for (const name of ['ytfun_zernio_delivery_migrate', 'ytfun_tiktok_zernio_consent_record']) {
+  for (const name of ['ytfun_zernio_delivery_migrate', 'ytfun_tiktok_zernio_consent_record', 'ytfun_delivery_reschedule']) {
     assert.deepEqual(tools.tools.find(x => x.name === name)._meta.securitySchemes,
       [{ type: 'oauth2', scopes: ['ytfun/publish'] }]);
   }
@@ -164,6 +164,10 @@ test('HTTP cloud transport negotiates OAuth and isolates read/write/publish gran
   assert.match(publish._meta['mcp/www_authenticate'][0], /ytfun\/publish/);
   for (const request of [
     { name: 'ytfun_zernio_delivery_migrate', arguments: { deliveryId: episodeId, expectedMode: 'official_api', expectedReviewHash: 'a'.repeat(64), reason: 'Scope check' } },
+    { name: 'ytfun_delivery_reschedule', arguments: { deliveryId: episodeId,
+      expectedClaim: { dueAt: '2026-10-02T22:00:00.000Z', platform: 'youtube', privacy: 'public', madeForKids: false, reviewHash: 'a'.repeat(64), renderSha256: 'b'.repeat(64),
+        accountId: 'channel', mode: 'official_api', providerAccountId: null, bindingSha256: null },
+      dueAt: '2026-10-02T23:00:00.000Z', reason: 'Scope check; no domain mutation should execute.' } },
     { name: 'ytfun_tiktok_zernio_consent_record', arguments: { episodeId, expectedReviewHash: 'a'.repeat(64),
       attestation: { renderSha256: 'a'.repeat(64), contentPreviewConfirmed: true, expressConsentGiven: true,
         previewWitness: 'owner', consentSource: 'owner_explicit', evidenceSha256: 'b'.repeat(64), recordedAt: '2026-10-02T22:00:00.000Z' },

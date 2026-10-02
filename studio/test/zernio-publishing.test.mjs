@@ -178,3 +178,36 @@ test('sync requires the original provider binding and never mutates another rout
   assert.equal(f.calls.filter(call => call === 'status').length, 0);
   assert.equal((await f.store.read()).publications[0].status, 'processing');
 });
+
+test('upload diagnostics preserve phase and HTTP evidence without leaking provider bodies or storage secrets', async t => {
+  const f = await fixture(t);
+  f.youtubeZernio.upload = async request => {
+    const receipt = { route: 'zernio', publicationId: request.publicationId, accountId: CHANNEL,
+      providerAccountId: PROVIDER, renderSha256: request.render.sha256, status: 'uploading', phase: 'presign' };
+    await request.onReceipt({ ...receipt, code: 'ZERNIO_PRESIGN_CONFIRMED', httpStatus: 200,
+      uploadUrl: 'https://private.example/?credential=secret', rawBody: { token: 'private-provider-token' } });
+    await request.onReceipt({ ...receipt, phase: 'transfer', httpStatus: null });
+    return { ...receipt, status: 'unknown', phase: 'transfer', code: 'ZERNIO_TRANSFER_REJECTED', httpStatus: 403,
+      rawBody: 'private-response-body', headers: { Authorization: 'private-bearer' } };
+  };
+  const first = await f.publisher.publishYouTube(input(f));
+  assert.equal(first.publication.status, 'unknown');
+  assert.equal(first.publication.providerPhase, 'transfer');
+  assert.equal(first.publication.providerCode, 'ZERNIO_TRANSFER_REJECTED');
+  assert.equal(first.publication.httpStatus, 403);
+  assert.deepEqual(first.publication.phaseDiagnostics.map(({ phase, code, httpStatus }) => ({ phase, code, httpStatus })), [
+    { phase: 'presign', code: 'ZERNIO_PRESIGN_CONFIRMED', httpStatus: 200 },
+    { phase: 'transfer', code: undefined, httpStatus: null },
+    { phase: 'transfer', code: 'ZERNIO_TRANSFER_REJECTED', httpStatus: 403 },
+  ]);
+  await f.publisher.zernioReceipt(first.publication.id, { route: 'zernio', publicationId: first.publication.id,
+    accountId: CHANNEL, providerAccountId: PROVIDER, renderSha256: f.episode.render.sha256,
+    status: 'unknown', phase: 'transfer', code: 'private-provider-token', httpStatus: 999 });
+  const stored = (await f.store.read()).publications[0];
+  assert.equal(stored.providerCode, 'ZERNIO_TRANSFER_REJECTED');
+  assert.equal(stored.httpStatus, 403);
+  assert.ok(!/private-provider-token|private-response-body|private-bearer|credential=secret/.test(JSON.stringify(stored)));
+  const duplicate = await f.publisher.publishYouTube(input(f));
+  assert.equal(duplicate.duplicate, true);
+  assert.equal(duplicate.publication.id, first.publication.id);
+});

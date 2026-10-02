@@ -241,3 +241,80 @@ test('provider errors and oversized JSON produce sanitized unresolved receipts',
   assert.equal((await status(oversize)).confirmed, false);
   assert.ok(oversize.calls.every(c => c.config.method === 'GET'));
 });
+
+test('path-style bucket and direct storage key both preserve exact public pairing without bearer transfer', async () => {
+  for (const uploadUrl of [storage.uploadUrl,
+    storage.uploadUrl.replace('/temp/', '/media/temp/'),
+    storage.uploadUrl.replace('fixture-bucket', '1'.repeat(32)).replace('/temp/', '/media/temp/')]) {
+    const target = { ...storage, uploadUrl };
+    assert.ok(zernioTikTokUploadTarget(target));
+    const f = fixture({ storage: target });
+    assert.equal((await upload(f)).status, 'published');
+    const put = f.calls.find(call => call.config.method === 'PUT');
+    assert.equal(put.url, uploadUrl);
+    assert.equal(put.config.headers.Authorization, undefined);
+  }
+});
+
+test('bucket compatibility rejects additional object-path levels, mismatched keys and userinfo', async () => {
+  for (const uploadUrl of [storage.uploadUrl.replace('/temp/', '/media/extra/temp/'),
+    storage.uploadUrl.replace('/temp/123_abc_', '/temp/different_'),
+    storage.uploadUrl.replace('https://', 'https://secret@'),
+    storage.uploadUrl.replace('.r2.cloudflarestorage.com', '.r2.cloudflarestorage.com.evil.example')]) {
+    const f = fixture({ storage: { ...storage, uploadUrl } });
+    const result = await upload(f);
+    assert.equal(result.code, 'TIKTOK_ZERNIO_STORAGE_TARGET_NOT_CONFIRMED');
+    assert.equal(result.phase, 'presign');
+    assert.equal(result.httpStatus, 200);
+    assert.ok(!f.calls.some(call => call.config.method === 'PUT' || call.url.endsWith('/posts')));
+  }
+});
+
+test('HTTP phase diagnostics distinguish rejected requests, malformed responses and target guards', async () => {
+  for (const [response, code, httpStatus] of [
+    [new Response(KEY, { status: 403 }), 'TIKTOK_ZERNIO_HTTP_REJECTED', 403],
+    [new Response(KEY, { status: 200 }), 'TIKTOK_ZERNIO_RESPONSE_INVALID', 200],
+  ]) {
+    const f = fixture({ responsePath: '/api/v1/media/presign', response });
+    const result = await upload(f);
+    assert.equal(result.status, 'unknown');
+    assert.equal(result.phase, 'presign');
+    assert.equal(result.code, code);
+    assert.equal(result.httpStatus, httpStatus);
+    assert.ok(!JSON.stringify(result).includes(KEY));
+    assert.ok(!JSON.stringify(result).includes('X-Amz-Signature'));
+    assert.ok(!f.calls.some(call => call.config.method === 'PUT' || call.url.endsWith('/posts')));
+  }
+  const unconfirmed = await upload(fixture({ rejectPath: '/api/v1/media/presign' }));
+  assert.equal(unconfirmed.httpStatus, null);
+  assert.equal(unconfirmed.code, 'TIKTOK_ZERNIO_REQUEST_OUTCOME_UNCONFIRMED');
+});
+
+test('receipt persistence failure after presign or transfer stops the next external mutation', async () => {
+  for (const [phase, code, expectedPuts] of [
+    ['presign', 'TIKTOK_ZERNIO_HTTP_ACCEPTED', 0],
+    ['transfer', 'TIKTOK_ZERNIO_TRANSFER_REQUEST_PENDING', 0],
+    ['transfer', 'TIKTOK_ZERNIO_HTTP_ACCEPTED', 1],
+    ['post', 'TIKTOK_ZERNIO_POST_REQUEST_PENDING', 1],
+  ]) {
+    const f = fixture();
+    const result = await upload(f, { onReceipt: value => { if (value.phase === phase && value.code === code) throw new Error(KEY); } });
+    assert.equal(result.status, 'unknown');
+    assert.equal(result.phase, phase);
+    assert.equal(f.calls.filter(call => call.config.method === 'PUT').length, expectedPuts);
+    assert.ok(!f.calls.some(call => call.url.endsWith('/posts')));
+    assert.ok(!JSON.stringify(result).includes(KEY));
+  }
+});
+
+test('failed transfer records its own HTTP status rather than inheriting presign status', async () => {
+  const f = fixture({ transferStatus: 503 });
+  const saved = [];
+  const result = await upload(f, { onReceipt: value => { saved.push({ ...value }); } });
+  assert.equal(result.phase, 'transfer');
+  assert.equal(result.httpStatus, 503);
+  assert.equal(result.code, 'TIKTOK_ZERNIO_TRANSFER_NOT_CONFIRMED');
+  assert.ok(saved.some(value => value.phase === 'transfer' && value.httpStatus === null));
+  assert.ok(saved.some(value => value.phase === 'transfer' && value.httpStatus === 503));
+  assert.ok(!f.calls.some(call => call.url.endsWith('/posts')));
+});

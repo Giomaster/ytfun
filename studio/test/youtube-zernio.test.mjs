@@ -9,6 +9,7 @@ const CHANNEL = 'UCjwAEFZPOQ6FIfweosLmCTg';
 const VIDEO = 'dQw4w9WgXcQ';
 const PUBLICATION = '06c46949-709d-4c62-93a0-5d2a4fb36ba1';
 const TOKEN = `sk_${'a'.repeat(64)}`;
+const SIGNATURE = 'e'.repeat(64);
 const MEDIA = Buffer.from('synthetic-video-fixture');
 const SHA = createHash('sha256').update(MEDIA).digest('hex');
 const env = { YTFUN_YOUTUBE_ZERNIO_PUBLISH_ENABLED: 'true', ZERNIO_API_KEY: TOKEN,
@@ -28,7 +29,7 @@ const health = { accountId: PROVIDER, platform: 'youtube', status: 'healthy', to
   permissions: { canPost: true, missingRequired: [] } };
 const key = 'temp/123_abc_ai-meow.mp4';
 const presign = { key, expiresIn: 3600, publicUrl: `https://media.zernio.com/${key}`,
-  uploadUrl: `https://${'1'.repeat(32)}.r2.cloudflarestorage.com/media/${key}?X-Amz-Signature=private-signature` };
+  uploadUrl: `https://${'1'.repeat(32)}.r2.cloudflarestorage.com/media/${key}?X-Amz-Signature=${SIGNATURE}` };
 
 function fixture(overrides = {}) {
   const calls = [];
@@ -125,7 +126,7 @@ test('upload sends one public synthetic YouTube target and never shares bearer o
   assert.equal(put.options.headers.Authorization, undefined);
   assert.equal(put.options.redirect, 'error');
   assert.ok(saved.some(value => value.providerPostId === POST));
-  assert.ok(!JSON.stringify(saved).includes('private-signature'));
+  assert.ok(!JSON.stringify(saved).includes(SIGNATURE));
   assert.ok(!JSON.stringify(saved).includes(TOKEN));
   assert.equal(f.nativeCalls.length, 0);
 });
@@ -149,7 +150,7 @@ test('ambiguous transfer and create failures are sanitized and never retried', a
     const result = await upload(f.adapter);
     assert.equal(result.status, 'unknown');
     assert.ok(!JSON.stringify(result).includes(TOKEN));
-    assert.ok(!JSON.stringify(result).includes('private-signature'));
+    assert.ok(!JSON.stringify(result).includes(SIGNATURE));
     assert.ok(f.calls.filter(call => call.options.method === 'POST' && call.url.endsWith('/posts')).length <= 1);
   }
 });
@@ -226,4 +227,86 @@ test('published link validators reject lookalikes, credentials, extra query, unr
     `https://youtube.com/watch?v=${VIDEO}&secret=x`, `https://youtube.com/watch?v=aaaaaaaaaaa`, `http://youtube.com/watch?v=${VIDEO}`]) {
     assert.equal(safeZernioYouTubePermalink(value, VIDEO), null);
   }
+});
+
+test('documented direct storage key and path-style bucket both accept the exact paired public object', async () => {
+  for (const uploadUrl of [
+    `https://fixture-bucket.r2.cloudflarestorage.com/${key}?X-Amz-Signature=${SIGNATURE}`,
+    `https://fixture-bucket.r2.cloudflarestorage.com/media/${key}?X-Amz-Signature=${SIGNATURE}`,
+    presign.uploadUrl,
+  ]) {
+    const f = fixture({ presign: { ...presign, uploadUrl } });
+    assert.equal((await upload(f.adapter)).status, 'processing');
+    const put = f.calls.find(call => call.options.method === 'PUT');
+    assert.equal(put.url, uploadUrl);
+    assert.equal(put.options.headers.Authorization, undefined);
+  }
+});
+
+test('bucket compatibility still rejects arbitrary paths, lookalike origins and missing or duplicate signatures', async () => {
+  for (const uploadUrl of [
+    presign.uploadUrl.replace('/media/temp/', '/media/extra/temp/'),
+    presign.uploadUrl.replace('/temp/123_abc_', '/temp/different_'),
+    presign.uploadUrl.replace('.r2.cloudflarestorage.com', '.r2.cloudflarestorage.com.evil.example'),
+    presign.uploadUrl.replace('https://', 'https://secret@'),
+    presign.uploadUrl.replace(SIGNATURE, 'not-a-signature'),
+    `${presign.uploadUrl}&X-Amz-Signature=${SIGNATURE}`,
+  ]) {
+    const f = fixture({ presign: { ...presign, uploadUrl } });
+    const result = await upload(f.adapter);
+    assert.equal(result.code, 'ZERNIO_STORAGE_TARGET_REJECTED');
+    assert.equal(result.httpStatus, 200);
+    assert.equal(result.phase, 'presign');
+    assert.ok(!f.calls.some(call => call.options.method === 'PUT' || call.url.endsWith('/posts')));
+  }
+});
+
+test('phase diagnostics distinguish HTTP rejection, invalid JSON and local target validation without raw response data', async () => {
+  for (const [presignResponse, code, httpStatus] of [
+    [new Response(`echo ${TOKEN}`, { status: 403 }), 'ZERNIO_HTTP_REJECTED', 403],
+    [new Response(`echo ${TOKEN}`, { status: 200 }), 'ZERNIO_RESPONSE_INVALID', 200],
+    [{ ...presign, publicUrl: 'https://evil.example/file' }, 'ZERNIO_STORAGE_TARGET_REJECTED', 200],
+  ]) {
+    const f = fixture({ presign: presignResponse });
+    const saved = [];
+    const result = await upload(f.adapter, { onReceipt: value => { saved.push({ ...value }); } });
+    assert.equal(result.status, 'unknown');
+    assert.equal(result.phase, 'presign');
+    assert.equal(result.code, code);
+    assert.equal(result.httpStatus, httpStatus);
+    assert.equal(saved.at(-1).code, code);
+    assert.ok(!JSON.stringify(saved).includes(TOKEN));
+    assert.ok(!JSON.stringify(saved).includes(SIGNATURE));
+    assert.ok(!f.calls.some(call => call.options.method === 'PUT' || call.url.endsWith('/posts')));
+  }
+});
+
+test('pending and observed phase receipts must be persisted before any subsequent upload mutation', async () => {
+  for (const [phase, code, expectedPuts] of [
+    ['presign', 'ZERNIO_HTTP_ACCEPTED', 0],
+    ['transfer', 'ZERNIO_TRANSFER_REQUEST_PENDING', 0],
+    ['transfer', 'ZERNIO_HTTP_ACCEPTED', 1],
+    ['create-post', 'ZERNIO_POST_REQUEST_PENDING', 1],
+  ]) {
+    const f = fixture();
+    const result = await upload(f.adapter, { onReceipt: value => { if (value.phase === phase && value.code === code) throw new Error(TOKEN); } });
+    assert.equal(result.status, 'unknown');
+    assert.equal(result.code, 'ZERNIO_RECEIPT_PERSISTENCE_UNCONFIRMED');
+    assert.equal(result.phase, phase);
+    assert.equal(f.calls.filter(call => call.options.method === 'PUT').length, expectedPuts);
+    assert.ok(!f.calls.some(call => call.url.endsWith('/posts')));
+    assert.ok(!JSON.stringify(result).includes(TOKEN));
+  }
+});
+
+test('transfer HTTP failure retains its own status and blocks create-post', async () => {
+  const f = fixture({ transfer: new Response(TOKEN, { status: 503 }) });
+  const saved = [];
+  const result = await upload(f.adapter, { onReceipt: value => { saved.push({ ...value }); } });
+  assert.equal(result.phase, 'transfer');
+  assert.equal(result.code, 'ZERNIO_HTTP_REJECTED');
+  assert.equal(result.httpStatus, 503);
+  assert.ok(saved.some(value => value.phase === 'transfer' && value.httpStatus === null));
+  assert.ok(!f.calls.some(call => call.url.endsWith('/posts')));
+  assert.ok(!JSON.stringify(result).includes(TOKEN));
 });

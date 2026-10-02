@@ -21,7 +21,7 @@ test('stdio MCP negotiates, lists tools and persists a series across restarts', 
   const client = await connect();
   t.after(() => client.close());
   const tools = await client.listTools();
-  assert.equal(tools.tools.length, 42);
+  assert.equal(tools.tools.length, 43);
   const reviewSchema = tools.tools.find(tool => tool.name === 'ytfun_episode_approve').inputSchema.properties.review;
   const ownerReview = reviewSchema.anyOf.find(schema => schema.properties.mode?.const === 'owner_accepted_technical');
   assert.equal(ownerReview.properties.renderWatched.const, false);
@@ -39,6 +39,17 @@ test('stdio MCP negotiates, lists tools and persists a series across restarts', 
   assert.ok(tools.tools.some(tool => tool.name === 'ytfun_facebook_publish'));
   assert.ok(tools.tools.some(tool => tool.name === 'ytfun_kwai_export'));
   assert.ok(tools.tools.some(tool => tool.name === 'ytfun_delivery_enqueue'));
+  const reschedule = tools.tools.find(tool => tool.name === 'ytfun_delivery_reschedule').inputSchema;
+  assert.equal(reschedule.properties.expectedClaim.additionalProperties, false);
+  assert.deepEqual(reschedule.properties.expectedClaim.required.sort(), ['accountId', 'bindingSha256', 'dueAt', 'madeForKids', 'mode', 'platform', 'privacy', 'providerAccountId', 'renderSha256', 'reviewHash']);
+  assert.deepEqual(reschedule.properties.expectedClaim.properties.platform.enum, ['youtube', 'facebook', 'tiktok', 'kwai']);
+  assert.deepEqual(reschedule.properties.expectedClaim.properties.privacy.enum, ['private', 'unlisted', 'public']);
+  for (const key of ['providerAccountId', 'bindingSha256', 'madeForKids']) assert.ok(reschedule.properties.expectedClaim.properties[key].anyOf.some(value => value.type === 'null'));
+  const cadenceSchema = tools.tools.find(tool => tool.name === 'ytfun_project_cadence_update').inputSchema.properties.cadence;
+  assert.equal(cadenceSchema.properties.minHoursBetweenPosts.minimum, 0);
+  assert.equal(cadenceSchema.properties.minHoursBetweenPosts.maximum, undefined);
+  assert.ok(cadenceSchema.properties.maxPostsPerRollingDay.anyOf.some(value => value.type === 'null'));
+  assert.ok(cadenceSchema.properties.maxPostsPerRollingDay.anyOf.some(value => value.type === 'integer' && value.maximum === 9007199254740991));
   const migration = tools.tools.find(tool => tool.name === 'ytfun_zernio_delivery_migrate').inputSchema;
   assert.deepEqual(migration.properties.expectedMode.enum, ['official_api', 'experimental_session_rest']);
   assert.ok(migration.required.includes('expectedReviewHash'));
@@ -112,6 +123,16 @@ test('stdio MCP negotiates, lists tools and persists a series across restarts', 
   const staleCadence = await client.callTool({ name: 'ytfun_project_cadence_update', arguments: cadenceArguments });
   assert.equal(staleCadence.isError, true);
   assert.match(staleCadence.content[0].text, /cadence changed/);
+  const uncappedArguments = { projectId: project.id, expectedCadence: cadenceArguments.cadence, cadence: { minHoursBetweenPosts: 0, maxPostsPerRollingDay: null }, reason: 'Owner permits multiple distinct beneficial works per dispatch.' };
+  const uncapped = await client.callTool({ name: 'ytfun_project_cadence_update', arguments: uncappedArguments });
+  assert.ok(!uncapped.isError, JSON.stringify(uncapped));
+  const updatedProject = JSON.parse(uncapped.content[0].text);
+  assert.deepEqual(updatedProject.cadence, uncappedArguments.cadence);
+  assert.equal(updatedProject.cadenceHistory.length, 2);
+  for (const cadence of [{ minHoursBetweenPosts: -1, maxPostsPerRollingDay: null }, { minHoursBetweenPosts: 0, maxPostsPerRollingDay: 0 }]) {
+    const invalidCadence = await client.callTool({ name: 'ytfun_project_cadence_update', arguments: { ...uncappedArguments, expectedCadence: uncappedArguments.cadence, cadence } });
+    assert.equal(invalidCadence.isError, true);
+  }
   const silent = await client.callTool({ name: 'ytfun_episode_plan', arguments: { projectId: project.id, audioMode: 'silent', title: 'The kitten and the obsidian portal', hook: 'A violet light travels beneath a black stone.', synopsis: 'A cybernetic kitten discovers an impossible interior.', continuityNote: 'First original visual reveal.', originalAngle: 'A complete comic portal reveal without speech or text.', scenes: [{ durationSeconds: 5, visualPrompt: 'An original silver cartoon kitten beside an obsidian sphere on a violet sofa.' }], metadata: { description: 'Original AI fiction.', hashtags: ['#AIMeow'] } } });
   assert.ok(!silent.isError, JSON.stringify(silent));
   assert.equal(JSON.parse(silent.content[0].text).audioMode, 'silent');

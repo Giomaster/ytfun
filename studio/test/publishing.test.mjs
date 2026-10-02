@@ -563,7 +563,7 @@ test('Facebook exception authorization preserves structural cadence and unresolv
   for (const gate of ['invalid-project-cadence', 'invalid-publication-time', 'unknown-publication']) await t.test(gate, async subtest => {
     const f = await facebookExceptionFixture(subtest);
     await f.store.transaction(state => {
-      if (gate === 'invalid-project-cadence') state.projects[0].cadence.minHoursBetweenPosts = 11;
+      if (gate === 'invalid-project-cadence') state.projects[0].cadence.minHoursBetweenPosts = -1;
       else if (gate === 'invalid-publication-time') state.publications[0].effectiveAt = 'invalid-time';
       else Object.assign(state.publications[0], { status: 'unknown', reviewHash: '1'.repeat(64), renderSha256: '2'.repeat(64) });
     });
@@ -844,6 +844,88 @@ test('rolling-day cadence checks a window that ends at a later reservation', asy
   const publisher = new Publisher(f.store, { env: { ...f.env, YTFUN_YOUTUBE_PUBLIC_ENABLED: 'true', YTFUN_YOUTUBE_AUDIT_CONFIRMED: 'true' } });
   const plan = await publisher.preflight({ episodeId: f.episode.id, platform: 'youtube', privacy: 'public', publishAt: new Date(candidate).toISOString() });
   assert.ok(plan.reasons.some((reason) => reason.includes('at most 2')));
+});
+
+test('explicit zero spacing and null count cap permit distinct cross-format Facebook posts sequentially in one owner dispatch', async t => {
+  let uploads = 0;
+  const f = await facebookExceptionFixture(t, { upload: async () => ({ videoId: String(987650 + ++uploads), status: 'published', confirmed: true }) });
+  const before = await f.store.read();
+  const studio = new Studio(f.store);
+  await studio.updateProjectCadence({ projectId: f.project.id, expectedCadence: { minHoursBetweenPosts: 18, maxPostsPerRollingDay: 2 },
+    cadence: { minHoursBetweenPosts: 0, maxPostsPerRollingDay: null }, reason: 'Owner authorizes multiple beneficial distinct works without a fixed editorial count or cooldown.' });
+  const snapshot = delivery => ({ dueAt: delivery.dueAt, platform: delivery.platform, privacy: delivery.privacy, madeForKids: delivery.madeForKids ?? null,
+    reviewHash: delivery.reviewHash, renderSha256: delivery.renderSha256, accountId: delivery.accountId, mode: delivery.mode,
+    providerAccountId: delivery.providerAccountId ?? null, bindingSha256: delivery.bindingSha256 ?? null });
+  for (const delivery of [f.delivery, f.otherDelivery]) {
+    const retimed = await f.queue.rescheduleUnstarted({ deliveryId: delivery.id, expectedClaim: snapshot(delivery), dueAt: new Date().toISOString(),
+      reason: 'The specialist selected this distinct work for the current owner-authorized dispatch.' });
+    assert.equal(retimed.id, delivery.id);
+    const result = await f.queue.runDue({ platform: 'facebook', execute: true, expectedDeliveryId: delivery.id });
+    assert.equal(result.delivery.status, 'completed');
+    assert.equal(result.delivery.outcome, 'published');
+  }
+  const after = await f.store.read();
+  assert.deepEqual(after.publications.filter(item => before.publications.some(old => old.id === item.id)), before.publications);
+  assert.equal(after.publications.length, before.publications.length + 2);
+  assert.deepEqual(after.facebookCadenceExceptions ?? [], []);
+  assert.equal(after.projects[0].cadence.maxPostsPerRollingDay, null);
+  assert.equal(after.deliveries.filter(item => item.status === 'completed').length, 2);
+  assert.ok(after.deliveries.every(item => item.rescheduleHistory.length === 1));
+  assert.equal(f.calls.length, 2);
+  assert.notEqual(digest(f.calls[0].media), digest(f.calls[1].media));
+  assert.ok(after.publications.slice(-2).every(item => item.status === 'published' && item.privacy === 'public' && item.accountId === f.env.FACEBOOK_PAGE_ID));
+});
+
+test('explicit unlimited cadence has no implicit three-post cap and still blocks duplicate episodes and malformed reservation evidence', async t => {
+  const f = await fixture(t);
+  await f.store.transaction(state => {
+    state.projects[0].cadence = { minHoursBetweenPosts: 0, maxPostsPerRollingDay: null };
+    for (let i = 0; i < 6; i++) state.publications.push({ id: `prior-${i}`, episodeId: `other-episode-${i}`, projectId: f.project.id,
+      platform: 'youtube', accountId: CHANNEL, status: 'published', effectiveAt: new Date(Date.now() - (i + 1) * 60_000).toISOString() });
+  });
+  const publisher = new Publisher(f.store, { env: f.env });
+  const input = { episodeId: f.episode.id, platform: 'youtube', privacy: 'private' };
+  assert.equal((await publisher.preflight(input)).ready, true);
+  await f.store.transaction(state => { state.publications[0].episodeId = f.episode.id; state.publications[0].status = 'unknown'; });
+  const duplicate = await publisher.preflight(input);
+  assert.equal(duplicate.ready, false);
+  assert.ok(duplicate.reasons.some(reason => reason.includes('already has an upload or reservation')));
+  await f.store.transaction(state => { state.publications[0].episodeId = 'other-episode'; state.publications[0].effectiveAt = 'invalid-time'; });
+  const malformed = await publisher.preflight(input);
+  assert.equal(malformed.ready, false);
+  assert.ok(malformed.reasons.some(reason => reason.includes('invalid reservation time')));
+});
+
+test('null count cap is distinct from an absent legacy field and stricter policies still apply across shared-channel projects', async t => {
+  const f = await fixture(t);
+  await f.store.transaction(state => {
+    state.projects[0].cadence = { minHoursBetweenPosts: 0, maxPostsPerRollingDay: null };
+    state.projects.push({ ...f.project, id: 'legacy-project', cadence: { minHoursBetweenPosts: 0 } });
+    state.publications.push({ id: 'legacy-project-reservation', episodeId: 'other-episode', projectId: 'legacy-project', platform: 'youtube',
+      accountId: CHANNEL, status: 'reserved', effectiveAt: new Date().toISOString() });
+  });
+  const publisher = new Publisher(f.store, { env: f.env });
+  const input = { episodeId: f.episode.id, platform: 'youtube', privacy: 'private' };
+  const legacy = await publisher.preflight(input);
+  assert.equal(legacy.ready, false);
+  assert.ok(legacy.reasons.some(reason => reason.includes('at most 1')));
+  await f.store.transaction(state => { state.projects[1].cadence = { minHoursBetweenPosts: 0, maxPostsPerRollingDay: null }; });
+  assert.equal((await publisher.preflight(input)).ready, true);
+  await f.store.transaction(state => { state.projects[1].cadence.minHoursBetweenPosts = 12; });
+  const spaced = await publisher.preflight(input);
+  assert.equal(spaced.ready, false);
+  assert.ok(spaced.reasons.some(reason => reason.includes('12 hours between')));
+  await f.store.transaction(state => { state.projects[1].cadence.minHoursBetweenPosts = -1; });
+  assert.ok((await publisher.preflight(input)).reasons.some(reason => reason.includes('invalid cadence policy')));
+});
+
+test('zero spacing preserves a configured count limit across regular and short publications', async t => {
+  const f = await facebookExceptionFixture(t);
+  await f.store.transaction(state => { state.projects[0].cadence = { minHoursBetweenPosts: 0, maxPostsPerRollingDay: 2 }; });
+  const plan = await f.publisher.preflight({ episodeId: f.episode.id, platform: 'facebook', privacy: 'public' });
+  assert.equal(plan.ready, false);
+  assert.ok(plan.reasons.some(reason => reason.includes('at most 2')));
+  assert.ok(plan.reasons.every(reason => !reason.includes('hours between')));
 });
 
 test('TikTok export retains disclosure and hashes, deduplicates, and never counts as a published post', async (t) => {
