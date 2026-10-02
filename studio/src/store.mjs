@@ -39,10 +39,10 @@ function validateState(state) {
   if (state.facebookCadenceExceptions !== undefined) {
     if (!Array.isArray(state.facebookCadenceExceptions)) throw new Error('Invalid Facebook cadence exception collection');
     const ids = new Set();
-    const cycles = new Set();
+    const deliveries = new Set();
     for (const item of state.facebookCadenceExceptions) {
-      const cycle = `${item?.accountId}:${item?.cycleId}`;
-      if (!item || typeof item.id !== 'string' || !item.id || ids.has(item.id) || cycles.has(cycle) ||
+      const delivery = `${item?.accountId}:${item?.deliveryId}`;
+      if (!item || typeof item.id !== 'string' || !item.id || ids.has(item.id) || deliveries.has(delivery) ||
           item.platform !== 'facebook' || item.privacy !== 'public' || !['authorized', 'consumed'].includes(item.status) ||
           !['accountId', 'cycleId', 'deliveryId', 'episodeId', 'authorizedBy', 'authorityReference', 'reason'].every(key => typeof item[key] === 'string' && item[key].trim()) ||
           !/^[a-f0-9]{64}$/.test(item.reviewHash ?? '') || !/^[a-f0-9]{64}$/.test(item.renderSha256 ?? '') ||
@@ -50,7 +50,7 @@ function validateState(state) {
           !Array.isArray(item.priorPublicationIds) || !item.priorPublicationIds.every(id => typeof id === 'string' && id) ||
           (item.status === 'consumed' && (typeof item.publicationId !== 'string' || !Number.isFinite(Date.parse(item.consumedAt))))) throw new Error('Invalid Facebook cadence exception record');
       ids.add(item.id);
-      cycles.add(cycle);
+      deliveries.add(delivery);
     }
   }
   if (state.zernioConsents !== undefined) {

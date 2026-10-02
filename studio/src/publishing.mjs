@@ -410,10 +410,10 @@ export class Publisher {
       if (!delivery || delivery.status !== 'queued' || delivery.platform !== 'facebook' || delivery.privacy !== 'public' ||
           delivery.accountId !== accountId || delivery.reviewHash !== expectedReviewHash) throw new Error('Cadence exception requires an unstarted, exact public Facebook delivery.');
       if (state.deliveries.some(item => item.status === 'running')) throw new Error('Reconcile the running delivery before authorizing a cadence exception.');
-      const previous = state.facebookCadenceExceptions?.find(item => item.accountId === accountId && item.cycleId === cycleId);
+      const previous = state.facebookCadenceExceptions?.find(item => item.accountId === accountId && item.deliveryId === deliveryId);
       if (previous) {
-        if (previous.deliveryId !== deliveryId || previous.reviewHash !== expectedReviewHash || previous.renderSha256 !== delivery.renderSha256 ||
-            previous.status !== 'authorized' || Date.parse(previous.expiresAt) <= Date.now()) throw new Error('This dispatch already has a different, expired or consumed cadence exception.');
+        if (previous.cycleId !== cycleId || previous.reviewHash !== expectedReviewHash || previous.renderSha256 !== delivery.renderSha256 ||
+            previous.status !== 'authorized' || Date.parse(previous.expiresAt) <= Date.now()) throw new Error('This delivery already has a different, expired or consumed cadence exception.');
         return { duplicate: true, exception: previous, delivery };
       }
       if (delivery.cadenceExceptionId) throw new Error('This delivery already has an exception; reconcile it without renewing the authorization.');
