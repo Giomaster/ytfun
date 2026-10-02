@@ -243,6 +243,78 @@ test('documented direct storage key and path-style bucket both accept the exact 
   }
 });
 
+test('virtual-hosted R2 bucket and account upload the exact direct object without sharing the API bearer', async () => {
+  const uploadUrl = `https://fixture-bucket.${'2'.repeat(32)}.r2.cloudflarestorage.com/${key}?X-Amz-Signature=${SIGNATURE}`;
+  const f = fixture({ presign: { ...presign, uploadUrl } });
+  const saved = [];
+  const result = await upload(f.adapter, { onReceipt: value => saved.push({ ...value }) });
+  assert.equal(result.status, 'processing');
+  assert.equal(result.providerPostId, POST);
+  assert.equal(result.publicationId, PUBLICATION);
+  assert.equal(result.renderSha256, SHA);
+  assert.equal(result.confirmed, false);
+  const put = f.calls.find(call => call.options.method === 'PUT');
+  assert.equal(put.url, uploadUrl);
+  assert.deepEqual(put.options.body, MEDIA);
+  assert.equal(put.options.headers['Content-Type'], 'video/mp4');
+  assert.equal(put.options.headers.Authorization, undefined);
+  assert.equal(put.options.redirect, 'error');
+  const mutations = f.calls.filter(call => call.options.method === 'POST' && call.url.endsWith('/posts'));
+  assert.equal(mutations.length, 1);
+  assert.equal(mutations[0].options.headers['Idempotency-Key'], PUBLICATION);
+  const body = JSON.parse(mutations[0].options.body);
+  assert.deepEqual(body.mediaItems, [{ type: 'video', url: presign.publicUrl }]);
+  assert.equal(body.metadata.ytfunPublicationId, PUBLICATION);
+  assert.equal(body.metadata.ytfunRenderSha256, SHA);
+  assert.equal(body.platforms[0].accountId, PROVIDER);
+  assert.equal(body.platforms[0].platformSpecificData.visibility, 'public');
+  assert.equal(body.platforms[0].platformSpecificData.containsSyntheticMedia, true);
+  assert.equal(body.platforms[0].platformSpecificData.madeForKids, false);
+  assert.equal(body.scheduledFor, undefined);
+  assert.ok(!JSON.stringify({ result, saved }).includes(SIGNATURE));
+  assert.ok(!JSON.stringify({ result, saved }).includes(TOKEN));
+  assert.ok(!JSON.stringify({ result, saved }).includes(uploadUrl));
+});
+
+test('virtual-hosted R2 compatibility rejects extra labels, invalid accounts, credentials and object substitutions before PUT', async () => {
+  const origin = `https://fixture-bucket.${'2'.repeat(32)}.r2.cloudflarestorage.com`;
+  const uploadUrl = `${origin}/${key}?X-Amz-Signature=${SIGNATURE}`;
+  for (const unsafe of [
+    uploadUrl.replace('https://', 'https://extra.'),
+    uploadUrl.replace('2'.repeat(32), 'g'.repeat(32)),
+    uploadUrl.replace('2'.repeat(32), '2'.repeat(31)),
+    uploadUrl.replace('fixture-bucket', 'a'.repeat(64)),
+    uploadUrl.replace('fixture-bucket', '-fixture-bucket'),
+    uploadUrl.replace('fixture-bucket', 'fixture-bucket-'),
+    uploadUrl.replace('fixture-bucket', 'fixture_bucket'),
+    uploadUrl.replace('.r2.cloudflarestorage.com', '.r2.cloudflarestorage.com.evil.example'),
+    uploadUrl.replace('https://', 'https://user:pass@'),
+    uploadUrl.replace('https:', 'http:'),
+    uploadUrl.replace('.com/', '.com:444/'),
+    uploadUrl.replace(`/${key}`, `/fixture-bucket/${key}`),
+    uploadUrl.replace(`/${key}`, `/extra/${key}`),
+    uploadUrl.replace('ai-meow.mp4', 'different.mp4'),
+    uploadUrl.replace('/temp/', '/%74emp/'),
+    `${uploadUrl}&X-Amz-Signature=${SIGNATURE}`,
+    `${uploadUrl}&%58-Amz-Signature=${SIGNATURE}`,
+    `${uploadUrl}#ignored-fragment`,
+  ]) {
+    const f = fixture({ presign: { ...presign, uploadUrl: unsafe } });
+    const result = await upload(f.adapter);
+    assert.equal(result.status, 'unknown');
+    assert.equal(result.code, 'ZERNIO_STORAGE_TARGET_REJECTED');
+    assert.equal(result.httpStatus, 200);
+    assert.equal(result.phase, 'presign');
+    assert.ok(!f.calls.some(call => call.options.method === 'PUT' || call.url.endsWith('/posts')));
+    assert.ok(!JSON.stringify(result).includes(SIGNATURE));
+    assert.ok(!JSON.stringify(result).includes(TOKEN));
+  }
+  const wrongPair = fixture({ presign: { ...presign, uploadUrl,
+    publicUrl: presign.publicUrl.replace('ai-meow.mp4', 'different.mp4') } });
+  assert.equal((await upload(wrongPair.adapter)).code, 'ZERNIO_STORAGE_TARGET_REJECTED');
+  assert.ok(!wrongPair.calls.some(call => call.options.method === 'PUT' || call.url.endsWith('/posts')));
+});
+
 test('bucket compatibility still rejects arbitrary paths, lookalike origins and missing or duplicate signatures', async () => {
   for (const uploadUrl of [
     presign.uploadUrl.replace('/media/temp/', '/media/extra/temp/'),

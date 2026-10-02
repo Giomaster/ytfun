@@ -56,9 +56,13 @@ function uploadUrls(data) {
       !Number.isInteger(data.expiresIn) || data.expiresIn < 1 || data.expiresIn > 3600) return null;
   const target = httpsUrl(data.uploadUrl);
   const publicUrl = httpsUrl(data.publicUrl);
-  const objectPaths = target ? [`/${data.key}`, ...(/^\/[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}\//.test(target.pathname) ?
+  // R2 also returns virtual-hosted bucket/account URLs. In that form the
+  // bucket is already in the hostname, so the path must be the exact key.
+  const virtualBucket = target && /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.[a-f0-9]{32}\.r2\.cloudflarestorage\.com$/.test(target.hostname);
+  const singleLabel = target && /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.r2\.cloudflarestorage\.com$/.test(target.hostname);
+  const objectPaths = target ? [`/${data.key}`, ...(!virtualBucket && /^\/[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}\//.test(target.pathname) ?
     [`/${target.pathname.split('/')[1]}/${data.key}`] : [])] : [];
-  if (!target || !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.r2\.cloudflarestorage\.com$/.test(target.hostname) ||
+  if (!target || (!singleLabel && !virtualBucket) ||
       !/^[a-f0-9]{64}$/i.test(target.searchParams.get('X-Amz-Signature') ?? '') ||
       target.searchParams.getAll('X-Amz-Signature').length !== 1 ||
       !publicUrl || publicUrl.hostname !== 'media.zernio.com' || publicUrl.search || publicUrl.pathname !== `/${data.key}` ||

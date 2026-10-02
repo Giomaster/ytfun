@@ -58,6 +58,14 @@ entertainment category 24. Short classification comes from the real duration and
 aspect ratio; no synthetic Short flag is sent. The publication UUID is the stable
 `Idempotency-Key`; metadata binds the publication UUID and render digest.
 
+Signed R2 targets accept both the documented single-label endpoint and the
+Cloudflare virtual-hosted form `bucket.account-id.r2.cloudflarestorage.com`, with
+a bounded DNS bucket label and a 32-hex account ID. Virtual-hosted targets require
+the exact key as their path; path-style targets may include one bucket segment.
+Both forms require HTTPS, one valid signature, and the exact matching public
+object under `media.zernio.com`. Extra subdomains, credentials, fragments and
+mismatched object paths are rejected before transfer.
+
 `onReceipt` persists phases and the provider post ID as soon as received, including
 HTTP 207 platform failures. No raw provider errors, API keys, public media storage
 URLs or signed URLs appear in receipts. The adapter never automatically retries a
@@ -85,6 +93,7 @@ Primary references consulted 2026-10-02:
 - [Create post](https://docs.zernio.com/posts/create-post)
 - [Get post](https://docs.zernio.com/posts/get-post)
 - [Media uploads](https://docs.zernio.com/guides/media-uploads)
+- [Cloudflare R2 virtual-hosted endpoints](https://developers.cloudflare.com/r2/platform/release-notes/)
 - [Idempotency](https://docs.zernio.com/guides/idempotency)
 - [Public OpenAPI schemas](https://zernio.com/openapi.yaml)
 
