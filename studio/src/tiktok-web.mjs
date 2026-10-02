@@ -123,29 +123,61 @@ export class TikTokWeb {
       if (!posted.ok || code !== 0) return { status: 'unknown', phase, creationId, videoId, confirmed: false,
         httpStatus: posted.httpStatus, ...(Number.isSafeInteger(code) ? { applicationCode: code } : {}) };
       // Successful project submission is not evidence of processing or visibility.
-      return { status: 'processing', phase, creationId, videoId, confirmed: false };
+      const singles = posted.data.single_post_resp_list;
+      const single = Array.isArray(singles) && singles.length === 1 && singles[0].batch_index === 0 && singles[0].status_code === 0 ? singles[0] : null;
+      return { status: 'processing', phase, creationId, videoId, confirmed: false,
+        ...(validId(posted.data.project_id) ? { projectId: posted.data.project_id } : {}),
+        ...(validId(single?.item_id) ? { postId: single.item_id } : {}),
+      };
     } catch (error) {
       return { status: 'unknown', phase, creationId, ...(videoId ? { videoId } : {}), confirmed: false,
         code: /^TIKTOK_[A-Z_]+$/.test(error.message ?? '') ? error.message : 'TIKTOK_REQUEST_OUTCOME_UNCONFIRMED' };
     }
   }
-  async status({ creationId, postId }) {
-    await this.verifyAccount();
+  async status({ creationId, projectId, postId, videoId }) {
+    const account = await this.verifyAccount();
     if (!/^[A-Za-z0-9_-]{16,64}$/.test(creationId ?? '')) throw new Error('TIKTOK_CREATION_RECEIPT_REQUIRED');
-    if (!validId(postId)) {
-      const project = await this.#session.request('/tiktok/web/project/status/v1/', { params: { creation_id: creationId } });
-      // Until the real response schema is captured, never infer an item ID or
-      // public visibility from project success. Keep a bounded operator diagnosis.
+    if (!validId(projectId) || !validVid(videoId)) return { status: 'processing', confirmed: false, phase: 'status' };
+    const project = await this.#session.request('/tiktok/web/project/status/v1/', { params: { project_id: projectId } });
+    const tasks = project.data?.task_list;
+    const task = Array.isArray(tasks) && tasks.length === 1 ? tasks[0] : null;
+    if (!project.ok || project.data?.status_code !== 0 || project.data.project_id !== projectId || project.data.project_status !== 2 ||
+        task?.task_status !== 2 || task?.status_code !== 0 || !validId(task.item_id) || (postId && postId !== task.item_id)) {
       return { status: 'processing', confirmed: false, phase: 'status', httpStatus: project.httpStatus,
         applicationCode: Number.isSafeInteger(project.data?.status_code) ? project.data.status_code : null,
-        responseFields: project.data ? Object.keys(project.data).slice(0, 30) : [] };
+        providerProjectStatus: Number.isSafeInteger(project.data?.project_status) ? project.data.project_status : null };
     }
-    const result = await this.#session.request('/api/item/detail/', { params: { itemId: postId } });
-    const item = result.data?.itemInfo?.itemStruct;
-    const account = await this.verifyAccount();
-    if (!result.ok || result.data?.statusCode !== 0 || item?.id !== postId || item?.author?.id !== account.accountId ||
-        item?.author?.uniqueId !== account.handle || item?.privateItem !== false || item?.secret !== false || item?.forFriend !== false) return { status: 'processing', confirmed: false, phase: 'status' };
+    postId = task.item_id;
+    // The item JSON endpoint returned an empty body in the actual observation.
+    // Verify the public server-rendered page with no account cookies instead.
+    const url = `https://www.tiktok.com/@${account.handle}/video/${postId}`;
+    let response, html;
+    try {
+      response = await this.#fetch(url, { redirect: 'error', signal: AbortSignal.timeout(30_000) });
+      if (!response.ok || response.redirected || !response.body?.getReader) return { status: 'processing', confirmed: false, phase: 'public-page' };
+      const reader = response.body.getReader(), chunks = [];
+      let bytes = 0;
+      try {
+        for (;;) {
+          const { done, value } = await reader.read(); if (done) break;
+          bytes += value.byteLength;
+          if (bytes > 4 * 1024 * 1024) { void reader.cancel().catch(() => {}); return { status: 'processing', confirmed: false, phase: 'public-page' }; }
+          chunks.push(value);
+        }
+      } finally { reader.releaseLock(); }
+      html = Buffer.concat(chunks, bytes).toString('utf8');
+    } catch { return { status: 'processing', confirmed: false, phase: 'public-page' }; }
+    const script = html.match(/<script\b[^>]*id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>([\s\S]*?)<\/script>/);
+    let data;
+    try { data = JSON.parse(script?.[1] ?? ''); } catch { return { status: 'processing', confirmed: false, phase: 'public-page' }; }
+    const detail = data?.__DEFAULT_SCOPE__?.['webapp.video-detail'];
+    const item = detail?.itemInfo?.itemStruct;
+    const createdAt = Number(item?.createTime) * 1000;
+    if (detail?.statusCode !== 0 || item?.id !== postId || item?.author?.id !== account.accountId || item?.author?.uniqueId !== account.handle ||
+        item?.video?.videoID !== videoId || item?.privateItem !== false || item?.secret !== false || item?.forFriend !== false ||
+        item?.isProhibited !== false || item?.isReviewing !== false || item?.ShowAIGC !== true || item?.aigcLabelType !== '1' ||
+        !Number.isSafeInteger(createdAt) || createdAt < 1 || createdAt > Date.now() + 60_000) return { status: 'processing', confirmed: false, phase: 'public-page' };
     return { status: 'published', confirmed: true, postId, phase: 'status', privacy: 'public',
-      url: `https://www.tiktok.com/@${account.handle}/video/${postId}` };
+      url, publishedAt: new Date(createdAt).toISOString(), syntheticDisclosureConfirmed: true, verifiedWithoutCookies: true };
   }
 }

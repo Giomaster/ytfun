@@ -33,9 +33,12 @@ A postagem solicita `visibility_type=0` e `aigc_label_type=1`.
 Cada etapa guarda criação, vídeo, fase e estado, sem credenciais. Nenhuma mutação
 é repetida automaticamente. Resultados incertos continuam reservados, inclusive
 após reinício. `ytfun_tiktok_publication_sync` faz somente GET: projeto aceito ou
-transferência completa não significam postagem pública. O esquema real de status
-precisa identificar o item; a confirmação final verifica ID, autor e privacidade.
-Até essa evidência existir, o estado permanece pendente/processando/desconhecido.
+transferência completa não significam postagem pública. O esquema observado usa
+`project_id` para consultar o projeto e `task_list` para acompanhar o item. Além do
+processamento concluído, a confirmação lê a página pública sem cookies e verifica
+ID, autor, vídeo original, privacidade e rótulo sintético real. Uma página de desafio
+ou esquema diferente mantém o estado pendente/processando/desconhecido. Nunca
+repita POST para resolver uma falha de leitura do resultado.
 
 Uma recuperação operacional estreita aceita somente a rejeição local do destino
 na fase de alocação, antes de qualquer transferência/commit/post. Ela exige o

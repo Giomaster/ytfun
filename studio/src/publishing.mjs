@@ -521,6 +521,7 @@ export class Publisher {
       const status = ['processing', 'unknown'].includes(receipt?.status) ? receipt.status : 'unknown';
       return { publication: await this.updatePublication(publication.id, { status, providerPhase: receipt?.phase ?? 'unknown',
         ...(receipt?.creationId ? { creationId: receipt.creationId } : {}), ...(receipt?.videoId ? { videoId: receipt.videoId } : {}),
+        ...(receipt?.postId ? { postId: receipt.postId } : {}), ...(receipt?.projectId ? { providerProjectId: receipt.projectId } : {}),
         ...(Number.isInteger(receipt?.httpStatus) ? { httpStatus: receipt.httpStatus } : {}),
         ...(Number.isSafeInteger(receipt?.applicationCode) ? { applicationCode: receipt.applicationCode } : {}),
         ...(receipt?.code && /^TIKTOK_[A-Z_]+$/.test(receipt.code) ? { providerCode: receipt.code } : {}),
@@ -533,11 +534,12 @@ export class Publisher {
   async syncTikTok({ publicationId }) {
     const publication = (await this.store.read()).publications.find(p => p.id === publicationId && p.platform === 'tiktok' && p.route === 'experimental_session_rest');
     if (!publication?.creationId || publication.accountId !== this.env.TIKTOK_ACCOUNT_ID) throw new Error('The original TikTok account and REST receipt are required.');
-    const receipt = await this.tiktok.status({ creationId: publication.creationId, postId: publication.postId });
+    const receipt = await this.tiktok.status({ creationId: publication.creationId, projectId: publication.providerProjectId, postId: publication.postId, videoId: publication.videoId });
     if (receipt.status !== 'published' || receipt.confirmed !== true || receipt.privacy !== 'public' || !/^[1-9]\d{0,63}$/.test(receipt.postId ?? '') ||
-        receipt.url !== `https://www.tiktok.com/@${this.env.TIKTOK_ACCOUNT_HANDLE}/video/${receipt.postId}`) return { publication, verified: false, diagnostic: receipt };
+        receipt.url !== `https://www.tiktok.com/@${this.env.TIKTOK_ACCOUNT_HANDLE}/video/${receipt.postId}` || !Number.isFinite(Date.parse(receipt.publishedAt))) return { publication, verified: false, diagnostic: receipt };
     return { verified: true, publication: await this.updatePublication(publication.id, { status: 'published', postId: receipt.postId, url: receipt.url,
-      providerPrivacyStatus: 'public', verifiedAt: new Date().toISOString(), publishedAt: publication.publishedAt ?? new Date().toISOString() }) };
+      providerPrivacyStatus: 'public', verifiedAt: new Date().toISOString(), publishedAt: receipt.publishedAt, effectiveAt: receipt.publishedAt,
+      syntheticDisclosureConfirmed: receipt.syntheticDisclosureConfirmed === true, publicVerifiedWithoutCookies: receipt.verifiedWithoutCookies === true, error: null }) };
   }
 
   async resumeTikTokAllocation({ publicationId, expectedReviewHash, allocationPath, allocationSha256, observedBy, evidence }) {
@@ -573,6 +575,7 @@ export class Publisher {
     });
     return { publication: await this.updatePublication(publicationId, { status: ['processing', 'unknown'].includes(receipt?.status) ? receipt.status : 'unknown',
       providerPhase: receipt?.phase ?? 'unknown', ...(receipt?.videoId ? { videoId: receipt.videoId } : {}),
+      ...(receipt?.postId ? { postId: receipt.postId } : {}), ...(receipt?.projectId ? { providerProjectId: receipt.projectId } : {}),
       ...(Number.isInteger(receipt?.httpStatus) ? { httpStatus: receipt.httpStatus } : {}),
       ...(Number.isSafeInteger(receipt?.applicationCode) ? { applicationCode: receipt.applicationCode } : {}),
       ...(receipt?.code && /^TIKTOK_[A-Z_]+$/.test(receipt.code) ? { providerCode: receipt.code } : {}) }) };

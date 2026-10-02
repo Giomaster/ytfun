@@ -127,3 +127,29 @@ test('recovery of an observed untransferred allocation reuses the original proje
   assert.deepEqual(gatewayActions, ['CommitUploadInner']);
   assert.deepEqual(routes, ['/tiktok/web/project/post/v1/']);
 });
+
+test('GET reconciliation confirms only the original public video, owner and synthetic disclosure without cookies', async () => {
+  const postId = '7691909000000000001', projectId = '7691909000000000002', videoId = 'vfixture123456';
+  const item = { id: postId, author: { id: ACCOUNT, uniqueId: 'fixture.meow' }, video: { videoID: videoId },
+    privateItem: false, secret: false, forFriend: false, isProhibited: false, isReviewing: false,
+    ShowAIGC: true, aigcLabelType: '1', createTime: String(Math.floor(Date.now() / 1000)) };
+  const session = { verifyAccount: async () => ({ accountId: ACCOUNT, handle: 'fixture.meow' }), request: async (route, options) => {
+    assert.equal(route, '/tiktok/web/project/status/v1/'); assert.deepEqual(options.params, { project_id: projectId });
+    return { ok: true, httpStatus: 200, data: { status_code: 0, project_id: projectId, project_status: 2,
+      task_list: [{ item_id: postId, task_status: 2, status_code: 0 }] } };
+  } };
+  async function check(value) {
+    const web = new TikTokWeb({ session, fetchImpl: async (url, options) => {
+      assert.equal(String(url), `https://www.tiktok.com/@fixture.meow/video/${postId}`);
+      assert.equal(options.headers, undefined); assert.equal(options.redirect, 'error');
+      return new Response(`<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">${JSON.stringify({ __DEFAULT_SCOPE__: { 'webapp.video-detail': { statusCode: 0, itemInfo: { itemStruct: value } } } })}</script>`);
+    } });
+    return web.status({ creationId: 'fixture-creation-12345', projectId, postId, videoId });
+  }
+  const confirmed = await check(item);
+  assert.equal(confirmed.status, 'published'); assert.equal(confirmed.verifiedWithoutCookies, true);
+  for (const changed of [{ ...item, privateItem: true }, { ...item, ShowAIGC: false }, { ...item, video: { videoID: 'vwrongoriginal123' } },
+    { ...item, author: { ...item.author, id: '999' } }, { ...item, isReviewing: true }]) {
+    assert.equal((await check(changed)).confirmed, false);
+  }
+});
