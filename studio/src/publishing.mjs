@@ -10,6 +10,7 @@ import { distributionCapabilities, publicationPackage } from './distribution.mjs
 import { assertYouTubeConnected, youtubeApiData, youtubeBlocked } from './youtube-data-policy.mjs';
 import { TikTokWeb } from './tiktok-web.mjs';
 import { privateSessionFile } from './tiktok-session.mjs';
+import { approvalReviewIsValid } from './review-policy.mjs';
 
 const DAY_MS = 86_400_000;
 const DEFAULT_MAX_BYTES = 250 * 1024 * 1024;
@@ -219,7 +220,7 @@ export class Publisher {
     const reviewHash = episodeReviewHash(episode);
     const review = episode.approval?.review;
     if (episode.approval?.reviewHash !== reviewHash || !episode.approval?.approvedAt ||
-        review?.originalityChecked !== true || review?.factsChecked !== true || review?.renderWatched !== true || !nonempty(review?.reviewedBy)) {
+        !approvalReviewIsValid(review, { env: this.env, render: episode.render })) {
       reasons.push('Episode requires a current editorial approval of originality, facts, and the finished render.');
     }
     if (episode.approval?.assetReviewHash !== episodeAssetHash(episode, state.assets)) {
@@ -664,7 +665,7 @@ export class Publisher {
       if (path.relative(root, exportRoot) !== 'exports') throw new Error('Export directory must remain inside studio storage.');
       const exportPath = path.join('exports', `${platform}-${id}.json`);
       const destination = path.join(root, exportPath);
-      const packageData = structuredClone(publicationPackage({ platform, plan, episode, createdAt: new Date().toISOString() }));
+      const packageData = structuredClone(publicationPackage({ platform, plan, episode, createdAt: new Date().toISOString(), env: this.env }));
       if (episode.render.captionsPath) {
         const captionsPath = episode.render.captionsPath;
         if (typeof captionsPath !== 'string' || path.isAbsolute(captionsPath)) throw new Error('Subtitles require a path within studio storage.');

@@ -1,5 +1,12 @@
 # Produção de vídeos longos e registro de montagem remota
 
+Este documento descreve limites e APIs de produção. Estratégia, duração útil,
+formatos, aceite de imperfeições e papéis seguem exclusivamente a
+[política editorial e operacional única](ai-meow-operation.md). `format: "long"`
+é um perfil de capacidade do Studio, sem duração mínima editorial ou requisito
+de master. Exemplos de coleção e o packet legado de 96 cenas não bloqueiam
+uma montagem independente mais curta.
+
 `format: "long"` permite até 120 cenas e 900 segundos por episódio. O formato
 `"short"`, inclusive episódios antigos sem `format`, mantém 12 cenas e 180
 segundos. Cada cena tem entre 1 e 60 segundos. Esses são limites deste Studio,
@@ -50,8 +57,10 @@ upload, geração ou encoding durante esse registro e não aceita URL de mídia.
    ser o filesystem do worker; este fluxo não exige encoding no laptop.
 5. Chame `production.registerRemoteRender({ episodeId, localPath, manifest,
    provenance })` com o manifesto exportado, sem alterações.
-6. Faça a revisão real do arquivo registrado. O registro termina em `rendered`,
-   limpa a aprovação anterior e exige uma nova aprovação antes de publicar.
+6. Registre a evidência verdadeira e o aceite aplicável ao arquivo exato. O registro
+   termina em `rendered`, limpa a aprovação anterior e exige nova aprovação técnica
+   vinculada aos hashes antes de publicar. Esse mecanismo não cria aprovação
+   estética/humana obrigatória nem autoriza refação das imperfeições aceitas.
 
 Exemplo de integração JS; este documento não executa o código:
 
@@ -135,13 +144,19 @@ original do worker nunca é apagado pelo registro.
 
 ## Shorts derivados de um master original
 
+Esta seção descreve especificamente `deriveShort`. Sua exigência de pai renderizado
+não se aplica a uma obra independente: planeje um episódio e registre/mapeie fontes
+existentes pelas APIs suportadas, com proveniência e exclusões, e monte seu próprio
+manifesto. Shorts e regulares independentes não esperam um master de 12 minutos.
+
 `studio.deriveShort({ parentEpisodeId, sceneIds, title, hook, synopsis,
 originalAngle, metadata, continuityNote? })`, exposto como
 `ytfun_episode_derive_short`, recebe entre 1 e 12 IDs únicos de cenas de um
 master `long` válido e renderizado. Os IDs precisam aparecer na ordem original;
 a seleção pode ter lacunas e sua duração total deve caber em 180 s. Cada unidade
 escolhida deve construir uma história autônoma com contexto, ação e final completo.
-O servidor confere estrutura e arquivos; essa escolha editorial exige revisão.
+O servidor confere estrutura e arquivos; escolhas editoriais e aceite dos resultados
+seguem a política única, sem um novo gate estético.
 
 A operação cria IDs de episódio/cenas/assets próprios e copia os registros dos
 assets sintéticos mapeados no render do pai. Os bytes originais são referenciados
@@ -175,7 +190,9 @@ cadência de canal continuam separadas para cada entrega.
 Hashes vinculam o registro ao plano e aos inputs exatos; não provam que o worker
 realmente montou o vídeo a partir deles, que a ação é coerente ou que alguém
 assistiu ao resultado. A proveniência é um atestado do operador/worker. Revisão
-humana, originalidade, fatos, licenças e aprovação continuam sendo gates separados.
+do operador, originalidade, fatos, licenças e aprovação vinculada aos hashes são
+registros separados. A revisão não requer validação humana nem perfeição estética;
+preserve o aceite da política única e não declare exame que não ocorreu.
 As verificações globais de duplicidade e fontes do domínio continuam aplicadas.
 
 O cap de produção de 512 MiB não amplia automaticamente o cap de upload do
@@ -188,10 +205,11 @@ temporário no GitHub Actions, incluindo caps, duração longa, proveniência,
 mutação de script/assets, validação de streams, sanitização e concorrência.
 Nenhum teste ou render de validação deve executar no laptop.
 
-O worker `ai-meow-render` do packet v1 continua específico para 96 cenas de
+O worker legado `ai-meow-render` do packet v1 continua específico para 96 cenas de
 7,5 segundos/720 segundos. Ele aceita os dois canvases do manifesto, usando o
 mesmo canvas em todos os seus outputs; nomes de unidades curtas nesse artifact
 não classificam vídeos horizontais como YouTube Shorts. Seu contrato não monta
 automaticamente um regular de nove cenas/67,5 segundos. Essa seleção menor usa
 o fluxo de montagem externa acima com o manifesto próprio; não preencher com
-cenas repetidas para satisfazer o packet legado.
+cenas repetidas para satisfazer o packet legado. Este limite pertence somente
+àquele packet; use uma rota compatível com a seleção, sem financiar cenas extras.

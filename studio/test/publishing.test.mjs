@@ -9,13 +9,15 @@ import test from 'node:test';
 import { Studio, episodeAssetHash, episodeReviewHash } from '../src/domain.mjs';
 import { Publisher } from '../src/publishing.mjs';
 import { StudioStore } from '../src/store.mjs';
+import { DeliveryQueue } from '../src/delivery-queue.mjs';
+import { ownerAcceptedTechnicalReview, technicalReviewEnv } from './technical-review-fixture.mjs';
 
 const CHANNEL = 'UCoriginalStudio';
 const TOKEN = 'fixture-secret-oauth-token';
 const SESSION = 'https://www.googleapis.com/upload/youtube/v3/videos?upload_id=fixture';
 const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
-async function fixture(t) {
+async function fixture(t, { durationSeconds = 65 } = {}) {
   const directory = await mkdtemp(path.join(tmpdir(), 'ytfun-publishing-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   await mkdir(path.join(directory, 'assets'));
@@ -32,8 +34,8 @@ async function fixture(t) {
     hook: 'The city remembered tomorrow', synopsis: 'An invented protagonist makes a new choice.',
     originalAngle: 'A fictional timekeeper negotiates with a sentient clock.', continuityNote: 'Standalone first episode.',
     metadata: { description: 'An original synthetic fictional story.', hashtags: ['fiction', 'animation'] },
-    factualSources: [], scenes: [{ id: 'scene-1', durationSeconds: 65, narration: 'The timekeeper found tomorrow in a clock.', visualPrompt: 'A fantastical timekeeper and a clock' }],
-    render: { path: 'assets/render.mp4', sha256: digest(fileContents['render.mp4']), durationSeconds: 65, synthetic: true, sceneAssets: [{ sceneId: 'scene-1', visualAssetId: 'visual-1', audioAssetId: 'audio-1' }] },
+    factualSources: [], scenes: [{ id: 'scene-1', durationSeconds, narration: 'The timekeeper found tomorrow in a clock.', visualPrompt: 'A fantastical timekeeper and a clock' }],
+    render: { path: 'assets/render.mp4', sha256: digest(fileContents['render.mp4']), durationSeconds, synthetic: true, sceneAssets: [{ sceneId: 'scene-1', visualAssetId: 'visual-1', audioAssetId: 'audio-1' }] },
     status: 'approved',
   };
   approve(episode, assets);
@@ -66,6 +68,57 @@ function successfulFetch({ privacy = 'private', publishAt, onInit, onUpload, loc
 function args(f, extra = {}) {
   return { episodeId: f.episode.id, privacy: 'private', expectedReviewHash: f.episode.approval.reviewHash, madeForKids: false, execute: true, ...extra };
 }
+
+test('technical approvals revalidate runtime opt-in for preflight, public audit and queued execution', async t => {
+  const f = await fixture(t, { durationSeconds: 60 });
+  const env = { ...f.env, ...technicalReviewEnv };
+  const studio = new Studio(f.store, { env });
+  const approved = await studio.approveEpisode({ episodeId: f.episode.id, review: ownerAcceptedTechnicalReview(f.episode) });
+  const remote = successfulFetch({ privacy: 'public' });
+  const publisher = new Publisher(f.store, { env, fetchImpl: remote.fetchImpl });
+  const blocked = await publisher.preflight({ episodeId: f.episode.id, platform: 'youtube', privacy: 'public' });
+  assert.equal(blocked.ready, false);
+  assert.ok(blocked.reasons.some(reason => /confirmed YouTube API audit/.test(reason)));
+  assert.ok(!blocked.reasons.some(reason => /current editorial approval/.test(reason)));
+  const dueAt = new Date(Date.now() + 1000).toISOString();
+  const queue = new DeliveryQueue(f.store, publisher, { now: () => Date.parse(dueAt) });
+  const input = { episodeId: f.episode.id, platform: 'youtube', privacy: 'public', madeForKids: false, dueAt, expectedReviewHash: approved.approval.reviewHash };
+  await assert.rejects(queue.enqueue(input), /confirmed YouTube API audit/);
+  env.YTFUN_YOUTUBE_PUBLIC_ENABLED = 'true'; env.YTFUN_YOUTUBE_AUDIT_CONFIRMED = 'true';
+  assert.equal((await publisher.preflight({ episodeId: f.episode.id, platform: 'youtube', privacy: 'public' })).ready, true);
+  const queued = await queue.enqueue(input);
+  assert.equal(queued.delivery.status, 'queued');
+  env.YTFUN_OWNER_ACCEPTED_TECHNICAL_REVIEW_ENABLED = 'false';
+  const disabled = await publisher.preflight({ episodeId: f.episode.id, platform: 'youtube', privacy: 'public' });
+  assert.equal(disabled.ready, false);
+  assert.ok(disabled.reasons.some(reason => /current editorial approval/.test(reason)));
+  const result = await queue.runDue({ execute: true, platform: 'youtube' });
+  assert.equal(result.delivery.status, 'attention');
+  assert.equal(result.delivery.phase, 'preflight');
+  assert.deepEqual(remote.calls, []);
+  assert.deepEqual((await f.store.read()).publications, []);
+  assert.equal((await f.store.read()).episodes[0].approval.review.renderWatched, false);
+});
+
+test('technical approval exports use the same explicit policy and still reject changed render or asset evidence', async t => {
+  const f = await fixture(t, { durationSeconds: 60 });
+  const env = { ...f.env, ...technicalReviewEnv };
+  const studio = new Studio(f.store, { env });
+  const approved = await studio.approveEpisode({ episodeId: f.episode.id, review: ownerAcceptedTechnicalReview(f.episode) });
+  const publisher = new Publisher(f.store, { env });
+  const input = { episodeId: f.episode.id, expectedReviewHash: approved.approval.reviewHash, platform: 'kwai' };
+  const disabled = new Publisher(f.store, { env: f.env });
+  await assert.rejects(disabled.exportPackage(input), /current editorial approval/);
+  const result = await publisher.exportPackage(input);
+  assert.equal(result.publication.status, 'exported');
+  assert.equal((await f.store.read()).episodes[0].approval.review.renderWatched, false);
+  await f.store.transaction(state => { state.assets[0].provenance.commercialLicense.notes = 'Changed terms after technical approval.'; });
+  const invalid = await publisher.preflight({ episodeId: f.episode.id, platform: 'kwai', privacy: 'private' });
+  assert.equal(invalid.readyToExport, false);
+  assert.ok(invalid.reasons.some(reason => /license evidence changed/.test(reason)));
+  await writeFile(path.join(f.directory, 'assets/render.mp4'), 'mutated owner-accepted render');
+  await assert.rejects(publisher.exportPackage(input), /Render is missing, changed/);
+});
 
 test('TikTok REST reserves the exact reviewed hash and preserves unknown outcomes without duplicate posts', async t => {
   const f = await fixture(t);

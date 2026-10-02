@@ -1,5 +1,10 @@
 # Remote original-video production
 
+This document describes one production API and packet, not an editorial policy.
+AI Meow roles, generation authorization, result acceptance and cadence follow the
+[single editorial and operational policy](ai-meow-operation.md). Packet-specific
+scene lengths are technical bounds of this route, not publication minimums.
+
 `RemoteBatch` reserves explicitly selected 7.5-second scenes of a planned episode
 before dispatch. The bounded packet binds the editorial hash, owned source video,
 model, seeds, estimated costs and a 12-hour authorization window. It uses the same
@@ -44,21 +49,28 @@ attention checkpoints without diagnostics cannot be retroactively reclassified.
 
 Before import, verify the Actions run and commit through GitHub, bind that identity
 with `RemoteBatch.bindRun`, and pass the exact artifact to `RemoteBatch.accept`.
-An asset rejected by observed quality review remains in the cost/history ledger
-but cannot enter rendering, manifest export, editorial approval, derivation or
-publication/export. Rejection participates in the asset review hash; selection
+The implemented `rejectAsset` mechanism preserves a rejected asset in the
+cost/history ledger. That rejected asset cannot enter rendering, manifest export,
+editorial approval, derivation or publication/export. Rejection participates in the asset review hash; selection
 stops on the rejected current asset instead of falling back to older footage.
 Import verifies batch, scene, source, reference, run, commit and MP4 hash before
 committing a synthetic asset and completing the matching spending reservation.
-It does not approve media or publish anything. Human-authorized editorial review,
-remote assembly registration and platform publication remain separate stages.
+It does not approve media or publish anything. Hash-bound approval, remote assembly
+registration and platform publication remain separate stages. These mechanisms
+do not authorize new aesthetic rejection under the active AI Meow policy. Existing
+historical rejections remain evidence; authorized reuse of the existing bytes must
+use supported asset-registration APIs with truthful lineage/owner acceptance,
+without erasing old records or generating a replacement to bypass the rejection.
 
 A terminal owned Actions job can release an unsubmitted reservation only when the
 verified provider step was skipped (`releaseUnsubmitted`). Failed or interrupted
-provider steps cannot clear the charge barrier. Quality retakes require an exact
-asset hash, observed rejection findings (`rejectAsset`) and changed direction via
+provider steps cannot clear the charge barrier. The implemented retake capability
+requires an exact asset hash, observed rejection findings (`rejectAsset`) and changed direction via
 `promptOverrides` plus `replaceRejectedAssetIds`. The original asset and charge
-remain in the record; rejection never erases spending or implies a refund.
+remain in the record; rejection never erases spending or implies a refund. This
+describes a capability, not authorization to use it: the active AI Meow policy
+does not permit paid retakes or corrections for aesthetic/physics/continuity/audio
+imperfections. That acceptance does not permit retrying an unknown request.
 
 All tests run in GitHub Actions. Local media-production actions are not test runs,
 but long rendering and batch generation belong on the remote worker.

@@ -4,6 +4,7 @@ import { realpath, stat } from 'node:fs/promises';
 import { isAbsolute, resolve, sep } from 'node:path';
 import { assertYouTubeConnected, isYouTubeTrend, youtubeApiData } from './youtube-data-policy.mjs';
 import { renderProfile } from './render-profile.mjs';
+import { normalizeApprovalReview } from './review-policy.mjs';
 
 const maximumTrendAgeMs = 7 * 24 * 60 * 60 * 1000;
 const futureToleranceMs = 5 * 60 * 1000;
@@ -335,7 +336,7 @@ async function episodeFindings(state, episode, directory) {
 }
 
 export class Studio {
-  constructor(store, { env = process.env } = {}) { this.store = store; this.youtubeGrantId = env.YTFUN_YOUTUBE_GRANT_ID || 'legacy'; }
+  constructor(store, { env = process.env } = {}) { this.store = store; this.env = env; this.youtubeGrantId = env.YTFUN_YOUTUBE_GRANT_ID || 'legacy'; }
 
   async createProject(input) {
     rejectClientId(input);
@@ -529,14 +530,9 @@ export class Studio {
   }
 
   async approveEpisode(input) {
-    const review = {
-      originalityChecked: input.review?.originalityChecked, factsChecked: input.review?.factsChecked,
-      renderWatched: input.review?.renderWatched, reviewedBy: text(input.review?.reviewedBy, 'review.reviewedBy', 300),
-      notes: text(input.review?.notes, 'review.notes'),
-    };
-    if (review.originalityChecked !== true || review.factsChecked !== true || review.renderWatched !== true) throw new Error('Approval requires originalityChecked, factsChecked and renderWatched attestations');
     return this.store.transaction(async (state) => {
       const episode = requireEpisode(state, input.episodeId);
+      const review = normalizeApprovalReview(input.review, { env: this.env, render: episode.render });
       const findings = await episodeFindings(state, episode, this.store.directory);
       if (findings.length) throw new Error(`Episode is not ready for approval: ${findings.map((entry) => entry.message).join('; ')}`);
       episode.approval = { reviewHash: episodeReviewHash(episode), assetReviewHash: episodeAssetHash(episode, state.assets), approvedAt: new Date().toISOString(), review };

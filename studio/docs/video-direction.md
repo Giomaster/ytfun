@@ -1,9 +1,11 @@
 # Direção de vídeo antes da geração
 
-Esta ficha orienta a produção humana/assistida por MCP. Não é uma etapa automática
-implementada no servidor, nem uma garantia de obediência do modelo. Preencher antes
-de criar referências (quando utilizadas) e pagar pela animação; transformar depois
-em um prompt adequado ao modelo e aos controles disponíveis.
+Esta ficha é um guia prospectivo para preparar prompts antes da geração, subordinado
+à [política editorial e operacional única](ai-meow-operation.md). Não é uma etapa
+automática do servidor nem uma garantia de obediência do modelo. As intenções de
+direção abaixo não criam critérios para descartar, corrigir, regenerar ou impedir
+a publicação de resultados por imperfeições da IA. Prepare os campos pertinentes e
+transforme-os em um prompt adequado à modalidade e aos controles disponíveis.
 
 ## Princípio geral: premissa absurda, execução convincente
 
@@ -45,8 +47,8 @@ e precisa de direção; reduzir a complexidade ou dividir o plano quando necess�
 
 Traduzir os detalhes relevantes em ações observáveis na estrutura aceita pelo
 modelo. Profundidade não é enumerar toda decoração nem acumular ações simultâneas;
-o roteiro completo continua separado do prompt. Conferir na revisão se os componentes
-principais obedecem à direção e se o fundo mantém identidade e disposição coerentes.
+o roteiro completo continua separado do prompt. Observações dos resultados podem
+melhorar o planejamento de conteúdos novos, sem refazer o conteúdo já gerado.
 
 ## Revelações: o interior precisa superar o exterior
 
@@ -60,16 +62,16 @@ Manter poucos componentes relevantes e um fundo estável.
 O impacto respeita a execução: cascas e fragmentos conservam peso e apoio;
 líquidos viscosos escorrem para baixo, dobram e se acumulam, sem levantar a casca
 nem virar fios de chiclete. Estiramento elástico pertence a materiais elásticos
-ou a uma exceção criativa explícita. Rever tanto a superioridade visual do interior
-quanto a continuidade e resposta dos materiais.
+ou a uma exceção criativa explícita. Planejar tanto a superioridade visual do interior
+quanto a continuidade e resposta dos materiais antes da geração.
 
-## Iteração rápida de prompt
+## Preparação do prompt
 
 Quando o usuário pedir geração sem novas imagens, ajustar o prompt e gerar o vídeo
 diretamente pela rota compatível; uma rota image-to-video pode reutilizar a referência
 existente. Não inserir geração de imagens ou novos storyboards nessa rodada.
-Concentrar a revisão no corte/ação, material, revelação e fim; evitar preparação
-ou acabamento que não resolvam uma falha demonstrada.
+Concentrar a direção no corte/ação, material, revelação e fim. Esse planejamento
+vale para um novo conteúdo; não autoriza outra tentativa para corrigir um resultado.
 
 ## Ficha por plano
 
@@ -92,7 +94,7 @@ parte da cena. A ficha não exige cortes, personagens ou efeitos em toda obra.
 | Luz e efeitos | Origem, gatilho, cor, intensidade, direção e influência sobre a cena. |
 | Som | Opcional, original e não verbal; ligado ao contato/ação. O renderer atual dos episódios silenciosos remove áudio. |
 | Continuidade | Identidade, escala, câmera, iluminação e estado dos objetos entre planos; fim completo do short. |
-| Critérios de aprovação | Resultados visíveis que precisam ocorrer e falhas que impedem continuar/publicar. |
+| Intenções observáveis | Resultados desejados para orientar o prompt e aprender com conteúdos novos, sem gate estético após a geração. |
 | Modelo e custo | Controles realmente disponíveis, limites de complexidade, referências e custo estimado da tentativa. |
 
 Não basta escrever “cortar naturalmente” ou “respeitar a física”. Descrever o contato
@@ -102,8 +104,9 @@ clara, sem instruções conflitantes ou adjetivos que substituam o movimento.
 
 ## Exemplo proposto: esfera e buraco negro do AI Meow
 
-Esta é a direção proposta após a tentativa rejeitada; ainda precisa de referências
-compatíveis e animação aprovada. Não é descrição de um vídeo concluído.
+Exemplo histórico de direção para uma esfera e um buraco negro. Não descreve um
+vídeo concluído nem estabelece obrigação de produzir/refazer essa obra. Aproveite
+apenas os conceitos úteis ao planejamento de conteúdos novos.
 
 **Material e contato.** A esfera tem uma casca preta resistente com veios violetas.
 O fio comprido da mesma faca encosta primeiro; a ponta permanece voltada para o lado.
@@ -137,18 +140,22 @@ vazia com tempo para o desfecho. Ações dependentes podem se sobrepor. Se o cor
 retirada da faca não couberem com clareza no primeiro plano, dar mais tempo ou separar
 a retirada com continuidade, sem forçar a transformação completa em cinco segundos.
 
-## Antes de pagar
+## Planejar e registrar o próximo conteúdo
 
 1. Conferir referências e geometria. Os quadros devem ser estados alcançáveis pela
    ação prevista, com câmera, escala, identidade e orientação consistentes.
 2. Conferir a rota e os controles suportados, além da ordem/identidade dos arquivos
    encaminhados. Registrar hashes, referências, prompt, parâmetros e estimativa.
-3. Gerar apenas um trecho representativo, respeitando o piloto barato e o piso de qualidade.
-4. Assistir à sequência e inspecionar início, contato, ruptura, reação e fim. Anotar
-   o defeito observado e separar a hipótese de causa; fluidez não comprova causalidade.
-5. Continuar somente após aprovação editorial da qualidade, dentro da autorização
-   existente; isso não exige nova confirmação humana por trecho. Se falhar, corrigir referências, integração,
-   encenação, complexidade ou modelo de acordo com evidência antes de uma nova cobrança.
+3. Gerar uma vez os fragmentos planejados dentro da autorização e das reservas de
+   custo. O primeiro fragmento de um conceito também pertence ao acervo, sem piloto
+   descartável ou obrigação de financiar uma versão corretiva.
+4. Preservar o resultado como entregue e registrar apenas o exame efetivamente
+   realizado. Se houver observações, separar fatos de hipóteses e aproveitá-las nos
+   prompts de conteúdos futuros; fluidez não comprova causalidade.
+5. Conferir os requisitos técnicos necessários para montar/transportar/publicar,
+   proveniência, conta, hashes e resultado real. Aplicar o aceite de imperfeições
+   da política única, sem esperar validação estética ou humana. Uma chamada sem
+   arquivo ou com cobrança incerta exige recuperação/reconciliação, nunca retry cego.
 
 Todas as mídias de produção do AI Meow ficam na pasta `AI Meow` da Mesa. Revisão de
 mídia de produção não substitui testes de software: testes só no GitHub Actions.

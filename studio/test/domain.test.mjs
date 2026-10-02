@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { Studio, episodeAssetHash, episodeLimits, episodeReviewHash, fileSha256 } from '../src/domain.mjs';
 import { StudioStore } from '../src/store.mjs';
+import { ownerAcceptedTechnicalReview, technicalReviewEnv } from './technical-review-fixture.mjs';
 
 const projectInput = { title: 'Original worlds', premise: 'Small fictional stories with evolving characters', audience: 'Adults who enjoy speculative fiction', language: 'pt-BR', continuity: 'Remember events between episodes' };
 const episodeInput = (projectId, overrides = {}) => ({ projectId, title: 'The clockmaker discovers a floating island', hook: 'A broken clock starts counting backwards.', synopsis: 'The clockmaker chooses whether to follow the impossible countdown.', continuityNote: 'Introduce the clockmaker and her missing brother.', originalAngle: 'Use the countdown as a dilemma rather than a spectacle.', scenes: [{ durationSeconds: 60, narration: 'Helena repairs the ancient clock and sees an island rising above the harbor. The countdown threatens to erase her memories unless she repairs the missing spring.', visualPrompt: 'Original fictional clockmaker in a surreal floating island, painted illustration, no brands or real people.' }], metadata: { description: 'An original fictional story created with AI.', hashtags: ['#Ficção', '#HistóriaOriginal'] }, ...overrides });
@@ -388,6 +389,74 @@ test('approval requires a final render, all AI scene assets and explicit review 
   assert.equal(approved.status, 'approved');
   assert.equal(approved.approval.reviewHash, episodeReviewHash(approved));
   assert.equal(approved.approval.assetReviewHash, episodeAssetHash(approved, (await f.store.read()).assets));
+});
+
+test('owner-accepted technical approval is explicit, default-off and preserves an unwatched render truthfully', async t => {
+  const f = await fixture(t);
+  const episode = await f.studio.planEpisode(episodeInput(f.project.id));
+  const output = await rendered(f, episode);
+  const current = await f.studio.getEpisode(episode.id);
+  const technical = ownerAcceptedTechnicalReview(current);
+  for (const flag of [undefined, 'false', 'TRUE', '1', true]) {
+    const disabled = new Studio(f.store, { env: { YTFUN_OWNER_ACCEPTED_TECHNICAL_REVIEW_ENABLED: flag } });
+    await assert.rejects(disabled.approveEpisode({ episodeId: episode.id, review: technical }), /explicit runtime opt-in/);
+  }
+  const enabled = new Studio(f.store, { env: technicalReviewEnv });
+  await assert.rejects(enabled.approveEpisode({ episodeId: episode.id, review: { ...review, renderWatched: false, notes: 'user-accepted-imperfections' } }), /attestations/);
+  const approved = await enabled.approveEpisode({ episodeId: episode.id, review: technical });
+  assert.equal(approved.status, 'approved');
+  assert.deepEqual(approved.approval.review, technical);
+  assert.equal(approved.approval.review.renderWatched, false);
+  assert.equal(approved.approval.reviewHash, episodeReviewHash(approved));
+  assert.equal(approved.approval.assetReviewHash, episodeAssetHash(approved, output.assets));
+});
+
+test('technical acceptance still requires complete owner evidence, originality, facts and the exact render hash', async t => {
+  const f = await fixture(t);
+  const episode = await f.studio.planEpisode(episodeInput(f.project.id));
+  await rendered(f, episode);
+  const technical = ownerAcceptedTechnicalReview(await f.studio.getEpisode(episode.id));
+  const enabled = new Studio(f.store, { env: technicalReviewEnv });
+  for (const mutate of [
+    value => { value.originalityChecked = false; },
+    value => { value.factsChecked = false; },
+    value => { delete value.technicalAcceptance; },
+    value => { value.technicalAcceptance.ownerAcceptedImperfections = false; },
+    value => { value.technicalAcceptance.renderFileChecked = false; },
+    value => { value.technicalAcceptance.sourceFilesChecked = false; },
+    value => { value.technicalAcceptance.commercialRightsChecked = false; },
+    value => { value.technicalAcceptance.acceptedBy = ''; },
+    value => { value.technicalAcceptance.acceptanceReference = ''; },
+    value => { value.technicalAcceptance.reason = ''; },
+    value => { value.renderWatched = true; },
+  ]) {
+    const invalid = structuredClone(technical);
+    mutate(invalid);
+    await assert.rejects(enabled.approveEpisode({ episodeId: episode.id, review: invalid }), /attestations/);
+  }
+  await assert.rejects(enabled.approveEpisode({ episodeId: episode.id, review: { ...technical, technicalAcceptance: { ...technical.technicalAcceptance, renderSha256: '0'.repeat(64) } } }), /exact current render SHA256/);
+  assert.equal((await f.studio.getEpisode(episode.id)).approval, null);
+});
+
+test('owner acceptance does not replace technical render, source-file or commercial-license checks', async t => {
+  const f = await fixture(t);
+  const episode = await f.studio.planEpisode(episodeInput(f.project.id));
+  const output = await rendered(f, episode);
+  const original = await f.store.read();
+  const technical = ownerAcceptedTechnicalReview(original.episodes[0]);
+  const enabled = new Studio(f.store, { env: technicalReviewEnv });
+  for (const mutate of [
+    state => { state.assets[0].provenance.commercialLicense.notes = ''; },
+    state => { state.assets[0].synthetic = false; },
+    state => { state.episodes[0].render.sceneAssets = []; },
+    state => { state.episodes[0].render.durationSeconds = 0; },
+  ]) {
+    await f.store.transaction(state => { Object.assign(state, structuredClone(original)); mutate(state); });
+    await assert.rejects(enabled.approveEpisode({ episodeId: episode.id, review: technical }), /not ready/);
+  }
+  await f.store.transaction(state => Object.assign(state, structuredClone(original)));
+  await writeFile(join(f.directory, output.assets[0].path), 'changed owner-accepted source bytes');
+  await assert.rejects(enabled.approveEpisode({ episodeId: episode.id, review: technical }), /file hash changed/);
 });
 
 test('approval blocks missing mappings, non-AI assets, missing commercial evidence and file changes', async (t) => {

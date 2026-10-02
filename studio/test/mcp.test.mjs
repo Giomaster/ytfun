@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,6 +22,17 @@ test('stdio MCP negotiates, lists tools and persists a series across restarts', 
   t.after(() => client.close());
   const tools = await client.listTools();
   assert.equal(tools.tools.length, 40);
+  const reviewSchema = tools.tools.find(tool => tool.name === 'ytfun_episode_approve').inputSchema.properties.review;
+  const ownerReview = reviewSchema.anyOf.find(schema => schema.properties.mode?.const === 'owner_accepted_technical');
+  assert.equal(ownerReview.properties.renderWatched.const, false);
+  assert.ok(ownerReview.required.includes('technicalAcceptance'));
+  assert.equal(ownerReview.properties.technicalAcceptance.additionalProperties, false);
+  assert.equal(ownerReview.properties.technicalAcceptance.properties.ownerAcceptedImperfections.const, true);
+  const policyText = await readFile(new URL('../docs/ai-meow-operation.md', import.meta.url), 'utf8');
+  const director = await client.getPrompt({ name: 'studio-director', arguments: { direction: 'Use the existing sphere collection.' } });
+  assert.equal(director.messages[0].content.text, `AI Meow policy source: studio/docs/ai-meow-operation.md (ytfun://studio/operation-policy).\nRequested direction: Use the existing sphere collection.\n\n${policyText}`);
+  const policyResource = await client.readResource({ uri: 'ytfun://studio/operation-policy' });
+  assert.equal(policyResource.contents[0].text, policyText);
   assert.ok(tools.tools.some(tool => tool.name === 'ytfun_tiktok_export'));
   assert.ok(tools.tools.some(tool => tool.name === 'ytfun_tiktok_publish'));
   assert.deepEqual(tools.tools.find(tool => tool.name === 'ytfun_tiktok_publish').inputSchema.properties.privacy, { type: 'string', const: 'public' });

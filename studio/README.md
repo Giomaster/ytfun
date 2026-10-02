@@ -1,43 +1,25 @@
 # ytfun — estúdio original de IA via MCP
 
-Esta é a primeira implementação do novo ytfun: a conversa conduz o trabalho
-editorial e o MCP persiste projetos, executa produção e registra distribuição.
-Não foram criadas séries de exemplo como projetos aprovados; o conceito de cada
-série precisa ser combinado antes de entrar em produção.
+O ytfun persiste projetos, executa produção e registra distribuição pelo MCP.
+Este README descreve capacidades e contratos técnicos; a estratégia vigente do
+AI Meow está na [política editorial e operacional única](docs/ai-meow-operation.md).
 
 ## Direção acordada
 
-- Marca dos primeiros canais: **AI Meow**, em YouTube, Facebook, TikTok e Kwai.
-  [Identidade visual aprovada](assets/brand/ai-meow/README.md) e
-  [pesquisa de 75 plataformas/serviços](docs/monetization-landscape.md).
-- Qualquer formato feito inteiramente com IA: ficção, animação, humor, histórias,
-  explicações factuais e novos experimentos.
-- Direção de cinema para qualquer gênero: premissas absurdas com execução
-  convincente, materiais/forças/reação coerentes e prazer visual/sonoro deliberado.
-  A [ficha de direção por plano](docs/video-direction.md) estabelece estados,
-  câmera/geometria, contatos, resistência, transformação, efeitos, atuação e
-  continuidade antes dos prompts. Exceções criativas têm alcance explícito;
-  referências bonitas e fluidez não aprovam uma ação incoerente. A ficha é orientação
-  editorial e não uma etapa automática do servidor. Som não verbal pode ser planejado;
-  o perfil silencioso implementado ainda descarta áudio.
-- Em todo vídeo, detalhar muito no prompt os componentes relevantes para a ação,
-  seus materiais, geometria, contatos, movimento e continuidade. Manter poucos
-  elementos com ações independentes; os demais podem compor uma paisagem ou fundo
-  estável e simples de preservar entre frames. Elementos que interagem com a ação
-  passam a exigir direção própria; simplificar ou dividir o plano quando necessário.
-- Quando houver revelação interna, o interior deve superar o exterior em impacto
-  visual, com contraste, luz, profundidade, textura ou movimento concretamente
-  dirigidos. Preservar o peso da casca e o comportamento dos materiais. Em rodadas
-  de ajuste de prompt sem novas imagens, gerar o vídeo diretamente ou reutilizar
-  a referência existente que a rota exigir; manter a revisão focada na ação.
-- Validar cada conceito em piloto barato antes de investir em qualidade maior; usar modelos pagos quando o ganho justificar o custo. A direção editorial prioriza vídeos longos com unidades que rendam shorts completos, sem fala ou texto. O formato longo é explícito; `renderCanvas` escolhe portrait (padrão) ou landscape independentemente da duração. Sem teto
-  mensal fixo por padrão. Cada chamada guarda estimativa e fonte de preço;
-  operação paga exige reconhecimento por chamada e habilitação no ambiente.
-- Reaproveitar o ytfun sem incorporar automaticamente seu trabalho local ainda
-  não commitado. O pacote `studio/` é independente do CLI histórico da raiz.
-- Hugging Face é catálogo/provider de produção. Popularidade de modelos não
-  representa interesse de audiência. Pesquisa editorial usa sinais das redes,
-  conectores autorizados, evidência datada e desempenho dos próprios episódios.
+Leia a [política única](docs/ai-meow-operation.md) para modos por rede, papéis da
+MESTRE/especialistas, aproveitamento do acervo, duração, direção, cadência e
+autonomia. Não interpretar exemplos técnicos ou blueprints históricos como
+requisitos editoriais atuais. Não existe requisito geral de master, 96 cenas,
+oito ou 12 minutos para lançar uma obra.
+
+A [ficha de direção por plano](docs/video-direction.md) auxilia o planejamento
+antes da geração; não introduz piloto obrigatório, refação ou gate estético após
+o resultado. Os mecanismos técnicos de revisão permanecem vinculados a hashes,
+com o aceite de imperfeições e a evidência verdadeira definidos pela política.
+
+Referências: [identidade visual](assets/brand/ai-meow/README.md) e
+[pesquisa datada de plataformas/serviços](docs/monetization-landscape.md).
+O pacote `studio/` é independente do CLI histórico da raiz.
 
 ## Fluxo implementado
 
@@ -49,15 +31,16 @@ separadas; o transporte novo não habilita uma auditoria YouTube nem converte
 exportação TikTok em publicação.
 
 1. A IA lê projetos e episódios anteriores, pesquisa contexto e propõe a série.
-2. Após consenso, registra premissa, público, idioma e continuidade no projeto.
+2. Registra premissa, público, idioma e continuidade dentro da autorização vigente.
 3. Planeja episódio com ângulo próprio, hook, narrativa, cenas, formato, modo de áudio e metadados. `format=short` é o padrão: até 12 cenas/180 s. `format=long` permite até 120 cenas/900 s. `audioMode=narrated` exige narração; `silent` usa somente visuais; `nonverbal` exige áudio original por cena sem narração ou legendas. O gerador de voz não atende `nonverbal`; importar efeitos originais com evidência de autoria/licença.
 4. Gera imagem/voz/vídeo na inferência remota do Hugging Face ou importa assets
    originais de outros conectores. Provider, modelo, prompt, licença e hashes
    ficam ligados à cena. Fonte de tendência nunca vira footage para edição.
 5. FFmpeg monta 1080×1920 (portrait padrão) ou 1920×1080 (`renderCanvas: "landscape"` explícito), 30 fps em worker remoto. Vídeos fonte são encaixados inteiros com margens neutras; imagens mantêm o zoom existente. No modo narrado, exige voz e gera legendas com timing aproximado por cena. `silent` descarta áudio embutido e não gera SRT; `nonverbal` usa áudio original por cena sem legendas. Nos modos sem fala, vídeo mais curto que a cena é bloqueado, sem repetição automática. Imagens recebem movimento simples; áudio maior que a cena é bloqueado para evitar truncamento. Master longo aceita até 512 MiB; render curto e cada asset de origem mantêm 100 MiB. A montagem externa pode ser registrada por manifesto exato e ffprobe independente. [Contrato remoto e limites](docs/long-form-production.md).
-6. A revisão real de originalidade, fatos e render fica vinculada aos hashes do
-   episódio, arquivo final e proveniência. As verificações estruturais não
-   substituem assistir ao vídeo ou confirmar fontes.
+6. O registro de revisão/aprovação fica vinculado aos hashes do episódio, arquivo
+   final e proveniência. Preserve evidência verdadeira de originalidade, fatos e
+   exame efetivamente realizado; não invente audição ou visualização. A política
+   única aceita imperfeições da IA e não exige validação humana ou aprovação estética.
 7. YouTube recebe upload oficial, declaração de conteúdo sintético, privacidade
    escolhida explicitamente e agendamento opcional. Facebook recebe cortes como
    Page Reels e episódios `long` pela Page Video API, com declaração de IA e
@@ -67,14 +50,33 @@ exportação TikTok em publicação.
 8. Métricas observadas e estimativas de custo orientam o próximo experimento.
    Métricas das plataformas ficam separadas; ausência de dado não vira zero.
 
-Um short pode ser derivado de cenas escolhidas de um master longo válido e já
-renderizado. A operação copia/remapeia os registros dos assets originais e
+Na API específica `deriveShort`, um short é derivado de cenas escolhidas de um
+pai longo válido e já renderizado. Essa exigência pertence somente àquela API;
+uma obra independente pode ser planejada e montada com fontes existentes sem
+esperar um master. A operação `deriveShort` copia/remapeia os assets originais e
 preserva proveniência, hashes, lineage e intervalos da timeline planejada; não
 corta o MP4, não inventa uma nova geração e não aprova o resultado. O short fica
-`planned`, precisa de render e revisão próprios. Cenas repetidas, títulos repetidos
-e outras histórias quase iguais continuam bloqueados; apenas a reutilização
-documentada entre pai e filho é legítima. Mudanças no pai invalidam a derivação
+`planned`, precisa de render e revisão próprios. Nesta API, cenas repetidas,
+títulos repetidos e outras histórias quase iguais continuam bloqueados; a exceção
+de reutilização narrativa é documentada entre pai e filho. Mudanças no pai invalidam a derivação
 para revisão e entrega. A seleção deve ter hook, desenvolvimento e final completo.
+
+### Registro verdadeiro de aceite técnico
+
+`Studio.approveEpisode` / `ytfun_episode_approve` mantêm revisão com
+`renderWatched:true` como comportamento padrão. A alternativa explícita
+`review.mode="owner_accepted_technical"` registra `renderWatched:false`, sem
+afirmar playback/audição, somente quando
+`YTFUN_OWNER_ACCEPTED_TECHNICAL_REVIEW_ENABLED=true` no runtime. Exige
+`originalityChecked:true`, `factsChecked:true`, `reviewedBy`, `notes` e
+`technicalAcceptance` estruturado com `renderSha256`, `renderFileChecked:true`,
+`sourceFilesChecked:true`, `commercialRightsChecked:true`,
+`ownerAcceptedImperfections:true`, `acceptedBy`, `acceptanceReference` e `reason`.
+Esses campos representam verificações e aceite reais, não um token nas notas.
+A API confere arquivos, direitos/proveniência e hashes atuais; Publisher e
+exportação revalidam o mesmo contrato e flag, inclusive ao executar a fila.
+Desabilitar a flag bloqueia entregas com esse modo. Não libera auditoria pública,
+conta, cadência, gerações pendentes ou reenvio de resultados desconhecidos.
 
 ## Inicialização do MCP
 
@@ -249,8 +251,9 @@ nativo. A tarifa publicada calcula segundos a 16 fps, sem taxa FILM separada:
 por tentativa; confirme a [tarifa atual](https://fal.ai/models/fal-ai/wan/v2.2-a14b/image-to-video) antes de autorizar a chamada.
 O [Wan 2.2 A14B I2V](https://fal.ai/models/fal-ai/wan/v2.2-a14b/image-to-video/api)
 é uma rota compatível; confirme o mapping live do modelo no Hugging Face e a
-tarifa atual antes de chamar. A referência orienta a geração, e o piloto ainda
-precisa de revisão visual antes de aprovação ou publicação.
+tarifa atual antes de chamar. A referência orienta a geração; decisões editoriais
+e aproveitamento dos resultados seguem a [política única](docs/ai-meow-operation.md),
+sem piloto obrigatório ou etapa de correção estética.
 
 YouTube precisa de OAuth válido e `YOUTUBE_CHANNEL_ID`.
 Escopos: `youtube.upload` e `youtube.readonly`; métricas pedem
@@ -261,8 +264,9 @@ tokens com `YOUTUBE_REFRESH_TOKEN`, `YOUTUBE_CLIENT_ID` e
 `YOUTUBE_CLIENT_SECRET` já consentidos pelo usuário. Token manual
 `YOUTUBE_ACCESS_TOKEN` continua aceito, mas não é renovado. Não ocorre
 consentimento, conexão de conta ou gravação de segredos por ferramenta MCP.
-Privado funciona sem liberação pública; unlisted/public e agendamento de tornar
-público exigem `YTFUN_YOUTUBE_PUBLIC_ENABLED=true` e
+O adapter admite tecnicamente privado sem liberação pública; o AI Meow exige
+visibilidade pública e não usa privado/unlisted como fallback. No adapter,
+unlisted/public e agendamento de tornar público exigem `YTFUN_YOUTUBE_PUBLIC_ENABLED=true` e
 `YTFUN_YOUTUBE_AUDIT_CONFIRMED=true`. Só marque auditoria quando confirmada.
 `madeForKids` é escolha explícita por upload. Arquivo MP4 tem limite inicial de
 250 MiB no publisher. Apenas hosts Google permitidos recebem o Bearer.
@@ -343,19 +347,15 @@ enviou vídeos reais. A validação dos novos adapters e da fila ocorre no CI.
 
 ## Operação recorrente do AI Meow
 
-Uma thread por rede pesquisa, roteiriza, produz/reutiliza material original, revisa
-e publica quando a conta estiver elegível. A operação continua após os dez vídeos
-iniciais. Giovanni dispensou a validação humana de cada vídeo e aceita pequenas
-imperfeições nesta fase; revisão real do agente, proveniência, conta correta e
-recibos continuam obrigatórios. Limitações de audição são registradas sem atribuir
-aprovação sonora ao usuário. Threads compartilham mídia e coordenam o navegador.
+Os papéis, modos, quantidade de obras por ciclo e autonomia de publicação seguem
+exclusivamente a [política editorial e operacional única](docs/ai-meow-operation.md).
+Quantidade produzida e frequência de envio são decisões separadas; a política
+permite múltiplas obras/formatos por ciclo e adaptação da cadência por rede e modo.
 
-A hipótese inicial é intervalo mínimo de 18 horas e até dois envios em qualquer
-janela de 24 horas por canal, contando todos os formatos/reservas. O tool
-`ytfun_project_cadence_update` altera a política pelo domínio, preserva histórico e
-exige a política anterior esperada para impedir escrita baseada em estado antigo.
-Uploads e reservas anteriores não são apagados. A execução revalida a cadência;
-backlog não justifica rajadas. Rever o experimento após dez lançamentos por rede.
-Heartbeats locais dependem do Mac e Codex disponíveis; seus horários não equivalem
-a agendamento confirmado pelo provider. Exportação TikTok/Kwai permanece distinta
-de publicação, e auditoria pública do YouTube continua exigindo evidência.
+No contrato técnico, `ytfun_project_cadence_update` altera a cadência pelo domínio,
+preserva histórico e exige a política anterior esperada para impedir escrita
+baseada em estado antigo. A execução lê a política efetiva e revalida todas as
+publicações/reservas do canal; não editar o store à mão ou apagar o histórico.
+Heartbeats locais dependem do Mac e Codex disponíveis. Filas/exportações locais
+não equivalem a agendamento ou publicação confirmados pelo provider; liberação
+pública do YouTube e resultados das outras integrações exigem evidência real.

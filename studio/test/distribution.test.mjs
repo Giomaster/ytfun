@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { episodeReviewHash } from '../src/domain.mjs';
 import { distributionCapabilities, publicationPackage } from '../src/distribution.mjs';
+import { ownerAcceptedTechnicalReview, technicalReviewEnv } from './technical-review-fixture.mjs';
 
 const CREATED_AT = '2026-09-30T15:00:00.000Z';
 const VIDEO_HASH = 'a'.repeat(64);
@@ -160,6 +161,28 @@ test('unsuccessful, cross-platform and stale editorial plans cannot produce pack
   const unreviewed = fixture();
   unreviewed.episode.approval.review.renderWatched = false;
   assert.throws(() => publicationPackage(unreviewed), /reviewed episode fingerprint/);
+});
+
+test('publication packages accept structured unwatched review only with opt-in and the exact render binding', () => {
+  const input = fixture();
+  input.episode.approval.review = ownerAcceptedTechnicalReview(input.episode);
+  assert.throws(() => publicationPackage(input), /reviewed episode fingerprint/);
+  assert.equal(publicationPackage({ ...input, env: technicalReviewEnv }).status, 'exported');
+  for (const mutate of [
+    review => { review.originalityChecked = false; },
+    review => { review.factsChecked = false; },
+    review => { delete review.technicalAcceptance.reason; },
+    review => { review.technicalAcceptance.renderSha256 = 'd'.repeat(64); },
+    review => { review.technicalAcceptance.ownerAcceptedImperfections = false; },
+  ]) {
+    const changed = structuredClone(input);
+    mutate(changed.episode.approval.review);
+    assert.throws(() => publicationPackage({ ...changed, env: technicalReviewEnv }), /reviewed episode fingerprint/);
+  }
+  const changedRender = structuredClone(input);
+  changedRender.episode.render.sha256 = changedRender.plan.render.sha256 = 'e'.repeat(64);
+  changedRender.episode.approval.reviewHash = changedRender.plan.reviewHash = episodeReviewHash(changedRender.episode);
+  assert.throws(() => publicationPackage({ ...changedRender, env: technicalReviewEnv }), /reviewed episode fingerprint/);
 });
 
 test('preflight cannot substitute unreviewed caption, hashtags or video references', () => {

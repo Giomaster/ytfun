@@ -1,4 +1,5 @@
 import { episodeReviewHash } from './domain.mjs';
+import { approvalReviewIsValid } from './review-policy.mjs';
 
 const CHECKED_AT = '2026-09-30';
 const PLATFORMS = ['youtube', 'facebook', 'tiktok', 'kwai'];
@@ -164,7 +165,7 @@ function creatorActions(platform) {
  * Snapshot a successful editorial/file preflight. The caller verifies file contents,
  * licenses and cadence immediately before this pure builder; no filesystem or API calls occur here.
  */
-export function publicationPackage({ platform, plan, episode, createdAt }) {
+export function publicationPackage({ platform, plan, episode, createdAt, env = {} }) {
   if (!PLATFORMS.includes(platform)) throw new Error('Unsupported publication platform.');
   if (plan?.platform !== platform || (plan.readyToExport !== true && plan.ready !== true) ||
       !Array.isArray(plan.reasons) || plan.reasons.length !== 0) {
@@ -174,7 +175,7 @@ export function publicationPackage({ platform, plan, episode, createdAt }) {
   if (!episode || plan.episodeId !== episode.id || plan.projectId !== episode.projectId ||
       !fingerprint(plan.reviewHash) || plan.reviewHash !== episodeReviewHash(episode) ||
       episode.approval?.reviewHash !== plan.reviewHash || !nonempty(episode.approval?.approvedAt) ||
-      review?.originalityChecked !== true || review?.factsChecked !== true || review?.renderWatched !== true || !nonempty(review?.reviewedBy)) {
+      !approvalReviewIsValid(review, { env, render: episode.render })) {
     throw new Error('Publication package requires the current reviewed episode fingerprint.');
   }
   if (!relativeMediaPath(plan.render?.path, '.mp4') || !fingerprint(plan.render?.sha256) ||
