@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile, chmod, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile, chmod, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generateKeyPair, exportJWK, SignJWT, createLocalJWKSet } from 'jose';
@@ -55,6 +55,9 @@ test('Cognito verifier rejects ID tokens, other owners/clients, missing resource
     await new SignJWT({ token_use: 'access', client_id: 'owner-client', scope: 'ytfun/read' })
       .setProtectedHeader({ alg: 'RS256', kid: 'ci-key' }).setIssuer(config.issuer).setSubject('owner-subject')
       .setAudience('owner-client').setIssuedAt().setExpirationTime('5m').sign(privateKey),
+    await new SignJWT({ token_use: 'access', client_id: 'owner-client', scope: 'ytfun/read' })
+      .setProtectedHeader({ alg: 'RS256', kid: 'ci-key' }).setIssuer(config.issuer).setSubject('owner-subject')
+      .setAudience([config.resource.href, 'https://another-resource.example.com']).setIssuedAt().setExpirationTime('5m').sign(privateKey),
     await new SignJWT({ token_use: 'access', client_id: 'owner-client', scope: 'ytfun/read' })
       .setProtectedHeader({ alg: 'RS256', kid: 'ci-key' }).setIssuer('https://wrong.example.com').setSubject('owner-subject')
       .setAudience(config.resource.href).setIssuedAt().setExpirationTime('5m').sign(privateKey),
@@ -146,4 +149,6 @@ test('cloud startup rejects a competing delivery worker and unsafe private envir
   await symlink(filename, linked);
   await assert.rejects(loadCloudEnvironment(linked));
   await assert.rejects(loadCloudEnvironment('relative.env'));
+  await mkdir(join(directory, '.git'));
+  await assert.rejects(loadCloudEnvironment(filename), /outside Git/);
 });

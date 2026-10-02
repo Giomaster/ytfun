@@ -48,7 +48,7 @@ export function createCloudTokenVerifier(config, { keySet = createRemoteJWKSet(c
         issuer: config.issuer, audience: config.resource.href, algorithms: ['RS256'],
         requiredClaims: ['sub', 'exp', 'iat', 'client_id', 'scope', 'token_use'],
       });
-      if (payload.token_use !== 'access' || !config.clients.includes(payload.client_id) ||
+      if (payload.aud !== config.resource.href || payload.token_use !== 'access' || !config.clients.includes(payload.client_id) ||
           !config.subjects.includes(payload.sub) || typeof payload.scope !== 'string' ||
           !Number.isSafeInteger(payload.exp) || !Number.isSafeInteger(payload.iat) || payload.iat > Date.now() / 1000 + 30) {
         throw new Error('Invalid token');

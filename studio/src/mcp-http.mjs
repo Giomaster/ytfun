@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-import { resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { constants } from 'node:fs';
-import { open } from 'node:fs/promises';
+import { access, open, realpath } from 'node:fs/promises';
 import { parseEnv } from 'node:util';
 import { createMcpExpressApp } from '@modelcontextprotocol/sdk/server/express.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -15,6 +15,14 @@ import { cloudAuthConfiguration, createCloudTokenVerifier } from './mcp-auth.mjs
 
 export async function loadCloudEnvironment(filename, base = process.env) {
   if (typeof filename !== 'string' || !filename.startsWith('/')) throw new Error('A private absolute environment file is required.');
+  const parent = await realpath(dirname(filename));
+  for (let directory = parent; ; directory = dirname(directory)) {
+    let gitDirectory = false;
+    try { await access(join(directory, '.git')); gitDirectory = true; }
+    catch (error) { if (error.code !== 'ENOENT') throw new Error('Private environment ancestry could not be verified.'); }
+    if (gitDirectory) throw new Error('Private environment files must remain outside Git checkouts.');
+    if (directory === dirname(directory)) break;
+  }
   const file = await open(filename, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const info = await file.stat();
