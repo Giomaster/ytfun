@@ -33,6 +33,8 @@ async function keys() {
 test('cloud authentication requires explicit HTTPS resource, registered client and owner', () => {
   const config = cloudAuthConfiguration(configuration);
   assert.equal(config.resource.href, configuration.YTFUN_MCP_RESOURCE_URL);
+  assert.equal(config.metadata.issuer, config.resource.origin);
+  assert.equal(config.issuer, configuration.YTFUN_MCP_ISSUER);
   assert.deepEqual(config.metadata.code_challenge_methods_supported, ['S256']);
   for (const [key, value] of [['YTFUN_MCP_OWNER_SUBJECTS', ''], ['YTFUN_MCP_CLIENT_IDS', ''],
     ['YTFUN_MCP_RESOURCE_URL', 'http://studio.example.com/mcp'], ['YTFUN_MCP_RESOURCE_URL', 'https://secret@studio.example.com/mcp'],
@@ -95,7 +97,13 @@ test('HTTP cloud transport negotiates OAuth and isolates read/write/publish gran
   assert.match(anonymous.headers.get('www-authenticate'), /oauth-protected-resource\/mcp/);
   assert.deepEqual((await store.read()).projects, []);
   const discovery = await fetch(new URL('/.well-known/oauth-protected-resource/mcp', base));
-  assert.equal((await discovery.json()).resource, config.resource.href);
+  const resourceMetadata = await discovery.json();
+  assert.equal(resourceMetadata.resource, config.resource.href);
+  assert.deepEqual(resourceMetadata.authorization_servers, [config.resource.origin]);
+  const authorizationMetadata = await (await fetch(new URL('/.well-known/oauth-authorization-server', base))).json();
+  assert.equal(authorizationMetadata.issuer, resourceMetadata.authorization_servers[0]);
+  assert.deepEqual(authorizationMetadata.code_challenge_methods_supported, ['S256']);
+  assert.equal(authorizationMetadata.token_endpoint, configuration.YTFUN_MCP_TOKEN_ENDPOINT);
   const clientFor = async scopes => {
     const client = new Client({ name: 'ci-cloud-client', version: '1.0.0' });
     await client.connect(new StreamableHTTPClientTransport(new URL('/mcp', base), {

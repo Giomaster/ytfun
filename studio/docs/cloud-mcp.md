@@ -30,6 +30,14 @@ managed-login flow must receive `resource=<exact YTFUN_MCP_RESOURCE_URL>` to bin
 the access token audience. Do not loosen audience checking to client-ID-only
 when linking fails. No ID-token or M2M grant substitutes for the owner grant.
 
+The SDK publishes authorization-server discovery on the owned HTTPS bridge
+origin, and protected-resource metadata points to that same origin. This
+metadata facade advertises S256 and the configured Cognito authorization/token
+endpoints; it never authenticates users, mints tokens or handles their passwords.
+JWT verification independently pins `YTFUN_MCP_ISSUER` to the actual Cognito pool
+issuer and keys. Do not advertise RFC9207 issuer-response support without real
+upstream evidence; copy ChatGPT's exact connection-specific callback instead.
+
 Primary references checked 2026-10-01:
 - https://developers.openai.com/plugins/build/auth
 - https://developers.openai.com/plugins/build/app-quickstart

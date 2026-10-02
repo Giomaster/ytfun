@@ -26,7 +26,9 @@ export function cloudAuthConfiguration(env) {
   const tokenEndpoint = httpsUrl(env.YTFUN_MCP_TOKEN_ENDPOINT, 'YTFUN_MCP_TOKEN_ENDPOINT').href;
   const jwksUrl = new URL(`${issuer}/.well-known/jwks.json`);
   return { resource, issuer, clients, subjects, jwksUrl, metadata: {
-    issuer,
+    // Discovery lives here. Cognito's JWT issuer remains separately pinned above;
+    // do not point clients at upstream discovery that omits MCP/PKCE metadata.
+    issuer: resource.origin,
     authorization_endpoint: authorizationEndpoint,
     token_endpoint: tokenEndpoint,
     response_types_supported: ['code'],
