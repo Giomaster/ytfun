@@ -113,8 +113,10 @@ test('HTTP cloud transport negotiates OAuth and isolates read/write/publish gran
   };
   const read = await clientFor('ytfun/read');
   const tools = await read.listTools();
-  assert.equal(tools.tools.length, 39);
+  assert.equal(tools.tools.length, 41);
   assert.deepEqual(tools.tools.find(x => x.name === 'ytfun_facebook_publish')._meta.securitySchemes,
+    [{ type: 'oauth2', scopes: ['ytfun/publish'] }]);
+  assert.deepEqual(tools.tools.find(x => x.name === 'ytfun_tiktok_publish')._meta.securitySchemes,
     [{ type: 'oauth2', scopes: ['ytfun/publish'] }]);
   const profile = await read.callTool({ name: 'ytfun_cloud_profile', arguments: {} });
   assert.ok(!profile.isError);

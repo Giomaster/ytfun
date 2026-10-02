@@ -371,6 +371,12 @@ Quality, required checks and authorization are constraints, not token-saving opt
   through Chrome/Studio as a fallback. Browser access for account authorization or
   protocol observation is distinct from publishing. Preserve captured REST evidence;
   endpoint names alone do not establish an authenticated working publisher.
+- The authorized TikTok session REST experiment uses private cookies outside Git.
+  Obtain fresh scoped upload credentials through the live session; persist legitimate
+  cookie rotation privately. If session renewal is unavailable, request a new private
+  cookie capture only when expired/revoked. Stop on challenges and uncertain mutations;
+  never invent a login/refresh endpoint or repeat an unknown post. This is separate
+  from audited official OAuth/Direct Post; follow `studio/docs/tiktok-session-rest.md`.
 - `studio/` is an independent Node ESM MCP package; legacy CLI remains intact.
 - `studio/README.md` describes the executable contracts and setup.
 - Projects and all source media are original and synthetic. Trend sources are

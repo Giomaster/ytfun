@@ -9,7 +9,7 @@ distintas.
 | --- | --- | --- |
 | YouTube | Publisher oficial e pacote revisado | OAuth, canal correto, revisão do episódio e gates de visibilidade |
 | Facebook | Publisher de Reels de Página e pacote revisado | Token da Página, versão Graph explícita, permissões e gates do adapter |
-| TikTok | Pacote para conclusão pelo criador | Importar pelo TikTok ou integração permitida e confirmar publicação |
+| TikTok | Pacote ou REST de sessão experimental | Conta/sessão autorizada, revisão, cadência e confirmação pública; sem aprovação OAuth presumida |
 | Kwai internacional | Pacote para conclusão pelo criador | Conferir as opções disponíveis na conta e publicar pelo Kwai |
 
 ## O que a consulta de capacidades significa
@@ -39,6 +39,10 @@ documenta `is_ai_generated` como parâmetro booleano de criação de Reels; o pa
 preserva essa intenção em `disclosure.isAiGenerated`.
 
 ## TikTok: limite do nosso tipo de aplicativo
+
+Desde 02/10/2026 existe também uma [rota REST experimental de sessão](tiktok-session-rest.md),
+separada da integração oficial descrita abaixo. Sua habilitação não constitui
+aprovação Direct Post. A publicação só é confirmada após evidência real do item público.
 
 O MCP atual é uma ferramenta privada para gerenciar contas da própria marca.
 As [regras de revisão de apps](https://developers.tiktok.com/doc/app-review-guidelines)

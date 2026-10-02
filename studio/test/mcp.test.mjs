@@ -21,9 +21,10 @@ test('stdio MCP negotiates, lists tools and persists a series across restarts', 
   const client = await connect();
   t.after(() => client.close());
   const tools = await client.listTools();
-  assert.equal(tools.tools.length, 38);
+  assert.equal(tools.tools.length, 40);
   assert.ok(tools.tools.some(tool => tool.name === 'ytfun_tiktok_export'));
-  assert.ok(!tools.tools.some(tool => tool.name === 'ytfun_tiktok_publish'));
+  assert.ok(tools.tools.some(tool => tool.name === 'ytfun_tiktok_publish'));
+  assert.deepEqual(tools.tools.find(tool => tool.name === 'ytfun_tiktok_publish').inputSchema.properties.privacy, { type: 'string', const: 'public' });
   assert.ok(tools.tools.some(tool => tool.name === 'ytfun_facebook_publish'));
   assert.ok(tools.tools.some(tool => tool.name === 'ytfun_kwai_export'));
   assert.ok(tools.tools.some(tool => tool.name === 'ytfun_delivery_enqueue'));

@@ -28,7 +28,8 @@ export class DeliveryQueue {
     if (!validTime(dueAt) || Date.parse(dueAt) < this.now() - 60_000) throw new Error('dueAt must be a current or future canonical ISO UTC timestamp.');
     if (platform === 'youtube' && typeof madeForKids !== 'boolean') throw new Error('YouTube audience selection is required.');
     if (platform === 'facebook' && privacy !== 'public') throw new Error('Facebook Reels requires explicit public visibility.');
-    if (['tiktok', 'kwai'].includes(platform) && privacy !== 'private') throw new Error('Creator exports use private package visibility; final platform privacy is chosen by the creator.');
+    if (platform === 'kwai' && privacy !== 'private') throw new Error('Kwai creator exports use private package visibility.');
+    if (platform === 'tiktok' && !['private', 'public'].includes(privacy)) throw new Error('TikTok uses a private export package or explicit public REST delivery.');
     const plan = await this.publisher.preflight({ episodeId, platform, privacy }, { now: Date.parse(dueAt) });
     if (plan.reviewHash !== expectedReviewHash) throw new Error('Episode changed since review.');
     if (!plan.ready && !plan.readyToExport) throw new Error(plan.reasons.join(' '));
@@ -42,7 +43,7 @@ export class DeliveryQueue {
       if (!episode || episodeReviewHash(episode) !== expectedReviewHash || episode.approval?.reviewHash !== expectedReviewHash || episode.render?.sha256 !== plan.render.sha256) throw new Error('Reviewed media changed while enqueueing.');
       const delivery = { id: randomUUID(), episodeId, platform, accountId: plan.accountId, reviewHash: expectedReviewHash,
         renderSha256: plan.render.sha256, privacy, ...(platform === 'youtube' ? { madeForKids } : {}), dueAt,
-        mode: ['youtube', 'facebook'].includes(platform) ? 'official_api' : 'creator_export',
+        mode: ['youtube', 'facebook'].includes(platform) ? 'official_api' : platform === 'tiktok' && privacy === 'public' ? 'experimental_session_rest' : 'creator_export',
         ...(platform === 'youtube' ? { apiData: youtubeApiData({ authorized: true, grantId: plan.youtubeGrantId ?? 'legacy', now: this.now() }) } : {}),
         status: 'queued', createdAt: new Date(this.now()).toISOString() };
       state.deliveries.push(delivery);
@@ -116,6 +117,7 @@ export class DeliveryQueue {
       phase = 'delivery';
       if (claimed.platform === 'youtube') result = await this.publisher.publishYouTube(input);
       else if (claimed.platform === 'facebook') result = await this.publisher.publishFacebook(input);
+      else if (claimed.platform === 'tiktok' && claimed.privacy === 'public') result = await this.publisher.publishTikTok(input);
       else result = await this.publisher.exportPackage({ ...input, platform: claimed.platform });
     } catch {
       // Provider implementations sanitize their own diagnostics; the queue stores none of the thrown text.

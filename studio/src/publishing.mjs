@@ -8,6 +8,7 @@ import { YouTubeAuth, YOUTUBE_UPLOAD_SCOPE, YOUTUBE_READONLY_SCOPE } from './oau
 import { FacebookPageVideo, FacebookReels, safeFacebookVideoPermalink, validateFacebookPageVideo, validateFacebookReel } from './facebook.mjs';
 import { distributionCapabilities, publicationPackage } from './distribution.mjs';
 import { assertYouTubeConnected, youtubeApiData, youtubeBlocked } from './youtube-data-policy.mjs';
+import { TikTokWeb } from './tiktok-web.mjs';
 
 const DAY_MS = 86_400_000;
 const DEFAULT_MAX_BYTES = 250 * 1024 * 1024;
@@ -186,7 +187,7 @@ async function responseJson(response) {
 }
 
 export class Publisher {
-  constructor(store, { env = process.env, fetchImpl = fetch, youtubeAuth, facebook, facebookPageVideo } = {}) {
+  constructor(store, { env = process.env, fetchImpl = fetch, youtubeAuth, facebook, facebookPageVideo, tiktok } = {}) {
     this.store = store;
     this.env = env;
     this.youtubeGrantId = env.YTFUN_YOUTUBE_GRANT_ID || 'legacy';
@@ -194,10 +195,11 @@ export class Publisher {
     this.youtubeAuth = youtubeAuth ?? new YouTubeAuth({ env, fetchImpl });
     this.facebook = facebook ?? new FacebookReels({ env, fetchImpl });
     this.facebookPageVideo = facebookPageVideo ?? new FacebookPageVideo({ env, fetchImpl });
+    this.tiktok = tiktok ?? new TikTokWeb({ env, fetchImpl });
   }
 
   capabilities() {
-    return { platforms: distributionCapabilities(this.env), youtubeAuth: this.youtubeAuth.readiness(), facebook: this.facebook.readiness(), facebookPageVideo: this.facebookPageVideo.readiness() };
+    return { platforms: distributionCapabilities(this.env), youtubeAuth: this.youtubeAuth.readiness(), facebook: this.facebook.readiness(), facebookPageVideo: this.facebookPageVideo.readiness(), tiktokSession: this.tiktok.readiness() };
   }
 
   async plan(state, { episodeId, platform, privacy = 'private', publishAt }, now = Date.now()) {
@@ -230,7 +232,7 @@ export class Publisher {
     }
     let render;
     try {
-      render = await verifiedFile(this.store.directory, episode.render?.path, episode.render?.sha256, maxFileBytes(this.env), { noSymlinks: platform === 'facebook' });
+      render = await verifiedFile(this.store.directory, episode.render?.path, episode.render?.sha256, maxFileBytes(this.env), { noSymlinks: ['facebook', 'tiktok'].includes(platform) });
       if (path.extname(render.absolutePath).toLowerCase() !== '.mp4') reasons.push('Publishing requires an MP4 render.');
     } catch {
       reasons.push('Render is missing, changed, outside studio storage, or exceeds the upload limit.');
@@ -302,6 +304,15 @@ export class Publisher {
       if (readiness.accountId !== undefined && readiness.accountId !== accountId) reasons.push('Facebook configuration changed; restart the publisher with the intended Page authorization.');
       reasons.push(...readiness.reasons, ...cadence, ...validate(episode.render ?? {}).reasons);
     }
+    const tiktokSessionPost = platform === 'tiktok' && privacy === 'public';
+    if (tiktokSessionPost) {
+      const readiness = this.tiktok.readiness();
+      if (readiness.accountId !== accountId) reasons.push('TikTok account configuration changed.');
+      reasons.push(...readiness.reasons, ...cadence);
+      if (!Number.isFinite(episode.render?.durationSeconds) || episode.render.durationSeconds < 1 || episode.render.durationSeconds > 180 ||
+          !Number.isInteger(episode.render.width) || !Number.isInteger(episode.render.height) || episode.render.width < 256 || episode.render.height < 256 ||
+          render?.sizeBytes > 8 * 1024 * 1024) reasons.push('The experimental TikTok route currently supports reviewed clips up to 180 seconds and 8 MiB with explicit dimensions.');
+    }
     const caption = metadata ? [metadata.title, metadata.description].filter(nonempty).join('\n\n') : '';
     if (platform === 'facebook' && caption.length > 5000) reasons.push('Facebook caption exceeds the studio 5000-character limit.');
     if (platform === 'tiktok' && caption.length > 2200) reasons.push('TikTok caption exceeds 2200 UTF-16 code units.');
@@ -311,10 +322,12 @@ export class Publisher {
       ...(platform === 'facebook' ? { facebookVideoKind } : {}),
       uploadPrivacy: publishAt === undefined ? privacy : 'private', effectiveAt,
       ...(publishAt !== undefined ? { publishAt: effectiveAt } : {}),
-      ready: reasons.length === 0 && ['youtube', 'facebook'].includes(platform), readyToExport: reasons.length === 0 && ['tiktok', 'kwai'].includes(platform),
+      ready: reasons.length === 0 && (['youtube', 'facebook'].includes(platform) || tiktokSessionPost), readyToExport: reasons.length === 0 && ['tiktok', 'kwai'].includes(platform) && !tiktokSessionPost,
       reasons: [...new Set(reasons)], cadence: { warnings: cadence }, disclosure: { synthetic: true },
-      capabilities: { directPost: ['youtube', 'facebook'].includes(platform), requiresCreatorPublishing: ['tiktok', 'kwai'].includes(platform) },
-      ...(render ? { render: { path: render.relativePath, sha256: episode.render.sha256, sizeBytes: render.sizeBytes, durationSeconds: episode.render.durationSeconds } } : {}),
+      capabilities: { directPost: ['youtube', 'facebook'].includes(platform) || tiktokSessionPost, requiresCreatorPublishing: ['tiktok', 'kwai'].includes(platform) && !tiktokSessionPost },
+      ...(tiktokSessionPost ? { deliveryMode: 'experimental_session_rest' } : {}),
+      ...(render ? { render: { path: render.relativePath, sha256: episode.render.sha256, sizeBytes: render.sizeBytes, durationSeconds: episode.render.durationSeconds,
+        ...(tiktokSessionPost ? { width: episode.render.width, height: episode.render.height } : {}) } } : {}),
       ...(metadata ? { metadata, caption } : {}), ...(existing ? { publication: existing } : {}),
     };
   }
@@ -337,7 +350,7 @@ export class Publisher {
           if (record.platform === 'youtube' && (record.apiData?.grantId ?? 'legacy') !== this.youtubeGrantId) throw new Error('The publication belongs to another YouTube grant; a stale worker cannot replace its receipt.');
           Object.assign(record, changes, { updatedAt: new Date().toISOString() });
           const episode = state.episodes.find((item) => item.id === record.episodeId);
-          if (episode && ['youtube', 'facebook'].includes(record.platform)) {
+          if (episode && ['youtube', 'facebook', 'tiktok'].includes(record.platform) && record.status !== 'exported') {
             episode.status = record.status === 'unknown' ? 'publishing' : record.status === 'failed' ? 'approved' : record.status;
           }
           return record;
@@ -469,6 +482,61 @@ export class Publisher {
 
   async exportTikTok({ episodeId, expectedReviewHash }) {
     return this.exportPackage({ episodeId, expectedReviewHash, platform: 'tiktok' });
+  }
+
+  async publishTikTok({ episodeId, expectedReviewHash, privacy, execute = false, deliveryId }) {
+    if (privacy !== 'public' || typeof execute !== 'boolean') throw new Error('TikTok REST publishing requires public visibility and an explicit execute flag.');
+    const initial = await this.preflight({ episodeId, platform: 'tiktok', privacy });
+    if (!nonempty(expectedReviewHash) || initial.reviewHash !== expectedReviewHash) throw new Error('TikTok reviewed fingerprint changed.');
+    if (!execute) return { ...initial, execute: false };
+    if (initial.publication) return { duplicate: true, publication: initial.publication };
+    if (!initial.ready) throw new Error(initial.reasons.join(' '));
+    const identity = await this.tiktok.verifyAccount();
+    if (identity.accountId !== initial.accountId || !Number.isFinite(identity.maxDurationSeconds) || initial.render.durationSeconds > identity.maxDurationSeconds) throw new Error('TikTok account or supported duration was not confirmed.');
+    let media;
+    const reserved = await this.store.transaction(async state => {
+      const plan = await this.plan(state, { episodeId, platform: 'tiktok', privacy });
+      if (plan.reviewHash !== expectedReviewHash || plan.accountId !== identity.accountId) throw new Error('TikTok reviewed identity changed.');
+      if (plan.publication) return { duplicate: true, publication: plan.publication };
+      if (!plan.ready) throw new Error(plan.reasons.join(' '));
+      verifyDeliveryClaim(state, deliveryId, plan, { privacy });
+      const file = await verifiedFile(this.store.directory, plan.render.path, plan.render.sha256, 8 * 1024 * 1024, { noSymlinks: true });
+      media = await facebookMediaBody(this.store.directory, file, plan.render.sha256, 8 * 1024 * 1024);
+      const publication = { id: randomUUID(), episodeId, projectId: plan.projectId, platform: 'tiktok', accountId: plan.accountId,
+        reviewHash: plan.reviewHash, renderSha256: plan.render.sha256, status: 'uploading', privacy, route: 'experimental_session_rest',
+        effectiveAt: plan.effectiveAt, createdAt: new Date().toISOString(), ...(deliveryId ? { deliveryId } : {}) };
+      state.publications.push(publication);
+      return { publication, plan };
+    });
+    if (reserved.duplicate) return reserved;
+    const { publication, plan } = reserved;
+    try {
+      const receipt = await this.tiktok.upload({ media, caption: plan.caption, render: plan.render, onReceipt: async r => {
+        if (!/^[A-Za-z0-9_-]{16,64}$/.test(r.creationId ?? '') || !['uploading', 'uploaded'].includes(r.status) ||
+            !['project-create', 'allocation', 'transfer', 'commit', 'post'].includes(r.phase)) throw new Error('TikTok phase receipt invalid.');
+        await this.updatePublication(publication.id, { status: r.status, creationId: r.creationId,
+          ...(r.videoId ? { videoId: r.videoId } : {}), providerPhase: r.phase });
+      } });
+      const status = ['processing', 'unknown'].includes(receipt?.status) ? receipt.status : 'unknown';
+      return { publication: await this.updatePublication(publication.id, { status, providerPhase: receipt?.phase ?? 'unknown',
+        ...(receipt?.creationId ? { creationId: receipt.creationId } : {}), ...(receipt?.videoId ? { videoId: receipt.videoId } : {}),
+        ...(Number.isInteger(receipt?.httpStatus) ? { httpStatus: receipt.httpStatus } : {}),
+        ...(Number.isSafeInteger(receipt?.applicationCode) ? { applicationCode: receipt.applicationCode } : {}),
+        ...(receipt?.code && /^TIKTOK_[A-Z_]+$/.test(receipt.code) ? { providerCode: receipt.code } : {}),
+        ...(status === 'unknown' ? { error: 'TikTok outcome requires reconciliation. Never repeat the post automatically.' } : {}) }) };
+    } catch {
+      return { publication: await this.updatePublication(publication.id, { status: 'unknown', error: 'TikTok outcome requires reconciliation. Never repeat the post automatically.' }) };
+    }
+  }
+
+  async syncTikTok({ publicationId }) {
+    const publication = (await this.store.read()).publications.find(p => p.id === publicationId && p.platform === 'tiktok' && p.route === 'experimental_session_rest');
+    if (!publication?.creationId || publication.accountId !== this.env.TIKTOK_ACCOUNT_ID) throw new Error('The original TikTok account and REST receipt are required.');
+    const receipt = await this.tiktok.status({ creationId: publication.creationId, postId: publication.postId });
+    if (receipt.status !== 'published' || receipt.confirmed !== true || receipt.privacy !== 'public' || !/^[1-9]\d{0,63}$/.test(receipt.postId ?? '') ||
+        receipt.url !== `https://www.tiktok.com/@${this.env.TIKTOK_ACCOUNT_HANDLE}/video/${receipt.postId}`) return { publication, verified: false, diagnostic: receipt };
+    return { verified: true, publication: await this.updatePublication(publication.id, { status: 'published', postId: receipt.postId, url: receipt.url,
+      providerPrivacyStatus: 'public', verifiedAt: new Date().toISOString(), publishedAt: publication.publishedAt ?? new Date().toISOString() }) };
   }
 
   async publishFacebook({ episodeId, expectedReviewHash, privacy, execute = false, deliveryId }) {

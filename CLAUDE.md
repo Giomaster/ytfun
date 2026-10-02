@@ -122,6 +122,9 @@ pending and verify the public result before claiming publication.
 YouTube and TikTok publish through the owned API integration; never substitute a
 Chrome/Studio upload. Reuse captured REST evidence and distinguish endpoint mapping
 from a working authenticated publisher.
+TikTok's authorized session REST experiment and private-cookie renewal fallback
+follow [the session contract](studio/docs/tiktok-session-rest.md); no browser
+publication, invented authentication or automatic retry of uncertain posts.
 Each platform has its own persistent thread and recurring due checks. When due,
 create the script, produce or reuse original shared media, review as an agent and
 publish automatically within the existing account authorization. Continue after

@@ -62,8 +62,8 @@ exportação TikTok em publicação.
    escolhida explicitamente e agendamento opcional. Facebook recebe cortes como
    Page Reels e episódios `long` pela Page Video API, com declaração de IA e
    confirmação de propriedade/processamento; o master exige permalink oficial.
-   TikTok e Kwai recebem pacotes com MP4, legenda, hashtags, disclosure e SRT
-   para publicação pelo criador em um fluxo permitido.
+   TikTok mantém exportação e uma rota REST de sessão experimental, habilitada
+   explicitamente para a conta autorizada. Kwai recebe pacotes para envio manual.
 8. Métricas observadas e estimativas de custo orientam o próximo experimento.
    Métricas das plataformas ficam separadas; ausência de dado não vira zero.
 
@@ -131,7 +131,7 @@ worker vivo e ajustar o timeout do cliente.
 | Assets e edição | `ytfun_asset_generate`, `ytfun_asset_import`, `ytfun_episode_render`, `ytfun_episode_render_manifest`, `ytfun_episode_render_register` |
 | Produção demorada | `ytfun_production_job_start`, `ytfun_production_job_get`, `ytfun_production_job_reconcile` |
 | Revisão | `ytfun_episode_review`, `ytfun_episode_approve` |
-| Distribuição | `ytfun_distribution_capabilities`, `ytfun_publish_plan`, `ytfun_youtube_publish`, `ytfun_youtube_publication_sync`, `ytfun_facebook_publish`, `ytfun_facebook_publication_sync`, `ytfun_tiktok_export`, `ytfun_kwai_export` |
+| Distribuição | `ytfun_distribution_capabilities`, `ytfun_publish_plan`, `ytfun_youtube_publish`, `ytfun_youtube_publication_sync`, `ytfun_facebook_publish`, `ytfun_facebook_publication_sync`, `ytfun_tiktok_export`, `ytfun_tiktok_publish`, `ytfun_tiktok_publication_sync`, `ytfun_kwai_export` |
 | Fila de entrega | `ytfun_delivery_enqueue`, `ytfun_delivery_list`, `ytfun_delivery_run_due`, `ytfun_delivery_cancel`, `ytfun_delivery_reconcile` |
 | Resultados | `ytfun_metrics_record`, `ytfun_youtube_metrics_sync` |
 | Dados YouTube | `ytfun_youtube_data_maintenance`, `ytfun_youtube_disconnect` (preview por padrão) |
@@ -292,8 +292,10 @@ O renderer guarda resolução, fps e formato na revisão. Receber `success:true`
 ao enviar não equivale a confirmar publicação; processamento e propriedade do
 vídeo são consultados no provider. A fila respeita esses mesmos gates.
 
-[TikTok e Kwai internacional](docs/short-video-publishing.md) ficam como pacotes
-para o criador. Não foi confirmada uma API pública de postagem para Kwai
+[TikTok](docs/tiktok-session-rest.md) tem uma rota experimental pela sessão privada,
+separada do OAuth/Direct Post oficial. Ela não presume aprovação do aplicativo,
+não automatiza login nem contorna desafios; publicação exige prova pública real.
+Kwai internacional fica como pacote para o criador. Não foi confirmada uma API pública de postagem para Kwai
 internacional; APIs do Kuaishou chinês não são tratadas como compatíveis.
 Métricas manuais aceitam as quatro plataformas, mantendo valores e fontes
 separados. Nenhuma elegibilidade de monetização é inferida da exportação.
@@ -316,8 +318,8 @@ ficar em armazenamento temporário privado, fora do repositório e das mídias.
   restritos a privado. [Upload oficial](https://developers.google.com/youtube/v3/docs/videos/insert).
 - Um MCP privado para publicar só nas próprias contas não corresponde ao uso
   permitido do TikTok Direct Post. O fluxo também pede preview, legenda editável,
-  seleção de privacidade e consentimento. Por isso esta versão exporta, sem
-  simular uma postagem. [Diretrizes do TikTok](https://developers.tiktok.com/docs/en/content-sharing-guidelines).
+  seleção de privacidade e consentimento. A rota privada REST experimental é
+  separada e não afirma aprovação no Direct Post. [Diretrizes do TikTok](https://developers.tiktok.com/docs/en/content-sharing-guidelines).
 - Conteúdo IA não garante elegibilidade no Creator Rewards. Formatos com pouco
   valor original, imagens repetidas ou loops podem não atender ao programa.
   [Recompensas do criador](https://support.tiktok.com/pt_BR/business-and-creator/creator-rewards-program/creator-rewards-program).

@@ -94,9 +94,13 @@ export function distributionCapabilities(env = {}) {
       sources: sources('facebook'),
     },
     {
-      platform: 'tiktok', deliveryMode: 'creator_export', directPost: false, exportSupported: true,
-      requiresCreatorPublishing: true, authorizationVerified: false, readyForPreflight: false,
-      configuration: { complete: true, missing: [] },
+      platform: 'tiktok', deliveryMode: env.YTFUN_TIKTOK_SESSION_PUBLISH_ENABLED === 'true' ? 'experimental_session_rest' : 'creator_export',
+      directPost: env.YTFUN_TIKTOK_SESSION_PUBLISH_ENABLED === 'true', exportSupported: true,
+      requiresCreatorPublishing: env.YTFUN_TIKTOK_SESSION_PUBLISH_ENABLED !== 'true', authorizationVerified: false,
+      readyForPreflight: env.YTFUN_TIKTOK_SESSION_PUBLISH_ENABLED === 'true' &&
+        /^\d+$/.test(env.TIKTOK_ACCOUNT_ID ?? '') && Boolean(env.TIKTOK_ACCOUNT_HANDLE && env.TIKTOK_SESSION_FILE?.startsWith('/')),
+      configuration: { complete: env.YTFUN_TIKTOK_SESSION_PUBLISH_ENABLED !== 'true' ||
+        Boolean(env.TIKTOK_ACCOUNT_ID && env.TIKTOK_ACCOUNT_HANDLE && env.TIKTOK_SESSION_FILE), missing: [] },
       blockers: [
         'This private account-management utility does not meet TikTok app-review or Direct Post intended-use requirements.',
         'Upload-to-Inbox also requires an approved app and creator-authorized video.upload scope; it leaves publication to the creator and is not implemented here.',
@@ -104,6 +108,7 @@ export function distributionCapabilities(env = {}) {
       restrictions: [
         'A permitted integration must provide creator preview, editable metadata, privacy selection and express upload consent.',
         'Caption limit: 2200 UTF-16 code units; actual account duration limits must be checked in TikTok.',
+        'The separately enabled session REST lane is experimental, not an audited official Direct Post integration. It pauses on expired sessions, challenges and uncertain mutations.',
       ],
       sources: sources('tiktok'),
     },

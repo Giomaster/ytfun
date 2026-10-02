@@ -67,6 +67,51 @@ function args(f, extra = {}) {
   return { episodeId: f.episode.id, privacy: 'private', expectedReviewHash: f.episode.approval.reviewHash, madeForKids: false, execute: true, ...extra };
 }
 
+test('TikTok REST reserves the exact reviewed hash and preserves unknown outcomes without duplicate posts', async t => {
+  const f = await fixture(t);
+  f.episode.render = { ...f.episode.render, width: 1080, height: 1920 };
+  approve(f.episode, f.assets);
+  await f.store.transaction(state => { state.episodes[0] = structuredClone(f.episode); });
+  let calls = 0;
+  const accountId = '7474000000000000000';
+  const tiktok = { readiness: () => ({ ready: true, reasons: [], accountId }),
+    verifyAccount: async () => ({ accountId, maxDurationSeconds: 3600 }),
+    upload: async ({ media, onReceipt }) => {
+      calls++;
+      assert.deepEqual(media, f.bytes);
+      const reserved = (await f.store.read()).publications.find(p => p.platform === 'tiktok');
+      assert.equal(reserved.renderSha256, f.episode.render.sha256);
+      assert.equal(reserved.privacy, 'public');
+      await onReceipt({ creationId: 'fixture-creation-12345', status: 'uploaded', phase: 'post', videoId: 'vfixture123456' });
+      return { creationId: 'fixture-creation-12345', status: 'unknown', phase: 'post', videoId: 'vfixture123456' };
+    } };
+  const publisher = new Publisher(f.store, { env: { TIKTOK_ACCOUNT_ID: accountId }, tiktok });
+  const input = { episodeId: f.episode.id, expectedReviewHash: f.episode.approval.reviewHash, privacy: 'public', execute: true };
+  const result = await publisher.publishTikTok(input);
+  assert.equal(result.publication.status, 'unknown');
+  assert.equal(result.publication.creationId, 'fixture-creation-12345');
+  assert.equal((await publisher.publishTikTok(input)).duplicate, true);
+  assert.equal(calls, 1);
+  await assert.rejects(publisher.publishTikTok({ ...input, privacy: 'private' }), /public visibility/);
+});
+
+test('TikTok REST rejects account mismatch before reserving or uploading and honors cross-project cadence', async t => {
+  const f = await fixture(t);
+  f.episode.render = { ...f.episode.render, width: 1080, height: 1920 };
+  approve(f.episode, f.assets);
+  await f.store.transaction(state => { state.episodes[0] = structuredClone(f.episode); });
+  const accountId = '7474000000000000000';
+  const tiktok = { readiness: () => ({ ready: true, reasons: [], accountId }), verifyAccount: async () => ({ accountId: '999', maxDurationSeconds: 3600 }), upload: async () => { throw new Error('Must not upload'); } };
+  const publisher = new Publisher(f.store, { env: { TIKTOK_ACCOUNT_ID: accountId }, tiktok });
+  const input = { episodeId: f.episode.id, expectedReviewHash: f.episode.approval.reviewHash, privacy: 'public', execute: true };
+  await assert.rejects(publisher.publishTikTok(input), /account or supported duration/);
+  assert.equal((await f.store.read()).publications.length, 0);
+  await f.store.transaction(state => state.publications.push({ id: 'other-post', episodeId: 'different-episode', projectId: f.project.id, platform: 'tiktok', accountId,
+    status: 'processing', effectiveAt: new Date().toISOString() }));
+  const plan = await publisher.preflight({ episodeId: f.episode.id, platform: 'tiktok', privacy: 'public' });
+  assert.equal(plan.ready, false); assert.ok(plan.reasons.some(r => /cadence/.test(r)));
+});
+
 async function facebookFixture(t) {
   const f = await fixture(t);
   f.episode.render = { ...f.episode.render, durationSeconds: 45, width: 1080, height: 1920, framesPerSecond: 30, format: 'mp4' };
