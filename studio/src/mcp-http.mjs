@@ -11,6 +11,8 @@ import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middlew
 import { createServer } from './mcp.mjs';
 import { StudioStore } from './store.mjs';
 import { YouTubeDataLifecycle } from './youtube-data.mjs';
+import { Production } from './production.mjs';
+import { ProductionJobs } from './jobs.mjs';
 import { cloudAuthConfiguration, createCloudTokenVerifier } from './mcp-auth.mjs';
 
 export async function loadCloudEnvironment(filename, base = process.env) {
@@ -37,6 +39,7 @@ export async function loadCloudEnvironment(filename, base = process.env) {
 /** Stateless RPC transport, shared canonical store/OAuth lifecycle; single active host. */
 export function createCloudApp({ env, config = cloudAuthConfiguration(env), verifier = createCloudTokenVerifier(config),
   store = new StudioStore(env.YTFUN_STUDIO_DIR), lifecycle = new YouTubeDataLifecycle(store, { env }),
+  production = new Production(store, { env }), jobs = new ProductionJobs(store, production),
   serverFactory = createServer } = {}) {
   if (!env?.YTFUN_STUDIO_DIR?.startsWith('/')) throw new Error('An absolute persistent YTFUN_STUDIO_DIR is required.');
   if (env.YTFUN_DELIVERY_WORKER_ENABLED === 'true') throw new Error('Cloud chats own sends; the background delivery worker must be disabled.');
@@ -62,7 +65,7 @@ export function createCloudApp({ env, config = cloudAuthConfiguration(env), veri
     };
     res.once('close', cleanup);
     try {
-      server = serverFactory({ directory: env.YTFUN_STUDIO_DIR, env, store, youtubeLifecycle: lifecycle,
+      server = serverFactory({ directory: env.YTFUN_STUDIO_DIR, env, store, production, jobs, youtubeLifecycle: lifecycle,
         startBackgroundWorkers: false, remoteAuth: { authInfo: req.auth, resourceUrl: config.resource.href } });
       transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
       await server.connect(transport);
@@ -74,7 +77,7 @@ export function createCloudApp({ env, config = cloudAuthConfiguration(env), veri
     }
   });
   app.use((_error, _req, res, _next) => { if (!res.headersSent) res.status(400).json({ error: 'Invalid MCP request.' }); });
-  return { app, lifecycle, store, config };
+  return { app, lifecycle, store, production, jobs, config };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

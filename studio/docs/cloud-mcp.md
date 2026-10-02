@@ -51,7 +51,7 @@ Bind to loopback8788, with authenticated, stable HTTPS ingress. Requests are
 bounded by the SDK JSON parser's100KiB limit; split large operations rather than
 send unbounded payloads. Host and browser Origin are checked. `/health` reports
 only transport type; OAuth discovery is public and studio data is protected.
-The server shares one OAuth lifecycle/store across requests and never starts a
+The server shares one OAuth lifecycle/store and production-job registry across requests and never starts a
 delivery worker per request. Set `YTFUN_DELIVERY_WORKER_ENABLED=false`: platform
 conversations own sends. Store locking and Publisher preflight remain in force.
 `ytfun_cloud_profile` reports configured account IDs and exact integration limits
@@ -62,6 +62,12 @@ volume. Do not deploy multiple writable replicas, a serverless ephemeral directo
 or an autoscaled copy. Original assets use relative stored paths, allowing the
 whole verified directory to be moved without editing canonical JSON/hashes.
 Remote rendering/inference remains remote; NEVER run tests on the owner's Mac.
+For a Mac-hosted bridge, set `YTFUN_REMOTE_ASSEMBLY_ONLY=true`. Both synchronous
+rendering and asynchronous render jobs then refuse before creating a job or
+calling FFmpeg. Remote manifests and result registration remain available.
+Cloud chats can use this bridge without moving the store or social credentials;
+the Mac, backend and HTTPS tunnel must remain available. Skip snapshot/import
+when keeping the same canonical store on the Mac.
 
 ## Transfer one publisher at a time
 

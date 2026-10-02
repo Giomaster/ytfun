@@ -74,7 +74,7 @@ test('Cognito verifier rejects ID tokens, other owners/clients, missing resource
 test('HTTP cloud transport negotiates OAuth and isolates read/write/publish grants on the real studio', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'ytfun-cloud-ci-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  const env = { ...configuration, YTFUN_STUDIO_DIR: directory, HF_TOKEN: 'private-provider-secret',
+  const env = { ...configuration, YTFUN_STUDIO_DIR: directory, YTFUN_REMOTE_ASSEMBLY_ONLY: 'true', HF_TOKEN: 'private-provider-secret',
     FACEBOOK_PAGE_ACCESS_TOKEN: 'private-facebook-secret', FACEBOOK_PAGE_ID: 'authorized-page',
     YOUTUBE_CHANNEL_ID: 'authorized-channel', TIKTOK_ACCOUNT_ID: 'authorized-tiktok' };
   const config = cloudAuthConfiguration(env);
@@ -82,7 +82,11 @@ test('HTTP cloud transport negotiates OAuth and isolates read/write/publish gran
   const verifier = createCloudTokenVerifier(config, { keySet });
   const lifecycle = { maintain: async () => {}, fetch: globalThis.fetch, starts: 0, stops: 0,
     start() { this.starts++; }, stop() { this.stops++; } };
-  const { app, store } = createCloudApp({ env, config, verifier, lifecycle });
+  let releaseGeneration;
+  const pendingGeneration = new Promise(resolve => { releaseGeneration = resolve; });
+  const production = { generateAsset: async () => { await pendingGeneration; return { id: 'original-asset' }; },
+    renderEpisode: () => { throw new Error('Local renderer must not run'); } };
+  const { app, store, jobs } = createCloudApp({ env, config, verifier, lifecycle, production });
   const listener = await new Promise(resolve => { const server = app.listen(0, '127.0.0.1', () => resolve(server)); });
   t.after(() => new Promise(resolve => listener.close(resolve)));
   const base = new URL(`http://127.0.0.1:${listener.address().port}`);
@@ -119,6 +123,26 @@ test('HTTP cloud transport negotiates OAuth and isolates read/write/publish gran
   const writer = await clientFor('ytfun/read ytfun/write');
   const created = await writer.callTool({ name: 'ytfun_project_create', arguments: project });
   assert.ok(!created.isError, JSON.stringify(created));
+  const episodeId = '717f7a19-2e5f-4c55-b1d6-35c0d7899a23';
+  await store.transaction(state => state.episodes.push({ id: episodeId }));
+  for (const request of [
+    { name: 'ytfun_episode_render', arguments: { episodeId } },
+    { name: 'ytfun_production_job_start', arguments: { job: { action: 'render', input: { episodeId } } } },
+  ]) {
+    const refused = await writer.callTool(request);
+    assert.equal(refused.isError, true); assert.match(refused.content[0].text, /remote assembly only/);
+    assert.equal((await store.read()).productionJobs?.length ?? 0, 0);
+  }
+  const job = await jobs.start({ action: 'generate', input: { episodeId } });
+  const active = await read.callTool({ name: 'ytfun_production_job_get', arguments: { jobId: job.id } });
+  assert.equal(JSON.parse(active.content[0].text).workerActiveHere, true);
+  const unsafeReconcile = await writer.callTool({ name: 'ytfun_production_job_reconcile', arguments: {
+    jobId: job.id, confirmedBy: 'CI operator', evidence: 'A new RPC must retain the owning process.' } });
+  assert.equal(unsafeReconcile.isError, true); assert.match(unsafeReconcile.content[0].text, /still running/);
+  const work = jobs.running.get(job.id);
+  releaseGeneration(); await work;
+  const completed = await read.callTool({ name: 'ytfun_production_job_get', arguments: { jobId: job.id } });
+  assert.equal(JSON.parse(completed.content[0].text).status, 'completed');
   const publish = await writer.callTool({ name: 'ytfun_facebook_publish', arguments: {
     episodeId: JSON.parse(created.content[0].text).id, expectedReviewHash: 'a'.repeat(64), privacy: 'public', execute: true,
   } });

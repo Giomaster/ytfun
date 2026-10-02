@@ -27,7 +27,7 @@ const generationSchema = {
   videoParameters: videoParametersSchema.optional(), imageParameters: imageParametersSchema.optional(), referenceImageAssetId: id.optional(), endReferenceImageAssetId: id.optional(), resumeReservationId: id.optional(),
 };
 
-export function createServer({ directory = process.env.YTFUN_STUDIO_DIR, env = process.env, fetchImpl = fetch, store, studio, production, publisher, research, youtubeLifecycle, startBackgroundWorkers = true, remoteAuth } = {}) {
+export function createServer({ directory = process.env.YTFUN_STUDIO_DIR, env = process.env, fetchImpl = fetch, store, studio, production, publisher, research, jobs, youtubeLifecycle, startBackgroundWorkers = true, remoteAuth } = {}) {
   if (!directory && !store) throw new Error('YTFUN_STUDIO_DIR is required; use a private persistent absolute path');
   store ??= new StudioStore(directory);
   youtubeLifecycle ??= new YouTubeDataLifecycle(store, { env, fetchImpl });
@@ -35,7 +35,10 @@ export function createServer({ directory = process.env.YTFUN_STUDIO_DIR, env = p
   production ??= new Production(store, { env });
   publisher ??= new Publisher(store, { env, fetchImpl: youtubeLifecycle.fetch, youtubeAuth: youtubeLifecycle.auth });
   research ??= new Research(studio, { env, fetchImpl: youtubeLifecycle.fetch, youtubeAuth: youtubeLifecycle.auth, youtubeLifecycle });
-  const jobs = new ProductionJobs(store, production);
+  jobs ??= new ProductionJobs(store, production);
+  const requireLocalAssembly = () => {
+    if (env.YTFUN_REMOTE_ASSEMBLY_ONLY === 'true') throw new Error('This host permits remote assembly only. Export the exact render manifest, assemble on an authorized remote worker and register its verified result.');
+  };
   const deliveries = new DeliveryQueue(store, publisher);
   const server = new McpServer({ name: 'ytfun-ai-studio', version: '0.1.0' });
   const register = (name, description, schema, handler, { readOnly = false, external = false } = {}) => {
@@ -101,12 +104,12 @@ export function createServer({ directory = process.env.YTFUN_STUDIO_DIR, env = p
   register('ytfun_asset_import', 'Import an already-generated original AI asset from a regular local file (for example another authorized connector). Requires exact provider/model/prompt and commercial terms evidence. Does not accept third-party footage or music.', {
     episodeId: id, sceneId: id, kind, localPath: text, provenance: assetProvenance,
   }, input => production.registerAsset(input));
-  register('ytfun_episode_render', 'Render original 9:16 scenes with FFmpeg on a remote production worker. narrated uses voice and approximate SRT; silent uses visuals only and discards audio; nonverbal uses original audio per scene without narration or captions. Default short retains 12 scenes/180 seconds; explicit long permits 120 scenes/900 seconds. Never render on the laptop.', { episodeId: id }, input => production.renderEpisode(input));
+  register('ytfun_episode_render', 'Render original 9:16 scenes with FFmpeg on a remote production worker. narrated uses voice and approximate SRT; silent uses visuals only and discards audio; nonverbal uses original audio per scene without narration or captions. Default short retains 12 scenes/180 seconds; explicit long permits 120 scenes/900 seconds. Never render on the laptop.', { episodeId: id }, input => { requireLocalAssembly(); return production.renderEpisode(input); });
   register('ytfun_episode_render_manifest', 'Export the exact current scene/script/asset/provenance hashes and planned duration for remote assembly. Sources must be present and generation outcomes reconciled. Return the entire manifest unchanged when registering the result; no rendering or approval occurs. Hashing many sources can exceed one minute.', { episodeId: id }, input => production.exportRenderManifest(input), { readOnly: true });
   register('ytfun_episode_render_register', 'Register an original MP4 assembled remotely from a previously exported exact manifest. localPath belongs to this worker filesystem. Independently checks source hashes, current plan, bounded file copy, ffprobe duration/resolution/frame rate/audio and commit-time races. Long render cap=512 MiB; short/source caps=100 MiB. Provenance is an operator attestation, not proof of semantic assembly or a watched render. Approval/publication remain separate; allow an extended client timeout for hashing.', {
     episodeId: id, localPath: text, manifest: z.record(z.string(), z.unknown()), provenance: assetProvenance,
   }, input => production.registerRemoteRender(input));
-  register('ytfun_production_job_start', 'Start one slow production operation and return a persistent job ID immediately. One job runs at a time. Keep the MCP process alive; interrupted jobs never regenerate automatically.', { job: z.discriminatedUnion('action', [z.object({ action: z.literal('generate'), input: z.object(generationSchema) }), z.object({ action: z.literal('render'), input: z.object({ episodeId: id }) })]) }, ({ job }) => jobs.start(job), { external: true });
+  register('ytfun_production_job_start', 'Start one slow production operation and return a persistent job ID immediately. One job runs at a time. Keep the MCP process alive; interrupted jobs never regenerate automatically.', { job: z.discriminatedUnion('action', [z.object({ action: z.literal('generate'), input: z.object(generationSchema) }), z.object({ action: z.literal('render'), input: z.object({ episodeId: id }) })]) }, ({ job }) => { if (job.action === 'render') requireLocalAssembly(); return jobs.start(job); }, { external: true });
   register('ytfun_production_job_get', 'Read persistent production job status and completed output. Does not infer that another worker or an interrupted attempt failed.', { jobId: id }, ({ jobId }) => jobs.get(jobId), { readOnly: true });
   register('ytfun_production_job_reconcile', 'Close an interrupted worker record only after the operator verifies no worker is still active. Cost reservations and upload outcomes keep their independent gates; this does not retry them.', { jobId: id, confirmedBy: text, evidence: text }, input => jobs.reconcile(input));
   register('ytfun_episode_approve', 'Bind actual completed editorial review to this exact render and metadata. Never claim a render was watched or sources checked without doing so. Records reviewer accountability, not permission to bypass provider requirements.', {
