@@ -1,5 +1,9 @@
 # Áudio original e montagem remota de fontes existentes
 
+A política editorial única está em [ai-meow-operation.md](ai-meow-operation.md).
+Este guia descreve os contratos técnicos das rotas. Não impõe master, número de
+cenas, duração mínima, revisão estética ou validação humana à operação.
+
 Os novos workers são produção explícita, sem inferência, envio a redes ou alteração
 do store canônico. Cada lançamento exige um packet privado gzip/base64 com menos
 de 48 KiB, vinculado pelo SHA-256 canônico ao arquivo público `launch`. Os workflows
@@ -51,6 +55,12 @@ material preservado; não autoriza nova síntese/inferência nem rerun automáti
 Verifique run/artifact/recibo/hashes e registre por `Production.registerRemoteRender`
 com o manifesto exportado exato. O resultado é `rendered`; aprovação técnica,
 cadência, visibilidade pública e recibo de publicação continuam separados.
+Para material não assistido sob o aceite explícito do dono, `Studio.approveEpisode`
+aceita `review.mode: "owner_accepted_technical"` e `renderWatched: false` com a
+configuração habilitada e `technicalAcceptance` completo ligado ao SHA atual,
+arquivos/fontes/direitos realmente conferidos e referência ao aceite. Ver schema
+em [README](../README.md). Não declarar audição nas notas quando não ocorreu;
+aceite técnico não relaxa fingerprints, licenças, conta, cadência ou auditoria.
 
 ## Prévia para revisão audiovisual
 
@@ -107,8 +117,9 @@ exatos 7,5 s, em `audio/001.wav`…`audio/096.wav`. Síntese é procedural, dete
 por seed/título/gênero, sem samples externos, voz, modelos ou downloads. Seis
 famílias variam contato, resistência, fratura/impacto, revelação e assentamento;
 picos são limitados, DC corrigido e o final termina em silêncio. Os cues são uma
-direção inicial: sincronismo, prazer sonoro e ausência de fala exigem ouvir os
-arquivos reais junto do vídeo.
+direção inicial. Uma alegação de inspeção de sincronismo, prazer sonoro ou ausência
+semântica de fala exige observar os arquivos reais. O aceite técnico de resultados
+não assistidos registra essa ausência de observação sem impor uma refação.
 
 Artifact: `ai-meow-audio-<packet.id>`, retenção de sete dias, com os 96 WAVs e
 `audio-manifest.json`: identidade de lote/episódio/packet, repository/run/commit,
@@ -178,7 +189,8 @@ o áudio a partir dos WAVs originais, evitando acumular priming de AAC por unida
 Gera oito compilações de 12 cenas/90 s e o master de 720 s. Perfil, áudio, duração,
 hash e tamanho são conferidos por ffprobe e leitura dos arquivos; master deve
 caber em 220 MiB, sem reencoding automático se exceder. A ausência semântica de
-fala/texto não é provada por ffprobe e precisa de revisão real.
+fala/texto não é provada por ffprobe; não declarar essa inspeção quando não ocorreu.
+O aceite de imperfeições e sua representação técnica seguem a política única.
 
 O job de montagem tem limite total de 180 minutos. Não há medida prévia de sua
 velocidade ou garantia de conclusão nesse prazo. O recibo guarda tempos reais de
@@ -197,8 +209,9 @@ Baixe/verifique os arquivos e registre o master por
 usando o manifesto original exato. Derive os shorts/compilações com
 `Studio.deriveShort`, exporte seus manifestos remapeados e registre os respectivos
 MP4s com proveniência verdadeira da montagem. Isso requer um master renderizado
-válido; não contornar o estado com patches. Cada entrega precisa de revisão e
-aprovação próprias, cadência e limites da rede. Nenhum artifact confirma publicação.
+válido; não contornar o estado com patches. Cada entrega conserva aprovação técnica
+própria e verdadeira, cadência e limites da rede. O modo de aceite do dono descrito
+acima não exige playback nem validação estética/humana. Nenhum artifact confirma publicação.
 
 Logs dos helpers só informam contagens, IDs/hash de artifacts e estado. Falhas são
 genéricas; stderr, packets e tokens não são persistidos. Fluxos recusam reruns da
