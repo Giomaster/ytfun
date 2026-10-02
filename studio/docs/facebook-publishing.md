@@ -145,6 +145,37 @@ cancel remote sessions, or repeat a lost finish; those require operator handling
 
 ## Receipts and reconciliation
 
+### Explicit owner cadence exception
+
+The trusted local operator API supports `Publisher.authorizeFacebookCadenceException`
+for an explicit owner instruction to send one already queued public Facebook
+delivery outside the normal interval or rolling-day count. Supply `deliveryId`,
+`expectedReviewHash`, configured `accountId`, a unique dispatch `cycleId`,
+`authorizedBy`, `authorityReference`, `reason`, and canonical `expiresAt` within
+one hour. The operator must have the human instruction; a backlog or agent's
+preference alone is not authorization. This method does not change any project's
+cadence and does not provide an exception to another network.
+
+The API records the exact episode, render and review hashes, current resolved
+publication IDs and authorization evidence in `facebookCadenceExceptions`.
+It brings only that unstarted delivery forward, preserving its former `dueAt`
+in `cadenceExceptionHistory`. A cycle can authorize at most one delivery on
+the Page. The same valid authorization is returned idempotently, without extending
+its expiry. Private visibility, stale files/reviews/licenses, duplicate media,
+invalid cadence policies/timestamps and unresolved provider reservations remain
+blocked. A new publication after authorization invalidates the recorded snapshot.
+
+`DeliveryQueue` forwards the stored exception ID and exact delivery ID to
+preflight and `publishFacebook`. The operator binds `runDue` to
+`{ platform: 'facebook', expectedDeliveryId, cadenceExceptionId }`; an earlier
+different candidate blocks without claiming it, and both IDs are checked again
+inside the claim transaction. A preview does not consume it. Consumption and
+the upload reservation commit together before any provider upload; an unknown
+or failed external result keeps the authorization consumed and is never retried
+automatically. The resulting publication still counts in ordinary future cadence.
+A later owner-authorized dispatch needs its own fresh, scoped record; this is
+not a standing flag that disables cadence.
+
 `upload()` returns a nonsecret receipt with `videoId` when known, `status`,
 `phase`, `confirmed`, and fixed diagnostics when needed. The optional callback
 is necessary in the Publisher integration for durable progress. A failed

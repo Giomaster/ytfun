@@ -142,7 +142,7 @@ function metadataFor(episode) {
   return { title: episode.title, description: fullDescription, tags, hashtags };
 }
 
-function cadenceIssues(state, project, platform, accountId, effectiveAt) {
+function cadenceIssues(state, project, platform, accountId, effectiveAt, { waiveFrequency = false } = {}) {
   const minHours = project.cadence?.minHoursBetweenPosts ?? 24;
   const maxPosts = project.cadence?.maxPostsPerRollingDay ?? 1;
   if (!Number.isFinite(minHours) || minHours < 12 || !Number.isInteger(maxPosts) || maxPosts < 1 || maxPosts > 3) {
@@ -163,15 +163,36 @@ function cadenceIssues(state, project, platform, accountId, effectiveAt) {
   const channelMaxPosts = Math.min(maxPosts, ...limits.map((limit) => limit.maxPostsPerRollingDay ?? 1));
   const times = peers.map((entry) => Date.parse(entry.effectiveAt ?? entry.createdAt));
   const reasons = [];
-  if (times.some((time) => Math.abs(time - candidate) < channelMinHours * 3_600_000)) {
+  if (!waiveFrequency && times.some((time) => Math.abs(time - candidate) < channelMinHours * 3_600_000)) {
     reasons.push(`Channel cadence requires at least ${channelMinHours} hours between reserved or completed uploads.`);
   }
   const nearby = times.filter((time) => Math.abs(time - candidate) < DAY_MS);
   const windowEnds = [candidate, ...nearby.filter((time) => time >= candidate)];
-  if (windowEnds.some((end) => nearby.filter((time) => time <= end && time > end - DAY_MS).length + 1 > channelMaxPosts)) {
+  if (!waiveFrequency && windowEnds.some((end) => nearby.filter((time) => time <= end && time > end - DAY_MS).length + 1 > channelMaxPosts)) {
     reasons.push(`Channel cadence permits at most ${channelMaxPosts} upload(s) in any rolling 24 hours.`);
   }
   return reasons;
+}
+
+function facebookCadenceException(state, { cadenceExceptionId, deliveryId, episode, reviewHash, accountId, platform, privacy }, now) {
+  if (cadenceExceptionId === undefined) return null;
+  const exception = state.facebookCadenceExceptions?.find(item => item.id === cadenceExceptionId);
+  const delivery = state.deliveries?.find(item => item.id === deliveryId);
+  if (platform !== 'facebook' || privacy !== 'public' || !exception || exception.status !== 'authorized' ||
+      exception.platform !== platform || exception.privacy !== privacy || exception.accountId !== accountId ||
+      exception.deliveryId !== deliveryId || exception.episodeId !== episode.id || exception.reviewHash !== reviewHash ||
+      exception.renderSha256 !== episode.render?.sha256 || !Number.isFinite(Date.parse(exception.expiresAt)) ||
+      Date.parse(exception.expiresAt) <= now || !delivery || !['queued', 'running'].includes(delivery.status) ||
+      delivery.cadenceExceptionId !== exception.id || delivery.platform !== platform || delivery.privacy !== privacy ||
+      delivery.accountId !== accountId || delivery.episodeId !== episode.id || delivery.reviewHash !== reviewHash ||
+      delivery.renderSha256 !== episode.render?.sha256) throw new Error('Facebook cadence exception is expired, consumed or does not match this exact public delivery.');
+  const peers = state.publications.filter(item => item.platform === platform && item.accountId === accountId && RESERVED_STATUSES.has(item.status));
+  if (peers.some(item => item.status !== 'published') ||
+      peers.some(item => item.episodeId === episode.id || item.renderSha256 === episode.render?.sha256) ||
+      JSON.stringify(peers.map(item => item.id).sort()) !== JSON.stringify(exception.priorPublicationIds)) {
+    throw new Error('Facebook cadence exception requires unchanged, resolved publication receipts and distinct media.');
+  }
+  return exception;
 }
 
 function safeSessionUrl(raw) {
@@ -204,7 +225,7 @@ export class Publisher {
     return { platforms: distributionCapabilities(this.env), youtubeAuth: this.youtubeAuth.readiness(), facebook: this.facebook.readiness(), facebookPageVideo: this.facebookPageVideo.readiness(), tiktokSession: this.tiktok.readiness() };
   }
 
-  async plan(state, { episodeId, platform, privacy = 'private', publishAt }, now = Date.now()) {
+  async plan(state, { episodeId, platform, privacy = 'private', publishAt, cadenceExceptionId, deliveryId }, now = Date.now()) {
     if (!['youtube', 'facebook', 'tiktok', 'kwai'].includes(platform)) throw new Error('Platform must be youtube, facebook, tiktok, or kwai.');
     if (!['private', 'unlisted', 'public'].includes(privacy)) throw new Error('Privacy must be private, unlisted, or public.');
     const episode = state.episodes.find((item) => item.id === episodeId);
@@ -287,7 +308,11 @@ export class Publisher {
     const accountId = { youtube: this.env.YOUTUBE_CHANNEL_ID, facebook: this.env.FACEBOOK_PAGE_ID, tiktok: this.env.TIKTOK_ACCOUNT_ID, kwai: this.env.KWAI_ACCOUNT_ID }[platform] ?? null;
     const existing = state.publications.find((item) => item.episodeId === episode.id && item.platform === platform && RESERVED_STATUSES.has(item.status));
     if (existing) reasons.push('This reviewed episode already has an upload or reservation; reconcile its existing publication.');
-    const cadence = cadenceIssues(state, project, platform, accountId, effectiveAt);
+    const ordinaryCadence = cadenceIssues(state, project, platform, accountId, effectiveAt);
+    let exception;
+    try { exception = facebookCadenceException(state, { cadenceExceptionId, deliveryId, episode, reviewHash, accountId, platform, privacy }, now); }
+    catch (error) { reasons.push(error.message); }
+    const cadence = exception ? cadenceIssues(state, project, platform, accountId, effectiveAt, { waiveFrequency: true }) : ordinaryCadence;
     if (platform === 'youtube') {
       if (!nonempty(accountId)) reasons.push('YOUTUBE_CHANNEL_ID must identify the intended channel.');
       if (!this.youtubeAuth.readiness().ready) reasons.push('YouTube requires OAuth credentials with youtube.upload and youtube.readonly scopes.');
@@ -325,7 +350,8 @@ export class Publisher {
       uploadPrivacy: publishAt === undefined ? privacy : 'private', effectiveAt,
       ...(publishAt !== undefined ? { publishAt: effectiveAt } : {}),
       ready: reasons.length === 0 && (['youtube', 'facebook'].includes(platform) || tiktokSessionPost), readyToExport: reasons.length === 0 && ['tiktok', 'kwai'].includes(platform) && !tiktokSessionPost,
-      reasons: [...new Set(reasons)], cadence: { warnings: cadence }, disclosure: { synthetic: true },
+      reasons: [...new Set(reasons)], cadence: { warnings: cadence,
+        ...(exception ? { exceptionId: exception.id, waivedWarnings: ordinaryCadence.filter(reason => !cadence.includes(reason)) } : {}) }, disclosure: { synthetic: true },
       capabilities: { directPost: ['youtube', 'facebook'].includes(platform) || tiktokSessionPost, requiresCreatorPublishing: ['tiktok', 'kwai'].includes(platform) && !tiktokSessionPost },
       ...(tiktokSessionPost ? { deliveryMode: 'experimental_session_rest' } : {}),
       ...(render ? { render: { path: render.relativePath, sha256: episode.render.sha256, sizeBytes: render.sizeBytes, durationSeconds: episode.render.durationSeconds,
@@ -337,6 +363,55 @@ export class Publisher {
   async preflight(args, { now = Date.now() } = {}) {
     if (!Number.isSafeInteger(now) || now < 0) throw new Error('Publication planning requires a valid clock.');
     return this.plan(await this.store.read(), args, now);
+  }
+
+  /** Trusted operator attestation, scoped to one public Facebook delivery and one dispatch. */
+  async authorizeFacebookCadenceException({ deliveryId, expectedReviewHash, accountId, cycleId, authorizedBy, authorityReference, reason, expiresAt }) {
+    for (const [name, value] of Object.entries({ deliveryId, accountId, cycleId, authorizedBy, authorityReference, reason })) {
+      if (!nonempty(value) || value.length > (name === 'authorityReference' ? 2048 : 1000)) throw new Error(`Cadence exception requires bounded ${name} evidence.`);
+    }
+    if (!/^[a-f0-9]{64}$/.test(expectedReviewHash ?? '') || accountId !== this.env.FACEBOOK_PAGE_ID) throw new Error('Cadence exception requires the configured Facebook Page and exact review fingerprint.');
+    const now = Date.now();
+    const expiration = Date.parse(expiresAt);
+    if (typeof expiresAt !== 'string' || !Number.isFinite(expiration) || new Date(expiration).toISOString() !== expiresAt ||
+        expiration <= now || expiration > now + 3_600_000) throw new Error('Cadence exception must expire within one hour using canonical ISO UTC.');
+    return this.store.transaction(async state => {
+      const delivery = state.deliveries?.find(item => item.id === deliveryId);
+      if (!delivery || delivery.status !== 'queued' || delivery.platform !== 'facebook' || delivery.privacy !== 'public' ||
+          delivery.accountId !== accountId || delivery.reviewHash !== expectedReviewHash) throw new Error('Cadence exception requires an unstarted, exact public Facebook delivery.');
+      if (state.deliveries.some(item => item.status === 'running')) throw new Error('Reconcile the running delivery before authorizing a cadence exception.');
+      const previous = state.facebookCadenceExceptions?.find(item => item.accountId === accountId && item.cycleId === cycleId);
+      if (previous) {
+        if (previous.deliveryId !== deliveryId || previous.reviewHash !== expectedReviewHash || previous.renderSha256 !== delivery.renderSha256 ||
+            previous.status !== 'authorized' || Date.parse(previous.expiresAt) <= Date.now()) throw new Error('This dispatch already has a different, expired or consumed cadence exception.');
+        return { duplicate: true, exception: previous, delivery };
+      }
+      if (delivery.cadenceExceptionId) throw new Error('This delivery already has an exception; reconcile it without renewing the authorization.');
+      const plan = await this.plan(state, { episodeId: delivery.episodeId, platform: 'facebook', privacy: 'public' });
+      const project = state.projects.find(item => item.id === plan.projectId);
+      const structuralCadence = cadenceIssues(state, project, 'facebook', accountId, plan.effectiveAt, { waiveFrequency: true });
+      const frequencyReasons = plan.cadence.warnings.filter(item => !structuralCadence.includes(item));
+      const remainingReasons = plan.reasons.filter(item => !frequencyReasons.includes(item));
+      if (remainingReasons.length || plan.publication || plan.accountId !== accountId || plan.reviewHash !== expectedReviewHash || plan.render?.sha256 !== delivery.renderSha256) {
+        throw new Error(remainingReasons.join(' ') || 'Cadence exception media or account no longer matches the queued delivery.');
+      }
+      const peers = state.publications.filter(item => item.platform === 'facebook' && item.accountId === accountId && RESERVED_STATUSES.has(item.status));
+      if (peers.some(item => item.status !== 'published') || peers.some(item => item.renderSha256 === delivery.renderSha256)) throw new Error('Reconcile existing Facebook reservations or duplicate media before authorizing an exception.');
+      const createdAt = new Date().toISOString();
+      if (Date.parse(expiresAt) <= Date.parse(createdAt)) throw new Error('Cadence exception expired before authorization could be recorded.');
+      const exception = { id: randomUUID(), platform: 'facebook', privacy: 'public', accountId, cycleId,
+        deliveryId, episodeId: delivery.episodeId, projectId: plan.projectId, reviewHash: expectedReviewHash, renderSha256: delivery.renderSha256,
+        authorizedBy: authorizedBy.trim(), authorityReference: authorityReference.trim(), reason: reason.trim(), createdAt, expiresAt,
+        priorPublicationIds: peers.map(item => item.id).sort(), waivedFrequencyReasons: frequencyReasons, status: 'authorized' };
+      state.facebookCadenceExceptions ??= [];
+      state.facebookCadenceExceptions.push(exception);
+      delivery.cadenceExceptionHistory ??= [];
+      delivery.cadenceExceptionHistory.push({ previousDueAt: delivery.dueAt, changedAt: createdAt, exceptionId: exception.id, reason: exception.reason });
+      delivery.cadenceExceptionId = exception.id;
+      delivery.dueAt = createdAt;
+      delivery.updatedAt = createdAt;
+      return { exception, delivery };
+    });
   }
 
   async updatePublication(id, changes) {
@@ -582,10 +657,10 @@ export class Publisher {
       ...(receipt?.code && /^TIKTOK_[A-Z_]+$/.test(receipt.code) ? { providerCode: receipt.code } : {}) }) };
   }
 
-  async publishFacebook({ episodeId, expectedReviewHash, privacy, execute = false, deliveryId }) {
+  async publishFacebook({ episodeId, expectedReviewHash, privacy, execute = false, deliveryId, cadenceExceptionId }) {
     if (privacy !== 'public') throw new Error('Facebook Page publishing requires explicit public visibility.');
     if (typeof execute !== 'boolean') throw new Error('execute must be a boolean.');
-    const initial = await this.preflight({ episodeId, platform: 'facebook', privacy });
+    const initial = await this.preflight({ episodeId, platform: 'facebook', privacy, deliveryId, cadenceExceptionId });
     if (!nonempty(expectedReviewHash) || expectedReviewHash !== initial.reviewHash) throw new Error('Expected review fingerprint does not match the current episode.');
     if (!execute) return { ...initial, execute: false };
     if (initial.publication) return { duplicate: true, publication: initial.publication };
@@ -594,7 +669,7 @@ export class Publisher {
     await adapter.verifyAccount();
     let media;
     const reservation = await this.store.transaction(async state => {
-      const plan = await this.plan(state, { episodeId, platform: 'facebook', privacy });
+      const plan = await this.plan(state, { episodeId, platform: 'facebook', privacy, deliveryId, cadenceExceptionId });
       if (plan.reviewHash !== expectedReviewHash) throw new Error('Episode changed after publication was requested.');
       if (plan.facebookVideoKind !== initial.facebookVideoKind) throw new Error('Facebook upload route changed after publication was requested.');
       if (plan.publication) return { duplicate: true, publication: plan.publication };
@@ -604,6 +679,12 @@ export class Publisher {
       media = await facebookMediaBody(this.store.directory, file, plan.render.sha256, maxFileBytes(this.env));
       if (createHash('sha256').update(media).digest('hex') !== plan.render.sha256.toLowerCase()) throw new Error('Render changed while preparing the upload.');
       const publication = { id: randomUUID(), episodeId, projectId: plan.projectId, platform: 'facebook', facebookVideoKind: plan.facebookVideoKind, accountId: plan.accountId, reviewHash: plan.reviewHash, renderSha256: plan.render.sha256, status: 'uploading', privacy, effectiveAt: plan.effectiveAt, createdAt: new Date().toISOString(), ...(deliveryId ? { deliveryId } : {}) };
+      if (cadenceExceptionId !== undefined) {
+        const exception = facebookCadenceException(state, { cadenceExceptionId, deliveryId, episode: state.episodes.find(item => item.id === episodeId),
+          reviewHash: plan.reviewHash, accountId: plan.accountId, platform: 'facebook', privacy }, Date.now());
+        Object.assign(exception, { status: 'consumed', publicationId: publication.id, consumedAt: publication.createdAt });
+        publication.cadenceExceptionId = exception.id;
+      }
       state.publications.push(publication);
       state.episodes.find(item => item.id === episodeId).status = 'publishing';
       return { publication, plan };

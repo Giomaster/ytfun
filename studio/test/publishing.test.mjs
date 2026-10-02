@@ -359,6 +359,234 @@ test('Facebook cadence includes Page Video and Reel reservations on the same Pag
   assert.ok(plan.cadence.warnings.length > 0);
 });
 
+async function facebookExceptionFixture(t, { upload, verifyAccount } = {}) {
+  const f = await facebookFixture(t);
+  const now = Date.now();
+  const secondEpisode = structuredClone(f.episode);
+  secondEpisode.id = 'episode-2';
+  secondEpisode.title = 'A different original fictional adventure';
+  secondEpisode.originalAngle = 'An invented gardener turns a rain cloud into a living tree.';
+  secondEpisode.scenes[0].id = 'scene-2';
+  secondEpisode.scenes[0].narration = 'The gardener planted a rain cloud.';
+  const secondAssets = f.assets.map(asset => ({ ...structuredClone(asset), id: `${asset.id}-2`, episodeId: secondEpisode.id, sceneId: 'scene-2' }));
+  const secondBytes = Buffer.from('a-different-reviewed-original-render');
+  await writeFile(path.join(f.directory, 'assets/render-2.mp4'), secondBytes);
+  secondEpisode.render.path = 'assets/render-2.mp4';
+  secondEpisode.render.sha256 = digest(secondBytes);
+  secondEpisode.render.sceneAssets = [{ sceneId: 'scene-2', visualAssetId: 'visual-1-2', audioAssetId: 'audio-1-2' }];
+  approve(secondEpisode, secondAssets);
+  await f.store.transaction(state => {
+    state.projects[0].cadence = { minHoursBetweenPosts: 18, maxPostsPerRollingDay: 2 };
+    state.episodes.push(secondEpisode);
+    state.assets.push(...secondAssets);
+    for (const [id, hoursAgo, facebookVideoKind] of [['earlier-reel', 22, 'reel'], ['recent-page-video', 4, 'page_video']]) {
+      state.publications.push({ id, episodeId: `${id}-episode`, projectId: f.project.id, platform: 'facebook', facebookVideoKind,
+        accountId: f.env.FACEBOOK_PAGE_ID, privacy: 'public', status: 'published', effectiveAt: new Date(now - hoursAgo * 3_600_000).toISOString() });
+    }
+  });
+  const calls = [];
+  const facebook = {
+    readiness: () => ({ ready: true, reasons: [], accountId: f.env.FACEBOOK_PAGE_ID }),
+    verifyAccount: verifyAccount ?? (async () => ({ accountId: f.env.FACEBOOK_PAGE_ID, verified: true })),
+    upload: async input => {
+      calls.push(input);
+      return upload ? upload(input, f) : { videoId: '987654', status: 'published', confirmed: true };
+    },
+  };
+  const publisher = new Publisher(f.store, { env: f.env, facebook });
+  const queue = new DeliveryQueue(f.store, publisher);
+  const delivery = (await queue.enqueue({ episodeId: f.episode.id, platform: 'facebook', privacy: 'public', expectedReviewHash: f.episode.approval.reviewHash, dueAt: new Date(now + 72 * 3_600_000).toISOString() })).delivery;
+  const otherDelivery = (await queue.enqueue({ episodeId: secondEpisode.id, platform: 'facebook', privacy: 'public', expectedReviewHash: secondEpisode.approval.reviewHash, dueAt: new Date(now + 90 * 3_600_000).toISOString() })).delivery;
+  return { ...f, publisher, queue, calls, delivery, otherDelivery };
+}
+
+function facebookExceptionRequest(f, overrides = {}) {
+  return { deliveryId: f.delivery.id, expectedReviewHash: f.delivery.reviewHash, accountId: f.env.FACEBOOK_PAGE_ID,
+    cycleId: 'owner-authorized-exception-cycle', authorizedBy: 'Giovanni', authorityReference: 'Owner explicitly authorized one Facebook send now.',
+    reason: 'Apply the owner exception without changing the shared cadence.', expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(), ...overrides };
+}
+
+function facebookExceptionPublishArgs(f, exception) {
+  return { episodeId: f.episode.id, expectedReviewHash: f.delivery.reviewHash, privacy: 'public', execute: true,
+    deliveryId: f.delivery.id, cadenceExceptionId: exception.id };
+}
+
+test('Facebook owner cadence exception sends only the selected queued work and consumes its grant before upload', async t => {
+  const f = await facebookExceptionFixture(t, { upload: async (_, fixture) => {
+    const state = await fixture.store.read();
+    const exception = state.facebookCadenceExceptions[0];
+    const publication = state.publications.find(item => item.deliveryId === exception.deliveryId);
+    assert.equal(exception.status, 'consumed');
+    assert.equal(exception.publicationId, publication.id);
+    assert.ok(Number.isFinite(Date.parse(exception.consumedAt)));
+    assert.equal(publication.privacy, 'public');
+    assert.equal(publication.accountId, fixture.env.FACEBOOK_PAGE_ID);
+    assert.equal(publication.renderSha256, fixture.episode.render.sha256);
+    return { videoId: '987654', status: 'published', confirmed: true };
+  } });
+  const before = await f.store.read();
+  const blocked = await f.publisher.preflight({ episodeId: f.episode.id, platform: 'facebook', privacy: 'public' });
+  assert.equal(blocked.ready, false);
+  assert.ok(blocked.reasons.some(reason => /at least 18 hours/.test(reason)));
+  assert.ok(blocked.reasons.some(reason => /at most 2/.test(reason)));
+  await assert.rejects(f.publisher.publishFacebook({ episodeId: f.episode.id, expectedReviewHash: f.delivery.reviewHash, privacy: 'public', execute: true }));
+  const { exception } = await f.publisher.authorizeFacebookCadenceException(facebookExceptionRequest(f));
+  const granted = await f.store.read();
+  assert.deepEqual(granted.projects, before.projects);
+  assert.deepEqual(granted.deliveries.find(item => item.id === f.otherDelivery.id), f.otherDelivery);
+  assert.ok(Date.parse(granted.deliveries.find(item => item.id === f.delivery.id).dueAt) <= Date.now());
+  const boundDispatch = { platform: 'facebook', expectedDeliveryId: f.delivery.id, cadenceExceptionId: exception.id };
+  const preview = await f.queue.runDue({ ...boundDispatch, execute: false });
+  assert.equal(preview.delivery.id, f.delivery.id);
+  assert.equal(preview.plan.ready, true);
+  const result = await f.queue.runDue({ ...boundDispatch, execute: true });
+  assert.equal(result.delivery.id, f.delivery.id);
+  assert.equal(result.delivery.status, 'completed');
+  const after = await f.store.read();
+  assert.equal(after.publications.length, before.publications.length + 1);
+  assert.equal(after.facebookCadenceExceptions.find(item => item.id === exception.id).publicationId, result.delivery.publicationId);
+  assert.deepEqual(after.projects, before.projects);
+  assert.deepEqual(after.deliveries.find(item => item.id === f.otherDelivery.id), f.otherDelivery);
+  assert.equal(f.calls.length, 1);
+  assert.equal((await f.queue.runDue({ execute: true, platform: 'facebook' })).idle, true);
+});
+
+test('Facebook exception dispatch refuses changed delivery or grant selection before claiming', async t => {
+  const f = await facebookExceptionFixture(t);
+  const { exception } = await f.publisher.authorizeFacebookCadenceException(facebookExceptionRequest(f));
+  const before = await f.store.read();
+  const dispatch = { execute: true, platform: 'facebook', expectedDeliveryId: f.delivery.id, cadenceExceptionId: exception.id };
+  for (const wrongSelection of [{ expectedDeliveryId: f.otherDelivery.id }, { cadenceExceptionId: 'another-exception' }]) {
+    assert.equal((await f.queue.runDue({ ...dispatch, ...wrongSelection })).blocked, true);
+    assert.deepEqual(await f.store.read(), before);
+  }
+  assert.equal(f.calls.length, 0);
+  const result = await f.queue.runDue(dispatch);
+  assert.equal(result.delivery.id, f.delivery.id);
+  assert.equal(result.delivery.status, 'completed');
+  assert.equal(f.calls.length, 1);
+});
+
+test('Facebook exception authorization rejects the wrong scope and never renews a cycle grant', async t => {
+  const f = await facebookExceptionFixture(t);
+  for (const invalid of [
+    { accountId: '999999' }, { expectedReviewHash: '0'.repeat(64) },
+    { expiresAt: new Date(Date.now() - 60_000).toISOString() }, { expiresAt: new Date(Date.now() + 2 * 3_600_000).toISOString() },
+  ]) await assert.rejects(f.publisher.authorizeFacebookCadenceException(facebookExceptionRequest(f, invalid)));
+  await f.store.transaction(state => { state.deliveries.find(item => item.id === f.delivery.id).privacy = 'private'; });
+  await assert.rejects(f.publisher.authorizeFacebookCadenceException(facebookExceptionRequest(f)));
+  await f.store.transaction(state => { state.deliveries.find(item => item.id === f.delivery.id).privacy = 'public'; });
+  await f.store.transaction(state => { state.publications[0].status = 'unknown'; });
+  await assert.rejects(f.publisher.authorizeFacebookCadenceException(facebookExceptionRequest(f)));
+  await f.store.transaction(state => { state.publications[0].status = 'published'; });
+  assert.equal((await f.store.read()).facebookCadenceExceptions?.length ?? 0, 0);
+  const request = facebookExceptionRequest(f);
+  const first = await f.publisher.authorizeFacebookCadenceException(request);
+  const repeated = await f.publisher.authorizeFacebookCadenceException({ ...request, expiresAt: new Date(Date.now() + 45 * 60_000).toISOString() });
+  assert.equal(repeated.duplicate, true);
+  assert.deepEqual(repeated.exception, first.exception);
+  await assert.rejects(f.publisher.authorizeFacebookCadenceException({ ...request, deliveryId: f.otherDelivery.id, expectedReviewHash: f.otherDelivery.reviewHash }));
+  const privatePlan = await f.publisher.preflight({ episodeId: f.episode.id, platform: 'facebook', privacy: 'private', deliveryId: f.delivery.id, cadenceExceptionId: first.exception.id });
+  assert.equal(privatePlan.ready, false);
+  const expiredPlan = await f.publisher.preflight({ episodeId: f.episode.id, platform: 'facebook', privacy: 'public', deliveryId: f.delivery.id, cadenceExceptionId: first.exception.id }, { now: Date.parse(first.exception.expiresAt) + 1 });
+  assert.equal(expiredPlan.ready, false);
+  await assert.rejects(f.publisher.publishFacebook({ ...facebookExceptionPublishArgs(f, first.exception), privacy: 'private' }));
+  assert.equal((await f.store.read()).facebookCadenceExceptions.length, 1);
+  assert.equal(f.calls.length, 0);
+});
+
+test('Facebook exception rechecks peer publications atomically after account verification', async t => {
+  let fixture;
+  const f = await facebookExceptionFixture(t, { verifyAccount: async () => {
+    await fixture.store.transaction(state => state.publications.push({ id: 'concurrent-publication', episodeId: 'concurrent-episode', projectId: fixture.project.id,
+      platform: 'facebook', facebookVideoKind: 'reel', accountId: fixture.env.FACEBOOK_PAGE_ID, privacy: 'public', status: 'published', effectiveAt: new Date().toISOString() }));
+    return { accountId: fixture.env.FACEBOOK_PAGE_ID, verified: true };
+  } });
+  fixture = f;
+  const { exception } = await f.publisher.authorizeFacebookCadenceException(facebookExceptionRequest(f));
+  assert.equal((await f.queue.runDue({ execute: false, platform: 'facebook' })).plan.ready, true);
+  const result = await f.queue.runDue({ execute: true, platform: 'facebook' });
+  assert.equal(result.delivery.status, 'attention');
+  const state = await f.store.read();
+  assert.equal(state.publications.length, 3);
+  assert.equal(state.publications.some(item => item.deliveryId === f.delivery.id), false);
+  assert.equal(state.facebookCadenceExceptions.find(item => item.id === exception.id).status, 'authorized');
+  assert.equal(f.calls.length, 0);
+});
+
+test('Facebook exception authorization preserves structural cadence and unresolved-publication gates', async t => {
+  for (const gate of ['invalid-project-cadence', 'invalid-publication-time', 'unknown-publication']) await t.test(gate, async subtest => {
+    const f = await facebookExceptionFixture(subtest);
+    await f.store.transaction(state => {
+      if (gate === 'invalid-project-cadence') state.projects[0].cadence.minHoursBetweenPosts = 11;
+      else if (gate === 'invalid-publication-time') state.publications[0].effectiveAt = 'invalid-time';
+      else Object.assign(state.publications[0], { status: 'unknown', reviewHash: '1'.repeat(64), renderSha256: '2'.repeat(64) });
+    });
+    const before = await f.store.read();
+    await assert.rejects(f.publisher.authorizeFacebookCadenceException(facebookExceptionRequest(f)));
+    assert.deepEqual(await f.store.read(), before, 'A blocked authorization must not create a grant or bring any delivery forward');
+    assert.equal(f.calls.length, 0);
+  });
+});
+
+test('Facebook exception cannot be applied to another delivery and competing workers upload once', async t => {
+  const f = await facebookExceptionFixture(t);
+  const { exception } = await f.publisher.authorizeFacebookCadenceException(facebookExceptionRequest(f));
+  const wrongTarget = await f.publisher.preflight({ episodeId: f.otherDelivery.episodeId, platform: 'facebook', privacy: 'public', deliveryId: f.otherDelivery.id, cadenceExceptionId: exception.id });
+  assert.equal(wrongTarget.ready, false);
+  const results = await Promise.all([f.queue.runDue({ execute: true, platform: 'facebook' }), f.queue.runDue({ execute: true, platform: 'facebook' })]);
+  assert.equal(results.filter(result => result.delivery?.status === 'completed').length, 1);
+  const state = await f.store.read();
+  assert.equal(state.publications.filter(item => item.deliveryId === f.delivery.id).length, 1);
+  assert.equal(state.facebookCadenceExceptions.filter(item => item.status === 'consumed').length, 1);
+  assert.equal(f.calls.length, 1);
+  assert.deepEqual(state.deliveries.find(item => item.id === f.otherDelivery.id), f.otherDelivery);
+});
+
+test('Facebook exception remains consumed after unknown or failed upload and never authorizes a retry', async t => {
+  for (const outcome of ['unknown', 'failed']) await t.test(outcome, async subtest => {
+    const f = await facebookExceptionFixture(subtest, { upload: async ({ onReceipt }) => {
+      await onReceipt({ videoId: '987654', status: 'unknown', phase: 'start' });
+      return { videoId: '987654', status: outcome, phase: 'transfer', confirmed: false };
+    } });
+    const { exception } = await f.publisher.authorizeFacebookCadenceException(facebookExceptionRequest(f));
+    const first = await f.queue.runDue({ execute: true, platform: 'facebook' });
+    assert.equal(first.delivery.status, 'attention');
+    const state = await f.store.read();
+    const consumed = state.facebookCadenceExceptions.find(item => item.id === exception.id);
+    assert.equal(consumed.status, 'consumed');
+    assert.equal(consumed.publicationId, first.delivery.publicationId);
+    assert.equal(state.publications.find(item => item.id === first.delivery.publicationId).status, outcome);
+    const retry = await f.publisher.publishFacebook(facebookExceptionPublishArgs(f, exception)).catch(error => ({ error }));
+    assert.ok(retry.duplicate === true || retry.error instanceof Error);
+    await assert.rejects(f.publisher.authorizeFacebookCadenceException(facebookExceptionRequest(f)));
+    assert.equal((await f.queue.runDue({ execute: true, platform: 'facebook' })).idle, true);
+    assert.equal((await f.store.read()).publications.length, state.publications.length);
+    assert.equal(f.calls.length, 1);
+  });
+});
+
+test('Facebook cadence exception does not bypass commercial rights or reviewed media integrity', async t => {
+  for (const changed of ['license', 'render']) await t.test(changed, async subtest => {
+    const f = await facebookExceptionFixture(subtest);
+    const { exception } = await f.publisher.authorizeFacebookCadenceException(facebookExceptionRequest(f));
+    if (changed === 'license') await f.store.transaction(state => {
+      state.assets.find(item => item.id === 'visual-1').provenance.commercialLicense = { url: '', notes: '' };
+      approve(state.episodes.find(item => item.id === f.episode.id), state.assets);
+    });
+    else await writeFile(path.join(f.directory, 'assets/render.mp4'), 'changed-after-exception-was-authorized');
+    const preview = await f.queue.runDue({ execute: false, platform: 'facebook' });
+    assert.equal(preview.plan.ready, false);
+    assert.ok(preview.plan.reasons.some(reason => /license|Render is missing, changed/.test(reason)));
+    const result = await f.queue.runDue({ execute: true, platform: 'facebook' });
+    assert.equal(result.delivery.status, 'attention');
+    const state = await f.store.read();
+    assert.equal(state.publications.length, 2);
+    assert.equal(state.facebookCadenceExceptions.find(item => item.id === exception.id).status, 'authorized');
+    assert.equal(f.calls.length, 0);
+  });
+});
+
 test('Kwai exports exact reviewed media and subtitles without invoking an unsupported API', async t => {
   const f = await fixture(t);
   const publisher = new Publisher(f.store, { env: { KWAI_ACCOUNT_ID: 'ai._.meow' }, fetchImpl: () => { throw new Error('Unexpected API call'); } });

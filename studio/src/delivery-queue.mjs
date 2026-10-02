@@ -81,20 +81,27 @@ export class DeliveryQueue {
     });
   }
 
-  async runDue({ execute = false, platform } = {}) {
+  async runDue({ execute = false, platform, expectedDeliveryId, cadenceExceptionId } = {}) {
     if (typeof execute !== 'boolean') throw new Error('execute must be a boolean.');
     if (platform !== undefined && !PLATFORMS.includes(platform)) throw new Error('Unsupported delivery platform filter.');
+    if (expectedDeliveryId !== undefined && (typeof expectedDeliveryId !== 'string' || !expectedDeliveryId.trim())) throw new Error('Expected delivery ID must be nonempty.');
+    if (cadenceExceptionId !== undefined && (platform !== 'facebook' || expectedDeliveryId === undefined || typeof cadenceExceptionId !== 'string' || !cadenceExceptionId.trim())) throw new Error('Bind a Facebook cadence exception to its expected delivery ID.');
     const state = await this.store.read();
     // A worker crash leaves an inspectable record. Never infer it is safe to repeat a request.
     if (state.deliveries?.some(item => item.status === 'running')) return { blocked: true, reason: 'A running delivery needs operator reconciliation before the worker continues.' };
     const candidate = (state.deliveries ?? []).filter(item => item.status === 'queued' && (platform === undefined || item.platform === platform) && Date.parse(item.dueAt) <= this.now())
       .sort((a, b) => a.dueAt.localeCompare(b.dueAt) || a.id.localeCompare(b.id))[0];
     if (!candidate) return { idle: true };
-    if (!execute) return { execute: false, delivery: candidate, plan: await this.publisher.preflight({ episodeId: candidate.episodeId, platform: candidate.platform, privacy: candidate.privacy }) };
+    if ((expectedDeliveryId !== undefined && candidate.id !== expectedDeliveryId) ||
+        (cadenceExceptionId !== undefined && candidate.cadenceExceptionId !== cadenceExceptionId)) return { blocked: true, reason: 'The due delivery differs from the explicitly requested delivery or cadence exception; no claim was made.' };
+    if (!execute) return { execute: false, delivery: candidate, plan: await this.publisher.preflight({ episodeId: candidate.episodeId, platform: candidate.platform, privacy: candidate.privacy,
+      ...(candidate.cadenceExceptionId ? { cadenceExceptionId: candidate.cadenceExceptionId, deliveryId: candidate.id } : {}) }) };
     const claimed = await this.store.transaction(current => {
       if (current.deliveries?.some(item => item.status === 'running')) return null;
       const item = current.deliveries?.find(entry => entry.id === candidate.id);
-      if (item?.status !== 'queued' || Date.parse(item.dueAt) > this.now()) return null;
+      if (item?.status !== 'queued' || Date.parse(item.dueAt) > this.now() ||
+          (expectedDeliveryId !== undefined && item.id !== expectedDeliveryId) ||
+          (cadenceExceptionId !== undefined && item.cadenceExceptionId !== cadenceExceptionId)) return null;
       if (item.platform === 'youtube') {
         const grantId = this.publisher.youtubeGrantId ?? 'legacy';
         assertYouTubeConnected(current, { YTFUN_YOUTUBE_GRANT_ID: grantId });
@@ -111,11 +118,13 @@ export class DeliveryQueue {
     let result;
     let phase = 'preflight';
     try {
-      const plan = await this.publisher.preflight({ episodeId: claimed.episodeId, platform: claimed.platform, privacy: claimed.privacy });
+      const plan = await this.publisher.preflight({ episodeId: claimed.episodeId, platform: claimed.platform, privacy: claimed.privacy,
+        ...(claimed.cadenceExceptionId ? { cadenceExceptionId: claimed.cadenceExceptionId, deliveryId: claimed.id } : {}) });
       if (claimed.platform === 'youtube' && (claimed.apiData?.grantId ?? 'legacy') !== (plan.youtubeGrantId ?? 'legacy')) throw new Error('Delivery consent generation changed.');
       if (plan.accountId !== claimed.accountId || plan.reviewHash !== claimed.reviewHash || plan.render?.sha256 !== claimed.renderSha256) throw new Error('Delivery identity or reviewed content changed.');
       if (!plan.ready && !plan.readyToExport && !plan.publication) throw new Error('Delivery preflight no longer permits the operation.');
       const input = { episodeId: claimed.episodeId, expectedReviewHash: claimed.reviewHash, privacy: claimed.privacy, madeForKids: claimed.madeForKids, execute: true, deliveryId: claimed.id };
+      if (claimed.cadenceExceptionId) input.cadenceExceptionId = claimed.cadenceExceptionId;
       phase = 'delivery';
       if (claimed.platform === 'youtube') result = await this.publisher.publishYouTube(input);
       else if (claimed.platform === 'facebook') result = await this.publisher.publishFacebook(input);
