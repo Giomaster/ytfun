@@ -313,9 +313,11 @@ vídeo são consultados no provider. A fila respeita esses mesmos gates.
 [TikTok](docs/tiktok-session-rest.md) tem uma rota experimental pela sessão privada,
 separada do OAuth/Direct Post oficial. Ela não presume aprovação do aplicativo,
 não automatiza login nem contorna desafios; publicação exige prova pública real.
-O provider Zernio exige preview real do dono e consentimento para o render exato:
-`ytfun_tiktok_zernio_consent_record` registra essa evidência e interações,
-sem substituir a aprovação técnica nem inventar visualização.
+O provider Zernio exige preview real e consentimento para o render exato:
+`ytfun_tiktok_zernio_consent_record` distingue prévia do dono de prévia do agente
+autorizado, com opt-in privado e evidência da autorização permanente. Consulte
+[o contrato TikTok/Zernio](docs/tiktok-zernio.md); nenhuma variante inventa
+visualização, audição ou consentimento humano.
 `ytfun_zernio_delivery_migrate` move apenas claims públicos não iniciados,
 preservando horário, mídia e histórico. Resultados incertos continuam na rota
 original; `ytfun_tiktok_publication_sync` e `ytfun_youtube_publication_sync`

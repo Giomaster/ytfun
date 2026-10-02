@@ -19,6 +19,9 @@ const binding = { providerAccountId: PROVIDER_ACCOUNT, nativeAccountId: NATIVE_A
   evidenceSha256: 'c'.repeat(64), verifiedAt: WHEN, source: 'owner_confirmed' };
 const attestation = { renderSha256: HASH, contentPreviewConfirmed: true, expressConsentGiven: true,
   evidenceSha256: 'b'.repeat(64), recordedAt: WHEN, previewWitness: 'owner', consentSource: 'owner_explicit' };
+const authoritySha = 'd'.repeat(64);
+const delegatedAttestation = { ...attestation, previewWitness: 'authorized_agent', consentSource: 'owner_standing_authority',
+  previewActorId: 'codex:01a0fb03-ce6a-7820-a7d4-cee666e81c7c', previewMethod: 'visual_playback', authorityEvidenceSha256: authoritySha };
 const interactions = { allow_comment: true, allow_duet: true, allow_stitch: false };
 const creatorInfo = {
   creator: { canPostMore: true }, privacyLevels: [{ value: 'PUBLIC_TO_EVERYONE' }],
@@ -117,6 +120,37 @@ test('provider preview is exact-hash owner evidence, not an inferred technical r
   const f = fixture();
   await assert.rejects(upload(f, { attestation: { renderSha256: HASH, ownerAcceptedTechnical: true, renderWatched: false } }), /PREVIEW_AND_CONSENT_REQUIRED/);
   assert.equal(f.calls.length, 0);
+});
+
+test('delegated playback is explicitly hash-authorized at the adapter and never added to provider metadata', async () => {
+  for (const configured of [undefined, '', 'invalid', 'e'.repeat(64)]) {
+    const f = fixture({ env: { ...env, YTFUN_TIKTOK_STANDING_AUTHORITY_SHA256: configured } });
+    await assert.rejects(upload(f, { attestation: delegatedAttestation }), /PREVIEW_AND_CONSENT_REQUIRED/);
+    assert.deepEqual(f.calls, []);
+  }
+  const enabledEnv = { ...env, YTFUN_TIKTOK_STANDING_AUTHORITY_SHA256: authoritySha };
+  for (const delta of [{ contentPreviewConfirmed: false }, { expressConsentGiven: false }, { renderSha256: 'e'.repeat(64) },
+    { previewActorId: 'Giovanni' }, { previewActorId: `codex:${KEY}` }, { previewMethod: 'inferred' }, { evidenceSha256: '' },
+    { authorityEvidenceSha256: 'e'.repeat(64) }, { renderWatched: false }]) {
+    const f = fixture({ env: enabledEnv });
+    await assert.rejects(upload(f, { attestation: { ...delegatedAttestation, ...delta } }), /PREVIEW_AND_CONSENT_REQUIRED/);
+    assert.deepEqual(f.calls, []);
+  }
+  const f = fixture({ env: enabledEnv });
+  assert.equal(f.adapter.readiness().standingAuthoritySha256, authoritySha);
+  const receipts = [];
+  const result = await upload(f, { attestation: delegatedAttestation, onReceipt: async value => { receipts.push(value); } });
+  assert.equal(result.status, 'published');
+  const request = JSON.parse(f.calls.find(call => call.url === 'https://zernio.com/api/v1/posts' && call.config.method === 'POST').config.body);
+  assert.equal(request.tiktokSettings.content_preview_confirmed, true);
+  assert.equal(request.tiktokSettings.express_consent_given, true);
+  assert.equal(request.tiktokSettings.privacy_level, 'PUBLIC_TO_EVERYONE');
+  assert.equal(request.tiktokSettings.video_made_with_ai, true);
+  assert.deepEqual(Object.keys(request.metadata).sort(), ['ytfunPublicationId', 'ytfunRenderSha256', 'ytfunRoute']);
+  for (const privateValue of [KEY, authoritySha, delegatedAttestation.previewActorId, delegatedAttestation.evidenceSha256]) {
+    assert.equal(JSON.stringify(request).includes(privateValue), false);
+    assert.equal(JSON.stringify(receipts).includes(privateValue), false);
+  }
 });
 
 test('explicit interaction choices respect disabled toggles and actual duration ceiling', async () => {
@@ -254,6 +288,64 @@ test('path-style bucket and direct storage key both preserve exact public pairin
     assert.equal(put.url, uploadUrl);
     assert.equal(put.config.headers.Authorization, undefined);
   }
+});
+
+test('virtual-hosted R2 bucket and a 32-hex account transfer the exact direct key without sharing bearer or private receipts', async () => {
+  const uploadUrl = `https://fixture-bucket.${'2'.repeat(32)}.r2.cloudflarestorage.com/${storage.key}?X-Amz-Signature=${'f'.repeat(64)}`;
+  assert.ok(zernioTikTokUploadTarget({ ...storage, uploadUrl }));
+  const f = fixture({ storage: { ...storage, uploadUrl } });
+  const saved = [];
+  const result = await upload(f, { onReceipt: async value => { saved.push(value); } });
+  assert.equal(result.status, 'published');
+  assert.equal(result.publicationId, PUBLICATION);
+  assert.equal(result.renderSha256, HASH);
+  const put = f.calls.find(call => call.config.method === 'PUT');
+  assert.equal(put.url, uploadUrl);
+  assert.deepEqual(put.config.body, MEDIA);
+  assert.deepEqual(put.config.headers, { 'Content-Type': 'video/mp4' });
+  assert.equal(put.config.redirect, 'error');
+  const mutations = f.calls.filter(call => call.config.method === 'POST' && call.url.endsWith('/posts'));
+  assert.equal(mutations.length, 1);
+  assert.equal(mutations[0].config.headers['Idempotency-Key'], PUBLICATION);
+  const body = JSON.parse(mutations[0].config.body);
+  assert.deepEqual(body.mediaItems, [{ type: 'video', url: storage.publicUrl }]);
+  assert.equal(body.tiktokSettings.privacy_level, 'PUBLIC_TO_EVERYONE');
+  assert.equal(body.tiktokSettings.content_preview_confirmed, true);
+  assert.equal(body.tiktokSettings.express_consent_given, true);
+  assert.equal(body.tiktokSettings.video_made_with_ai, true);
+  assert.equal(body.tiktokSettings.draft, false);
+  for (const value of [KEY, 'f'.repeat(64), uploadUrl]) assert.equal(JSON.stringify({ result, saved }).includes(value), false);
+});
+
+test('virtual-hosted R2 rejects extra labels, malformed accounts, path-style prefixes and key substitutions before PUT', async () => {
+  const uploadUrl = `https://fixture-bucket.${'2'.repeat(32)}.r2.cloudflarestorage.com/${storage.key}?X-Amz-Signature=${'f'.repeat(64)}`;
+  for (const unsafe of [
+    uploadUrl.replace('https://', 'https://extra.'),
+    uploadUrl.replace('2'.repeat(32), 'g'.repeat(32)), uploadUrl.replace('2'.repeat(32), '2'.repeat(31)),
+    uploadUrl.replace('fixture-bucket', 'a'.repeat(64)), uploadUrl.replace('fixture-bucket', '-fixture-bucket'),
+    uploadUrl.replace('fixture-bucket', 'fixture-bucket-'), uploadUrl.replace('fixture-bucket', 'fixture_bucket'),
+    uploadUrl.replace('.r2.cloudflarestorage.com', '.r2.cloudflarestorage.com.evil.example'),
+    uploadUrl.replace('https://', 'https://user:pass@'), uploadUrl.replace('https:', 'http:'), uploadUrl.replace('.com/', '.com:444/'),
+    uploadUrl.replace(`/${storage.key}`, `/fixture-bucket/${storage.key}`), uploadUrl.replace(`/${storage.key}`, `/extra/${storage.key}`),
+    uploadUrl.replace('123_abc_', 'different_'), uploadUrl.replace('/temp/', '/%74emp/'),
+    `${uploadUrl}&X-Amz-Signature=${'f'.repeat(64)}`, `${uploadUrl}&%58-Amz-Signature=${'f'.repeat(64)}`, `${uploadUrl}#fragment`,
+  ]) {
+    assert.equal(zernioTikTokUploadTarget({ ...storage, uploadUrl: unsafe }), null);
+    const f = fixture({ storage: { ...storage, uploadUrl: unsafe } });
+    const result = await upload(f);
+    assert.equal(result.status, 'unknown');
+    assert.equal(result.code, 'TIKTOK_ZERNIO_STORAGE_TARGET_NOT_CONFIRMED');
+    assert.equal(result.phase, 'presign');
+    assert.equal(result.httpStatus, 200);
+    assert.ok(!f.calls.some(call => call.config.method === 'PUT' || call.url.endsWith('/posts')));
+    assert.equal(JSON.stringify(result).includes(KEY), false);
+    assert.equal(JSON.stringify(result).includes('f'.repeat(64)), false);
+  }
+  const wrongPair = { ...storage, uploadUrl, publicUrl: storage.publicUrl.replace('123_abc_', 'different_') };
+  assert.equal(zernioTikTokUploadTarget(wrongPair), null);
+  const rejected = fixture({ storage: wrongPair });
+  assert.equal((await upload(rejected)).code, 'TIKTOK_ZERNIO_STORAGE_TARGET_NOT_CONFIRMED');
+  assert.ok(!rejected.calls.some(call => call.config.method === 'PUT' || call.url.endsWith('/posts')));
 });
 
 test('bucket compatibility rejects additional object-path levels, mismatched keys and userinfo', async () => {

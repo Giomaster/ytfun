@@ -55,10 +55,20 @@ test('stdio MCP negotiates, lists tools and persists a series across restarts', 
   assert.deepEqual(migration.properties.expectedMode.enum, ['official_api', 'experimental_session_rest']);
   assert.ok(migration.required.includes('expectedReviewHash'));
   const consent = tools.tools.find(tool => tool.name === 'ytfun_tiktok_zernio_consent_record').inputSchema;
-  assert.equal(consent.properties.attestation.properties.contentPreviewConfirmed.const, true);
-  assert.equal(consent.properties.attestation.properties.expressConsentGiven.const, true);
-  assert.equal(consent.properties.attestation.properties.previewWitness.const, 'owner');
-  assert.equal(consent.properties.attestation.properties.consentSource.const, 'owner_explicit');
+  const ownerConsent = consent.properties.attestation.anyOf.find(schema => schema.properties.previewWitness.const === 'owner');
+  const delegatedConsent = consent.properties.attestation.anyOf.find(schema => schema.properties.previewWitness.const === 'authorized_agent');
+  for (const variant of [ownerConsent, delegatedConsent]) {
+    assert.equal(variant.properties.contentPreviewConfirmed.const, true);
+    assert.equal(variant.properties.expressConsentGiven.const, true);
+    assert.equal(variant.additionalProperties, false);
+    assert.ok(variant.required.includes('evidenceSha256'));
+  }
+  assert.equal(ownerConsent.properties.consentSource.const, 'owner_explicit');
+  assert.equal(delegatedConsent.properties.consentSource.const, 'owner_standing_authority');
+  assert.equal(delegatedConsent.properties.previewMethod.const, 'visual_playback');
+  assert.ok(delegatedConsent.required.includes('previewActorId'));
+  assert.ok(delegatedConsent.required.includes('authorityEvidenceSha256'));
+  assert.match(delegatedConsent.properties.previewActorId.pattern, /codex:/);
   assert.ok(consent.required.includes('expectedReviewHash'));
   assert.deepEqual(consent.properties.interactionSettings.required.sort(), ['allow_comment', 'allow_duet', 'allow_stitch']);
   const refusedRender = await client.callTool({ name: 'ytfun_episode_render', arguments: { episodeId: '717f7a19-2e5f-4c55-b1d6-35c0d7899a23' } });
