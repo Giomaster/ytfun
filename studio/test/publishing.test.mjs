@@ -402,7 +402,7 @@ async function facebookExceptionFixture(t, { upload, verifyAccount } = {}) {
 
 function facebookExceptionRequest(f, overrides = {}) {
   return { deliveryId: f.delivery.id, expectedReviewHash: f.delivery.reviewHash, accountId: f.env.FACEBOOK_PAGE_ID,
-    cycleId: 'owner-authorized-exception-cycle', authorizedBy: 'Giovanni', authorityReference: 'Owner explicitly authorized one Facebook send now.',
+    cycleId: 'owner-authorized-exception-cycle', authorizedBy: 'Giovanni', authorityReference: 'Owner authorized public Facebook delivery of distinct existing works in this cycle.',
     reason: 'Apply the owner exception without changing the shared cadence.', expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(), ...overrides };
 }
 
@@ -467,7 +467,7 @@ test('Facebook exception dispatch refuses changed delivery or grant selection be
   assert.equal(f.calls.length, 1);
 });
 
-test('Facebook exception authorization rejects the wrong scope and never renews a cycle grant', async t => {
+test('Facebook exception authorization rejects the wrong scope and never renews a delivery grant', async t => {
   const f = await facebookExceptionFixture(t);
   for (const invalid of [
     { accountId: '999999' }, { expectedReviewHash: '0'.repeat(64) },
@@ -485,7 +485,7 @@ test('Facebook exception authorization rejects the wrong scope and never renews 
   const repeated = await f.publisher.authorizeFacebookCadenceException({ ...request, expiresAt: new Date(Date.now() + 45 * 60_000).toISOString() });
   assert.equal(repeated.duplicate, true);
   assert.deepEqual(repeated.exception, first.exception);
-  await assert.rejects(f.publisher.authorizeFacebookCadenceException({ ...request, deliveryId: f.otherDelivery.id, expectedReviewHash: f.otherDelivery.reviewHash }));
+  await assert.rejects(f.publisher.authorizeFacebookCadenceException({ ...request, cycleId: 'another-owner-cycle' }));
   const privatePlan = await f.publisher.preflight({ episodeId: f.episode.id, platform: 'facebook', privacy: 'private', deliveryId: f.delivery.id, cadenceExceptionId: first.exception.id });
   assert.equal(privatePlan.ready, false);
   const expiredPlan = await f.publisher.preflight({ episodeId: f.episode.id, platform: 'facebook', privacy: 'public', deliveryId: f.delivery.id, cadenceExceptionId: first.exception.id }, { now: Date.parse(first.exception.expiresAt) + 1 });
@@ -493,6 +493,51 @@ test('Facebook exception authorization rejects the wrong scope and never renews 
   await assert.rejects(f.publisher.publishFacebook({ ...facebookExceptionPublishArgs(f, first.exception), privacy: 'private' }));
   assert.equal((await f.store.read()).facebookCadenceExceptions.length, 1);
   assert.equal(f.calls.length, 0);
+});
+
+test('Facebook publishes distinct works sequentially in the same cycle with independently consumed exceptions', async t => {
+  let uploads = 0;
+  const f = await facebookExceptionFixture(t, { upload: async () => {
+    uploads++;
+    return { videoId: String(987650 + uploads), status: uploads === 1 ? 'processing' : 'published', confirmed: uploads === 2 };
+  } });
+  f.publisher.facebook.status = async ({ videoId }) => {
+    assert.equal(videoId, '987651');
+    return { videoId, status: 'published', confirmed: true };
+  };
+  const before = await f.store.read();
+  const request = facebookExceptionRequest(f);
+  const { exception: firstException } = await f.publisher.authorizeFacebookCadenceException(request);
+  const first = await f.queue.runDue({ execute: true, platform: 'facebook', expectedDeliveryId: f.delivery.id, cadenceExceptionId: firstException.id });
+  assert.equal(first.delivery.status, 'completed');
+  assert.equal(first.delivery.outcome, 'processing');
+  const secondRequest = { ...request, deliveryId: f.otherDelivery.id, expectedReviewHash: f.otherDelivery.reviewHash };
+  const unresolved = await f.store.read();
+  await assert.rejects(f.publisher.authorizeFacebookCadenceException(secondRequest));
+  assert.deepEqual(await f.store.read(), unresolved, 'An unresolved earlier upload must block the next work without consuming or creating a grant');
+  const confirmed = await f.publisher.syncFacebook({ publicationId: first.delivery.publicationId });
+  assert.equal(confirmed.verified, true);
+  assert.equal(confirmed.publication.status, 'published');
+  const { exception: secondException } = await f.publisher.authorizeFacebookCadenceException(secondRequest);
+  assert.notEqual(secondException.id, firstException.id);
+  assert.equal(secondException.cycleId, firstException.cycleId);
+  assert.ok(secondException.priorPublicationIds.includes(first.delivery.publicationId));
+  const second = await f.queue.runDue({ execute: true, platform: 'facebook', expectedDeliveryId: f.otherDelivery.id, cadenceExceptionId: secondException.id });
+  assert.equal(second.delivery.status, 'completed');
+  assert.equal(second.delivery.outcome, 'published');
+  const after = await f.store.read();
+  assert.deepEqual(after.projects, before.projects);
+  assert.deepEqual(after.facebookCadenceExceptions.map(item => [item.id, item.status, item.publicationId]), [
+    [firstException.id, 'consumed', first.delivery.publicationId],
+    [secondException.id, 'consumed', second.delivery.publicationId],
+  ]);
+  const publications = after.publications.filter(item => [first.delivery.publicationId, second.delivery.publicationId].includes(item.id));
+  assert.equal(publications.length, 2);
+  assert.ok(publications.every(item => item.status === 'published' && item.privacy === 'public' && item.accountId === f.env.FACEBOOK_PAGE_ID));
+  assert.equal(f.calls.length, 2);
+  assert.deepEqual(f.calls[0].media, f.bytes);
+  assert.deepEqual(f.calls[1].media, await readFile(path.join(f.directory, 'assets/render-2.mp4')));
+  assert.notEqual(digest(f.calls[0].media), digest(f.calls[1].media));
 });
 
 test('Facebook exception rechecks peer publications atomically after account verification', async t => {

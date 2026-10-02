@@ -348,6 +348,21 @@ Não pedir novo aval editorial para cada vídeo ou ajuste dentro dessa autoriza�
 
 18 horas entre envios e até 2 por janela móvel de 24 horas são o experimento
 inicial registrado, não um ótimo universal nem um limite editorial permanente.
+Atualização humana de 02/10/2026 para o Facebook: a especialista pode publicar
+quantas obras distintas considerar úteis para o engajamento da Página. Não há
+teto de uma entrega por exceção, ciclo ou dia, nem obrigação de preencher uma
+quantidade. Os números iniciais 18h/2 não impedem um plano do Facebook justificado
+sob essa autorização; use a API de autorizações por entrega, preservando a
+cadência compartilhada das outras redes. Cada escolha e horário registra sua
+finalidade, experiência própria, hipótese de benefício, evidência disponível e
+forma de avaliar o resultado. Posição na fila, backlog ou mera permissão técnica
+não são motivos editoriais. Sem métricas suficientes, execute experimentos
+justificados e declare a incerteza, sem transformar ausência de métricas num
+novo bloqueio nem prometer que a escolha será melhor. Proteções de conta,
+PUBLIC, direitos, integridade, exclusões, duplicatas e resultados incertos
+continuam obrigatórias. Cada reserva e autorização é revalidada atomicamente;
+várias entregas podem compartilhar o mesmo despacho, com uma autorização de
+uso único por entrega, sem reutilizar recibos ou pedidos consumidos.
 Ler a cadência EFETIVA do domínio e contar todos os formatos e reservas do canal.
 Mudanças usam Studio.updateProjectCadence com política anterior esperada e motivo,
 sem editar o store à mão ou ignorar os limites técnicos implementados. Essa API
