@@ -96,7 +96,7 @@ Configure no host MCP, substituindo os caminhos pelos do seu checkout:
       "command": "/absolute/path/to/node",
       "args": ["/absolute/path/to/ytfun/studio/src/mcp.mjs"],
       "env": {
-        "YTFUN_STUDIO_DIR": "/absolute/private/path/ytfun-data"
+        "YTFUN_PRIVATE_ENV_FILE": "/absolute/private/path/ytfun.env"
       }
     }
   }
@@ -104,7 +104,11 @@ Configure no host MCP, substituindo os caminhos pelos do seu checkout:
 ```
 
 Veja `.env.example` para variáveis opcionais. Ela é documentação: o servidor
-usa variáveis do processo e não lê `.env` automaticamente. Nunca coloque tokens
+usa variáveis do processo e lê somente o arquivo explicitamente indicado por
+`YTFUN_PRIVATE_ENV_FILE`, regular, do proprietário, modo0600 e fora do Git.
+Nesse arquivo mantenha `YTFUN_STUDIO_DIR` e as credenciais já autorizadas; no Mac
+use `YTFUN_REMOTE_ASSEMBLY_ONLY=true`. O MCP local por stdio não precisa de
+ngrok, servidor HTTP ou login AWS. `.env` não é lido automaticamente. Nunca coloque tokens
 em prompts, nos projetos ou nos assets. Configuração específica de cada host,
 credenciais, auditorias e deployment ainda dependem do ambiente de operação.
 

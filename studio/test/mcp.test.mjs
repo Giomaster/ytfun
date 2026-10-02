@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,9 +11,11 @@ test('stdio MCP negotiates, lists tools and persists a series across restarts', 
   const directory = await mkdtemp(join(tmpdir(), 'ytfun-mcp-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const script = fileURLToPath(new URL('../src/mcp.mjs', import.meta.url));
+  const privateEnv = join(directory, 'private.env');
+  await writeFile(privateEnv, `YTFUN_STUDIO_DIR=${directory}\nYTFUN_REMOTE_ASSEMBLY_ONLY=true\n`, { mode: 0o600 });
   const connect = async () => {
     const client = new Client({ name: 'ci-studio-client', version: '1.0.0' });
-    await client.connect(new StdioClientTransport({ command: process.execPath, args: [script], env: { PATH: process.env.PATH ?? '', YTFUN_STUDIO_DIR: directory }, stderr: 'pipe' }));
+    await client.connect(new StdioClientTransport({ command: process.execPath, args: [script], env: { PATH: process.env.PATH ?? '', YTFUN_PRIVATE_ENV_FILE: privateEnv }, stderr: 'pipe' }));
     return client;
   };
   const client = await connect();
@@ -25,6 +27,8 @@ test('stdio MCP negotiates, lists tools and persists a series across restarts', 
   assert.ok(tools.tools.some(tool => tool.name === 'ytfun_facebook_publish'));
   assert.ok(tools.tools.some(tool => tool.name === 'ytfun_kwai_export'));
   assert.ok(tools.tools.some(tool => tool.name === 'ytfun_delivery_enqueue'));
+  const refusedRender = await client.callTool({ name: 'ytfun_episode_render', arguments: { episodeId: '717f7a19-2e5f-4c55-b1d6-35c0d7899a23' } });
+  assert.equal(refusedRender.isError, true); assert.match(refusedRender.content[0].text, /remote assembly only/);
   const planningSchema = tools.tools.find(tool => tool.name === 'ytfun_episode_plan').inputSchema;
   assert.deepEqual(planningSchema.properties.format.enum, ['short', 'long']);
   assert.equal(planningSchema.properties.format.default, 'short');

@@ -13,6 +13,7 @@ import { ProductionJobs } from './jobs.mjs';
 import { DeliveryQueue } from './delivery-queue.mjs';
 import { YouTubeDataLifecycle } from './youtube-data.mjs';
 import { requiredToolScope, toolAuthorizationFailure } from './mcp-auth.mjs';
+import { loadPrivateEnvironment } from './private-environment.mjs';
 
 const id = z.string().uuid();
 const text = z.string().trim().min(1).max(10_000);
@@ -149,6 +150,8 @@ export function createServer({ directory = process.env.YTFUN_STUDIO_DIR, env = p
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  try { await createServer().connect(new StdioServerTransport()); }
-  catch { console.error('ytfun MCP could not start. Set YTFUN_STUDIO_DIR and install studio dependencies.'); process.exitCode = 1; }
+  try {
+    const env = process.env.YTFUN_PRIVATE_ENV_FILE ? await loadPrivateEnvironment(process.env.YTFUN_PRIVATE_ENV_FILE) : process.env;
+    await createServer({ env, directory: env.YTFUN_STUDIO_DIR }).connect(new StdioServerTransport());
+  } catch { console.error('ytfun MCP could not start. Check the owned private environment and studio dependencies.'); process.exitCode = 1; }
 }
