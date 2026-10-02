@@ -1,11 +1,56 @@
-# Áudio original e montagem remota do volume de 96 cenas
+# Áudio original e montagem remota de fontes existentes
 
 Os novos workers são produção explícita, sem inferência, envio a redes ou alteração
 do store canônico. Cada lançamento exige um packet privado gzip/base64 com menos
 de 48 KiB, vinculado pelo SHA-256 canônico ao arquivo público `launch`. Os workflows
 rodam somente quando esses arquivos mudam na branch `codex/ai-original-studio`.
 Não há workflow_dispatch, chamadas pagas, POST ao provider ou nova imagem.
-Os testes usam mocks somente no GitHub CI; não executar áudio/render no laptop.
+Os testes usam mocks e uma integração real de montagem somente no GitHub CI;
+não executar testes, áudio ou render no laptop.
+
+## Montagem de uma seleção para vídeo regular
+
+`selected-assembly-packets.mjs` e `remote-selected-assembly-worker.mjs` aceitam
+de 1 a 96 fontes distintas existentes de 7,5 s, sem exigir o master de 96 cenas.
+O workflow `AI Meow Selected Assembly` só inicia quando muda deliberadamente
+`studio/batches/selected-assembly-launch.json` na branch de produção. Alterar
+o código executa CI e não relança mídia. O contrato legado abaixo permanece intacto.
+
+Crie um episódio próprio por `Studio.planEpisode` com `format: "long"`,
+`audioMode: "nonverbal"` e o canvas desejado; importe os vídeos/WAVs existentes por
+`Production.registerAsset` preservando a proveniência verdadeira e a linhagem
+nos registros da composição. Não edite o episódio de origem nem o store à mão.
+Exporte seu manifesto inteiro por `Production.exportRenderManifest`.
+
+O packet privado tem `schemaVersion: 1`, `type: "selected-assembly"`, `id`,
+`episodeId` de destino, `sourceEpisodeId` do áudio original, `manifest`,
+`audioBindings` com as 96 cenas/hashes originais, `audioArtifact` no formato abaixo
+e `sources`: `{ assetId, sha256, sourceSceneId, sourceIndex, remoteRequest }`.
+`assetId` aponta ao visual do novo manifesto; cena/índice apontam ao WAV original.
+A ordem final é exclusivamente a ordem do manifesto, podendo diferir da origem.
+Fontes, hashes, requests e índices repetidos são recusados. Cada WAV precisa
+corresponder ao hash exato do áudio selecionado para a cena de destino.
+
+Use `packSelectedAssemblyPacket` para guardar o valor `encoded` no secret
+`AI_MEOW_SELECTED_ASSEMBLY_PACKET`. O launch público contém somente
+`{ schemaVersion: 1, type: "selected-assembly", batchId, episodeId, packetSha256 }`.
+Nunca grave o packet, recibos privados do provider ou credenciais no Git/logs.
+Antes do lançamento confira exclusões por IDs, hashes e linhagem, uso editorial
+e reservas. Uma variante do mesmo conceito não cria outra ideia automaticamente.
+
+O worker verifica integralmente o artifact de áudio original (propriedade,
+run/commit/workflow, recibo, WAVs e hashes), recupera vídeos somente por GET,
+encaixa cada fonte inteira no canvas do manifesto e concatena os WAVs na nova
+ordem. Não há loop, alongamento, inferência ou revisão estética. Produz somente
+`master.mp4` e `render-manifest.json`, no artifact
+`ai-meow-selected-assembly-<id>` com retenção de sete dias. O recibo inclui nova
+cena, cena/índice originais, hashes e intervalos de origem/saída. Nenhum artifact
+confirma aprovação ou publicação. Expiração ou falha de GET exige recuperar o
+material preservado; não autoriza nova síntese/inferência nem rerun automático.
+
+Verifique run/artifact/recibo/hashes e registre por `Production.registerRemoteRender`
+com o manifesto exportado exato. O resultado é `rendered`; aprovação técnica,
+cadência, visibilidade pública e recibo de publicação continuam separados.
 
 ## Prévia para revisão audiovisual
 

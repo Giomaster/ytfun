@@ -94,7 +94,7 @@ export async function ownedAudioArtifact(packet, { env, artifact, fetchImpl = fe
 
 function duration(probe, stream) { return Number(stream?.duration ?? probe.format?.duration); }
 function rate(stream) { const [n, d = '1'] = String(stream?.avg_frame_rate ?? '').split('/'); return Number(n) / Number(d); }
-async function probeFile(filename, runner) {
+export async function probeFile(filename, runner) {
   const result = await runner('ffprobe', ['-v', 'error', '-show_format', '-show_streams', '-of', 'json', filename], { timeoutMs: 30000 });
   if (typeof result.stdout !== 'string' || Buffer.byteLength(result.stdout) > 1024 * 1024) throw new Error('Media probe is oversized');
   const probe = JSON.parse(result.stdout);
@@ -112,7 +112,7 @@ export function verifiedProbe(probe, seconds, spec = FINAL_SPEC) {
   if (probe.streams.length !== 2 || videos.length !== 1 || audios.length !== 1 || video.codec_name !== 'h264' || audio.codec_name !== 'aac' || video.width !== profile.width || video.height !== profile.height || Math.abs(rate(video) - profile.framesPerSecond) > 0.05 || !Number.isFinite(rate(video)) || audio.channels !== 2 || Number(audio.sample_rate) !== 48000 || [Number(probe.format?.duration), duration(probe, video), duration(probe, audio)].some(value => !Number.isFinite(value) || Math.abs(value - seconds) > 0.5)) throw new Error('Rendered streams do not match the planned duration/profile');
   return { durationSeconds: Number(probe.format.duration), ...profile, videoCodec: 'h264', audioCodec: 'aac', channels: 2, sampleRate: 48000, hasAudio: true, audioMode: 'nonverbal' };
 }
-async function outputRecord(filename, path, seconds, cap, runner, spec) {
+export async function outputRecord(filename, path, seconds, cap, runner, spec) {
   const digest = await mediaDigest(filename, cap);
   const metadata = verifiedProbe(await probeFile(filename, runner), seconds, spec);
   const current = await mediaDigest(filename, cap);
