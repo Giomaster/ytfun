@@ -115,6 +115,10 @@ and cadence; this editorial limit is not a platform guarantee or revenue promise
 ## Autonomous recurring production and release
 
 Follow [Autonomous recurring production and release](AGENTS.md#autonomous-recurring-production-and-release).
+Every delivery must target public visibility, as required by
+[Studio contracts](AGENTS.md#studio-contracts). Never use private or unlisted
+uploads, including audit demonstrations, as a fallback. Keep blocked releases
+pending and verify the public result before claiming publication.
 Each platform has its own persistent thread and recurring due checks. When due,
 create the script, produce or reuse original shared media, review as an agent and
 publish automatically within the existing account authorization. Continue after

@@ -361,6 +361,12 @@ Quality, required checks and authorization are constraints, not token-saving opt
 
 ## Studio contracts
 
+- Every AI Meow delivery must target public visibility. Do not upload privately
+  or unlisted, including audit demonstrations, as a fallback for a blocked public
+  release. A blocked release stays pending; report the actual blocker. A provider
+  queue or upload receipt is not a public publication: verify the final account,
+  public visibility and processing before recording success. Preserve valid public
+  scheduling and cadence; a planned future release is still pending until confirmed.
 - `studio/` is an independent Node ESM MCP package; legacy CLI remains intact.
 - `studio/README.md` describes the executable contracts and setup.
 - Projects and all source media are original and synthetic. Trend sources are
