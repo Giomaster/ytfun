@@ -90,3 +90,20 @@ Studio fallback needs its own working browser session. TikTok currently exports 
 package; its authorized normal Studio fallback also needs an authenticated browser
 and actual receipt. Do not label those exports or a hosted MCP as automatic
 TikTok posts. Kwai remains manual.
+
+## Snapshot tooling
+
+`node scripts/studio-snapshot.mjs export --source /private/current-store
+--destination /private/new-snapshot` obtains the actual canonical writer lock,
+copies verified assets/renders/captions and the unchanged state bytes, and returns
+the state SHA256. It refuses an existing destination and preserves a live lock.
+It changes no canonical JSON and carries existing receipts/unknown paid attempts.
+
+After stopping the old writers, privately transfer the snapshot and use
+`node scripts/studio-snapshot.mjs import --source /private/snapshot --destination
+/private/new-store --expected-state-sha256 <recorded hash>`. Import verifies the
+canonical hash, every required file, size, path and digest; missing, changed,
+duplicate or symbolic sources fail closed. It never overwrites an existing store
+and removes its own partial target on failure. Credentials are intentionally
+outside this snapshot and require a separate private owned0600 transfer. A source
+asset that is missing must be reconciled, never omitted to make migration pass.
