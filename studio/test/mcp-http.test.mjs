@@ -113,11 +113,15 @@ test('HTTP cloud transport negotiates OAuth and isolates read/write/publish gran
   };
   const read = await clientFor('ytfun/read');
   const tools = await read.listTools();
-  assert.equal(tools.tools.length, 41);
+  assert.equal(tools.tools.length, 43);
   assert.deepEqual(tools.tools.find(x => x.name === 'ytfun_facebook_publish')._meta.securitySchemes,
     [{ type: 'oauth2', scopes: ['ytfun/publish'] }]);
   assert.deepEqual(tools.tools.find(x => x.name === 'ytfun_tiktok_publish')._meta.securitySchemes,
     [{ type: 'oauth2', scopes: ['ytfun/publish'] }]);
+  for (const name of ['ytfun_zernio_delivery_migrate', 'ytfun_tiktok_zernio_consent_record']) {
+    assert.deepEqual(tools.tools.find(x => x.name === name)._meta.securitySchemes,
+      [{ type: 'oauth2', scopes: ['ytfun/publish'] }]);
+  }
   const profile = await read.callTool({ name: 'ytfun_cloud_profile', arguments: {} });
   assert.ok(!profile.isError);
   assert.ok(!JSON.stringify(profile).includes('private-provider-secret'));
@@ -158,6 +162,17 @@ test('HTTP cloud transport negotiates OAuth and isolates read/write/publish gran
   } });
   assert.equal(publish.isError, true);
   assert.match(publish._meta['mcp/www_authenticate'][0], /ytfun\/publish/);
+  for (const request of [
+    { name: 'ytfun_zernio_delivery_migrate', arguments: { deliveryId: episodeId, expectedMode: 'official_api', expectedReviewHash: 'a'.repeat(64), reason: 'Scope check' } },
+    { name: 'ytfun_tiktok_zernio_consent_record', arguments: { episodeId, expectedReviewHash: 'a'.repeat(64),
+      attestation: { renderSha256: 'a'.repeat(64), contentPreviewConfirmed: true, expressConsentGiven: true,
+        previewWitness: 'owner', consentSource: 'owner_explicit', evidenceSha256: 'b'.repeat(64), recordedAt: '2026-10-02T22:00:00.000Z' },
+      interactionSettings: { allow_comment: true, allow_duet: false, allow_stitch: false } } },
+  ]) {
+    const refused = await writer.callTool(request);
+    assert.equal(refused.isError, true);
+    assert.match(refused._meta['mcp/www_authenticate'][0], /ytfun\/publish/);
+  }
   const listed = await read.callTool({ name: 'ytfun_project_list', arguments: {} });
   assert.equal(JSON.parse(listed.content[0].text).length, 1);
   assert.equal((await store.read()).publications.length, 0);

@@ -21,7 +21,7 @@ test('stdio MCP negotiates, lists tools and persists a series across restarts', 
   const client = await connect();
   t.after(() => client.close());
   const tools = await client.listTools();
-  assert.equal(tools.tools.length, 40);
+  assert.equal(tools.tools.length, 42);
   const reviewSchema = tools.tools.find(tool => tool.name === 'ytfun_episode_approve').inputSchema.properties.review;
   const ownerReview = reviewSchema.anyOf.find(schema => schema.properties.mode?.const === 'owner_accepted_technical');
   assert.equal(ownerReview.properties.renderWatched.const, false);
@@ -39,6 +39,16 @@ test('stdio MCP negotiates, lists tools and persists a series across restarts', 
   assert.ok(tools.tools.some(tool => tool.name === 'ytfun_facebook_publish'));
   assert.ok(tools.tools.some(tool => tool.name === 'ytfun_kwai_export'));
   assert.ok(tools.tools.some(tool => tool.name === 'ytfun_delivery_enqueue'));
+  const migration = tools.tools.find(tool => tool.name === 'ytfun_zernio_delivery_migrate').inputSchema;
+  assert.deepEqual(migration.properties.expectedMode.enum, ['official_api', 'experimental_session_rest']);
+  assert.ok(migration.required.includes('expectedReviewHash'));
+  const consent = tools.tools.find(tool => tool.name === 'ytfun_tiktok_zernio_consent_record').inputSchema;
+  assert.equal(consent.properties.attestation.properties.contentPreviewConfirmed.const, true);
+  assert.equal(consent.properties.attestation.properties.expressConsentGiven.const, true);
+  assert.equal(consent.properties.attestation.properties.previewWitness.const, 'owner');
+  assert.equal(consent.properties.attestation.properties.consentSource.const, 'owner_explicit');
+  assert.ok(consent.required.includes('expectedReviewHash'));
+  assert.deepEqual(consent.properties.interactionSettings.required.sort(), ['allow_comment', 'allow_duet', 'allow_stitch']);
   const refusedRender = await client.callTool({ name: 'ytfun_episode_render', arguments: { episodeId: '717f7a19-2e5f-4c55-b1d6-35c0d7899a23' } });
   assert.equal(refusedRender.isError, true); assert.match(refusedRender.content[0].text, /remote assembly only/);
   const planningSchema = tools.tools.find(tool => tool.name === 'ytfun_episode_plan').inputSchema;
