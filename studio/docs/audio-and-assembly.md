@@ -28,7 +28,10 @@ uma geração pendente de outra cena. O master continua exigindo as 96 fontes,
 manifesto exato, reconciliação e revisão completas.
 
 `AI Meow Audio Input Diagnosis` é uma verificação remota somente de leitura,
-lançada por `review-diagnostic.json` com a identidade exata do review preparado.
+lançada somente por uma alteração explícita de `review-diagnostic.json` com a
+identidade exata do review preparado. Alterar o código do worker não relança
+esse diagnóstico operacional com um packet histórico. Os testes dos workers
+continuam obrigatórios no AI Studio CI.
 `audioOnly:true` para antes de qualquer GET ao provider, FFmpeg ou upload.
 Falhas mostram somente rótulos de etapas e códigos internos conhecidos; nunca
 mensagens arbitrárias, caminhos, tokens ou respostas de transporte.

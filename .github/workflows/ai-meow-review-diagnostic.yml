@@ -2,7 +2,9 @@ name: AI Meow Audio Input Diagnosis
 on:
   push:
     branches: ['codex/ai-original-studio']
-    paths: ['studio/batches/review-diagnostic.json', 'studio/scripts/remote-render-worker.mjs']
+    # This is an operation on a prepared artifact, not a code-validation gate.
+    # Worker edits are covered by AI Studio CI and must not replay old packets.
+    paths: ['studio/batches/review-diagnostic.json']
 permissions:
   contents: read
   actions: read
