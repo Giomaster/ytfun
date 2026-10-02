@@ -148,8 +148,11 @@ cancel remote sessions, or repeat a lost finish; those require operator handling
 ### Explicit owner cadence exception
 
 The trusted local operator API supports `Publisher.authorizeFacebookCadenceException`
-for an explicit owner instruction to send one already queued public Facebook
-delivery outside the normal interval or rolling-day count. Supply `deliveryId`,
+for an explicit owner instruction to send an already queued public Facebook
+delivery outside the normal interval or rolling-day count. Multiple distinct
+deliveries may be authorized and sent in the same dispatch; there is no per-cycle
+quantity cap. Each choice must have an engagement rationale recorded by the
+operator rather than relying on queue position or backlog size. Supply `deliveryId`,
 `expectedReviewHash`, configured `accountId`, a unique dispatch `cycleId`,
 `authorizedBy`, `authorityReference`, `reason`, and canonical `expiresAt` within
 one hour. The operator must have the human instruction; a backlog or agent's
@@ -159,8 +162,9 @@ cadence and does not provide an exception to another network.
 The API records the exact episode, render and review hashes, current resolved
 publication IDs and authorization evidence in `facebookCadenceExceptions`.
 It brings only that unstarted delivery forward, preserving its former `dueAt`
-in `cadenceExceptionHistory`. A cycle can authorize at most one delivery on
-the Page. The same valid authorization is returned idempotently, without extending
+in `cadenceExceptionHistory`. Each delivery has its own single-use authorization;
+several authorizations can share a dispatch `cycleId`. The same valid authorization
+is returned idempotently, without extending
 its expiry. Private visibility, stale files/reviews/licenses, duplicate media,
 invalid cadence policies/timestamps and unresolved provider reservations remain
 blocked. A new publication after authorization invalidates the recorded snapshot.
@@ -173,8 +177,10 @@ inside the claim transaction. A preview does not consume it. Consumption and
 the upload reservation commit together before any provider upload; an unknown
 or failed external result keeps the authorization consumed and is never retried
 automatically. The resulting publication still counts in ordinary future cadence.
-A later owner-authorized dispatch needs its own fresh, scoped record; this is
-not a standing flag that disables cadence.
+Authorize selected deliveries sequentially using the latest resolved publication
+history; pre-authorizing a batch against one snapshot does not reserve permission
+to ignore later publications. A later owner-authorized dispatch uses fresh records
+for its new deliveries; consumed authorizations never become retry permission.
 
 `upload()` returns a nonsecret receipt with `videoId` when known, `status`,
 `phase`, `confirmed`, and fixed diagnostics when needed. The optional callback
