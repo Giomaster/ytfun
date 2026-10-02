@@ -9,6 +9,7 @@ import { FacebookPageVideo, FacebookReels, safeFacebookVideoPermalink, validateF
 import { distributionCapabilities, publicationPackage } from './distribution.mjs';
 import { assertYouTubeConnected, youtubeApiData, youtubeBlocked } from './youtube-data-policy.mjs';
 import { TikTokWeb } from './tiktok-web.mjs';
+import { privateSessionFile } from './tiktok-session.mjs';
 
 const DAY_MS = 86_400_000;
 const DEFAULT_MAX_BYTES = 250 * 1024 * 1024;
@@ -537,6 +538,44 @@ export class Publisher {
         receipt.url !== `https://www.tiktok.com/@${this.env.TIKTOK_ACCOUNT_HANDLE}/video/${receipt.postId}`) return { publication, verified: false, diagnostic: receipt };
     return { verified: true, publication: await this.updatePublication(publication.id, { status: 'published', postId: receipt.postId, url: receipt.url,
       providerPrivacyStatus: 'public', verifiedAt: new Date().toISOString(), publishedAt: publication.publishedAt ?? new Date().toISOString() }) };
+  }
+
+  async resumeTikTokAllocation({ publicationId, expectedReviewHash, allocationPath, allocationSha256, observedBy, evidence }) {
+    // Narrow operator recovery: the adapter's own target guard rejected before
+    // transfer/commit/post. This is never a retry of an uncertain remote mutation.
+    if (!nonempty(observedBy) || !nonempty(evidence) || !/^[a-f0-9]{64}$/.test(allocationSha256 ?? '')) throw new Error('Observed allocation recovery evidence is required.');
+    const privateRoot = path.join(path.dirname(this.env.TIKTOK_SESSION_FILE ?? ''), 'attempts') + path.sep;
+    if (typeof allocationPath !== 'string' || !allocationPath.startsWith(privateRoot)) throw new Error('Use the original private captured allocation.');
+    const allocation = await privateSessionFile(allocationPath);
+    if (createHash('sha256').update(JSON.stringify(allocation)).digest('hex') !== allocationSha256 ||
+        allocation.ResponseMetadata?.Action !== 'ApplyUploadInner' || allocation.ResponseMetadata?.Region !== 'ap-singapore-1' || !allocation.ResponseMetadata?.RequestId) throw new Error('Captured allocation fingerprint or origin changed.');
+    const identity = await this.tiktok.verifyAccount();
+    let media;
+    const reserved = await this.store.transaction(async state => {
+      const publication = state.publications.find(p => p.id === publicationId);
+      if (publication?.platform !== 'tiktok' || publication.route !== 'experimental_session_rest' || publication.accountId !== identity.accountId ||
+          publication.accountId !== this.env.TIKTOK_ACCOUNT_ID || publication.status !== 'unknown' || publication.providerPhase !== 'allocation' ||
+          publication.providerCode !== 'TIKTOK_STORAGE_TARGET_NOT_CONFIRMED' || publication.reviewHash !== expectedReviewHash || !publication.creationId) throw new Error('This TikTok attempt is not a locally rejected, untransferred allocation.');
+      const withoutOwnReservation = { ...state, publications: state.publications.filter(p => p.id !== publicationId) };
+      const plan = await this.plan(withoutOwnReservation, { episodeId: publication.episodeId, platform: 'tiktok', privacy: 'public' });
+      if (!plan.ready || plan.reviewHash !== expectedReviewHash || plan.render.sha256 !== publication.renderSha256 || !Number.isFinite(identity.maxDurationSeconds) || plan.render.durationSeconds > identity.maxDurationSeconds) throw new Error('TikTok allocation recovery no longer matches review, account or cadence.');
+      const file = await verifiedFile(this.store.directory, plan.render.path, plan.render.sha256, 8 * 1024 * 1024, { noSymlinks: true });
+      media = await facebookMediaBody(this.store.directory, file, plan.render.sha256, 8 * 1024 * 1024);
+      publication.recoveries ??= [];
+      publication.recoveries.push({ at: new Date().toISOString(), observedBy, evidence, allocationPath, allocationSha256,
+        allocationRequestId: allocation.ResponseMetadata.RequestId, previousStatus: publication.status, previousPhase: publication.providerPhase, previousCode: publication.providerCode });
+      publication.status = 'uploading'; publication.providerCode = null;
+      return { publication, plan };
+    });
+    const receipt = await this.tiktok.upload({ media, caption: reserved.plan.caption, render: reserved.plan.render,
+      prepared: { creationId: reserved.publication.creationId, allocation },
+      onReceipt: async r => this.updatePublication(publicationId, { status: r.status, providerPhase: r.phase, ...(r.videoId ? { videoId: r.videoId } : {}) }),
+    });
+    return { publication: await this.updatePublication(publicationId, { status: ['processing', 'unknown'].includes(receipt?.status) ? receipt.status : 'unknown',
+      providerPhase: receipt?.phase ?? 'unknown', ...(receipt?.videoId ? { videoId: receipt.videoId } : {}),
+      ...(Number.isInteger(receipt?.httpStatus) ? { httpStatus: receipt.httpStatus } : {}),
+      ...(Number.isSafeInteger(receipt?.applicationCode) ? { applicationCode: receipt.applicationCode } : {}),
+      ...(receipt?.code && /^TIKTOK_[A-Z_]+$/.test(receipt.code) ? { providerCode: receipt.code } : {}) }) };
   }
 
   async publishFacebook({ episodeId, expectedReviewHash, privacy, execute = false, deliveryId }) {

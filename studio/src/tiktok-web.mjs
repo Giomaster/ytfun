@@ -37,7 +37,7 @@ export function tiktokCrc32(bytes) {
 
 export function tiktokStorageTarget(node) {
   const info = node?.StoreInfos?.[0];
-  if (!['tos-my16-up.tiktokcdn.com', 'tos-my316-up.tiktokcdn.com'].includes(node?.UploadHost) ||
+  if (!['tos-my16-up.tiktokcdn.com', 'tos-my316-up.tiktokcdn.com', 'tos-quic-awsfr.tiktokcdn.com'].includes(node?.UploadHost) ||
       typeof info?.StoreUri !== 'string' || !/^[A-Za-z0-9_/-]{1,512}$/.test(info.StoreUri) || info.StoreUri.includes('..') ||
       typeof info.Auth !== 'string' || !info.Auth || /[\r\n]/.test(info.Auth) || !validVid(node.Vid) || !node.SessionKey) throw new Error('TIKTOK_STORAGE_TARGET_NOT_CONFIRMED');
   const extraHeaders = {};
@@ -80,22 +80,26 @@ export class TikTokWeb {
     if (!response.ok || response.redirected || !data || data.ResponseMetadata?.Error) throw new Error('TIKTOK_GATEWAY_REJECTED');
     return data;
   }
-  async upload({ media, caption, render, onReceipt }) {
+  async upload({ media, caption, render, onReceipt, prepared }) {
     if (!Buffer.isBuffer(media) || media.length < 1 || media.length > MAX_BYTES) throw new Error('TIKTOK_CURRENT_CLIP_LIMIT_EXCEEDED');
-    const creationId = randomUUID().replaceAll('-', '');
+    if (prepared && !/^[A-Za-z0-9_-]{16,64}$/.test(prepared.creationId ?? '')) throw new Error('TIKTOK_PREPARED_CREATION_INVALID');
+    const creationId = prepared?.creationId ?? randomUUID().replaceAll('-', '');
     let phase = 'authorization', videoId;
     const notify = async status => onReceipt({ creationId, ...(videoId ? { videoId } : {}), status, phase });
     try {
       const token = await this.#session.uploadAuthorization();
       await this.#session.refreshCsrf();
-      phase = 'project-create'; await notify('uploading');
-      const project = await this.#session.request('/api/v1/web/project/create/', { method: 'POST', params: { creation_id: creationId, type: '1' } });
-      if (!project.ok || project.data?.status_code !== 0 || !project.data?.project?.project_id) return { status: 'unknown', phase, creationId, confirmed: false };
-      phase = 'allocation'; await notify('uploading');
-      const allocation = await this.#gateway(tiktokAwsRequest({ method: 'GET', token, params: {
-        Action: 'ApplyUploadInner', Version: '2020-11-19', SpaceName: 'tiktok', FileType: 'video', IsInner: 1,
-        FileSize: media.length, s: randomUUID().replaceAll('-', ''), device_platform: 'web', business_tag: 'tiktok_video_submission_web',
-      } }));
+      let allocation = prepared?.allocation;
+      if (!allocation) {
+        phase = 'project-create'; await notify('uploading');
+        const project = await this.#session.request('/api/v1/web/project/create/', { method: 'POST', params: { creation_id: creationId, type: '1' } });
+        if (!project.ok || project.data?.status_code !== 0 || !project.data?.project?.project_id) return { status: 'unknown', phase, creationId, confirmed: false };
+        phase = 'allocation'; await notify('uploading');
+        allocation = await this.#gateway(tiktokAwsRequest({ method: 'GET', token, params: {
+          Action: 'ApplyUploadInner', Version: '2020-11-19', SpaceName: 'tiktok', FileType: 'video', IsInner: 1,
+          FileSize: media.length, s: randomUUID().replaceAll('-', ''), device_platform: 'web', business_tag: 'tiktok_video_submission_web',
+        } }));
+      }
       const node = allocation.Result?.InnerUploadAddress?.UploadNodes?.[0];
       const target = tiktokStorageTarget(node);
       videoId = target.videoId;

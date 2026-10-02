@@ -109,3 +109,21 @@ test('an interrupted post is unknown and the adapter never retries the mutation'
   assert.equal(result.status, 'unknown'); assert.equal(postCalls, 1);
   assert.ok(!JSON.stringify(result).includes('private provider diagnostic'));
 });
+
+test('recovery of an observed untransferred allocation reuses the original project and allocation', async () => {
+  const routes = [];
+  const session = { readiness: () => ({ ready: true }), uploadAuthorization: async () => ({ access_key_id: 'fixture-access', secret_acess_key: 'fixture-secret', session_token: 'fixture-temp' }),
+    refreshCsrf: async () => {}, request: async (route) => { routes.push(route); return { ok: true, httpStatus: 200, data: { status_code: 0 } }; } };
+  const gatewayActions = [];
+  const web = new TikTokWeb({ session, fetchImpl: async (raw) => {
+    const url = new URL(raw);
+    if (url.hostname === 'tos-quic-awsfr.tiktokcdn.com') return Response.json({ code: 2000 });
+    gatewayActions.push(url.searchParams.get('Action'));
+    return Response.json({ Result: { Results: [{ Vid: 'vfixture123456' }] } });
+  } });
+  const result = await web.upload({ media: Buffer.from('reviewed-original'), caption: 'Original', render: { width: 1080, height: 1920, durationSeconds: 7.5 }, onReceipt: async () => {},
+    prepared: { creationId: 'original-creation-12345', allocation: { Result: { InnerUploadAddress: { UploadNodes: [{ UploadHost: 'tos-quic-awsfr.tiktokcdn.com', StoreInfos: [{ StoreUri: 'tos-awsfr/test', Auth: 'fixture-storage-auth' }], Vid: 'vfixture123456', SessionKey: 'fixture-key' }] } } } } });
+  assert.equal(result.creationId, 'original-creation-12345'); assert.equal(result.status, 'processing');
+  assert.deepEqual(gatewayActions, ['CommitUploadInner']);
+  assert.deepEqual(routes, ['/tiktok/web/project/post/v1/']);
+});

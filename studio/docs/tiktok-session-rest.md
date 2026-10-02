@@ -37,6 +37,13 @@ transferência completa não significam postagem pública. O esquema real de sta
 precisa identificar o item; a confirmação final verifica ID, autor e privacidade.
 Até essa evidência existir, o estado permanece pendente/processando/desconhecido.
 
+Uma recuperação operacional estreita aceita somente a rejeição local do destino
+na fase de alocação, antes de qualquer transferência/commit/post. Ela exige o
+arquivo privado original, hash exato, origem da resposta e evidência observada;
+revalida revisão, conta e cadência, mantém a mesma reserva/criação e preserva o
+histórico. Não é aceita para postagem, transferência ou commit de resultado incerto.
+Os destinos de armazenamento continuam limitados aos hosts efetivamente observados.
+
 O dispatcher admite entregas TikTok públicas por esta rota e mantém os pacotes
 exportados distintos. A cadência é compartilhada por toda a conta e por todos os
 formatos. Não há fallback de publicação pelo navegador. Os testes de autenticação,
