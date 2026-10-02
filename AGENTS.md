@@ -367,6 +367,10 @@ Quality, required checks and authorization are constraints, not token-saving opt
   queue or upload receipt is not a public publication: verify the final account,
   public visibility and processing before recording success. Preserve valid public
   scheduling and cadence; a planned future release is still pending until confirmed.
+- YouTube and TikTok deliveries must use the owned API integration. Do not publish
+  through Chrome/Studio as a fallback. Browser access for account authorization or
+  protocol observation is distinct from publishing. Preserve captured REST evidence;
+  endpoint names alone do not establish an authenticated working publisher.
 - `studio/` is an independent Node ESM MCP package; legacy CLI remains intact.
 - `studio/README.md` describes the executable contracts and setup.
 - Projects and all source media are original and synthetic. Trend sources are

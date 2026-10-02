@@ -119,6 +119,9 @@ Every delivery must target public visibility, as required by
 [Studio contracts](AGENTS.md#studio-contracts). Never use private or unlisted
 uploads, including audit demonstrations, as a fallback. Keep blocked releases
 pending and verify the public result before claiming publication.
+YouTube and TikTok publish through the owned API integration; never substitute a
+Chrome/Studio upload. Reuse captured REST evidence and distinguish endpoint mapping
+from a working authenticated publisher.
 Each platform has its own persistent thread and recurring due checks. When due,
 create the script, produce or reuse original shared media, review as an agent and
 publish automatically within the existing account authorization. Continue after
