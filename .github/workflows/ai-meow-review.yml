@@ -1,0 +1,43 @@
+name: AI Meow Audiovisual Review
+on:
+  push:
+    branches: ['codex/ai-original-studio']
+    paths: ['studio/batches/review-launch.json']
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: ai-meow-audiovisual-review
+  cancel-in-progress: false
+jobs:
+  review:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: studio/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+        working-directory: studio
+      - name: Ensure remote media tools
+        run: |
+          if ! command -v ffmpeg >/dev/null || ! command -v ffprobe >/dev/null; then
+            timeout 300s sudo apt-get -o Acquire::Retries=0 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 update -qq
+            timeout 300s sudo apt-get -o Acquire::Retries=0 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 install -y -qq ffmpeg
+          fi
+      - uses: actions/github-script@v7
+        env:
+          AI_MEOW_REVIEW_PACKET: ${{ secrets.AI_MEOW_REVIEW_PACKET }}
+          HF_TOKEN: ${{ secrets.AI_MEOW_HF_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          script: |
+            const worker = await import(`${process.env.GITHUB_WORKSPACE}/studio/scripts/remote-review-worker.mjs`);
+            const result = await worker.runReviewWorker();
+            core.info(`Audiovisual review: ${result.samples} samples; artifact ${result.artifactId}`);
