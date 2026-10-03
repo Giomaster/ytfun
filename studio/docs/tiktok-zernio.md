@@ -12,6 +12,7 @@ Private environment keys:
 
 ```dotenv
 YTFUN_TIKTOK_ZERNIO_PUBLISH_ENABLED=false
+YTFUN_TIKTOK_STANDING_AUTHORITY_SHA256=
 ZERNIO_API_KEY=
 ZERNIO_TIKTOK_ACCOUNT_ID=
 TIKTOK_ACCOUNT_ID=
@@ -69,14 +70,52 @@ provider-specific evidence, separate from acceptance of AI imperfections:
 }
 ```
 
+The owner-preview variant above remains supported. A separately enabled delegated
+variant represents an actual preview by an authorized agent acting under the
+owner's standing publishing authority:
+
+```js
+{
+  renderSha256, contentPreviewConfirmed: true, expressConsentGiven: true,
+  evidenceSha256, recordedAt,
+  previewWitness: 'authorized_agent',
+  consentSource: 'owner_standing_authority',
+  previewActorId: 'codex:<thread-uuid>',
+  previewMethod: 'visual_playback',
+  authorityEvidenceSha256
+}
+```
+
+`evidenceSha256` identifies the real playback observation, while
+`authorityEvidenceSha256` identifies the owner's explicit standing delegation.
+The latter must equal `YTFUN_TIKTOK_STANDING_AUTHORITY_SHA256` in the publishing
+process; an absent or different value blocks delegated recording/submission.
+Historical records remain structurally readable when the opt-in is disabled.
+The domain binds both variants to the native account, episode review and exact
+render. Publication records preserve the witness/source and evidence digests;
+private proof text and authority fields are not sent as post metadata.
+
 The digest is compared with the actual submitted bytes. An editorial approval
-with `renderWatched: false` does not establish this confirmation. The adapter
-does not assert that a human watched a file when they did not.
+with `renderWatched: false` does not establish this confirmation. Record actual
+visual playback separately, including whether audio was heard. Never assert that
+the owner watched, that the agent heard audio, or that playback occurred when it
+did not. AI imperfections remain accepted; preview does not create an aesthetic
+rejection or per-video human approval step.
+
+Zernio's TikTok/OpenAPI documentation requires preview and express consent but
+does not define this local witness field or explicitly waive preview for agents.
+Its privacy policy documents assistants acting on the user's behalf, and its
+MCP documentation supports autonomous agents. The delegated variant is an
+interpretation of that documented agency under an explicit owner authorization,
+not a claimed TikTok/Zernio exemption or permission to mark unobserved files.
 
 The caller reserves a publication UUID before upload; that same UUID is the
 `Idempotency-Key` and metadata correlation. The adapter obtains a presigned URL,
 validates its HTTPS R2 storage host and exact pairing with the Zernio media key,
-transfers via PUT without the API bearer token, then creates a single TikTok
+accepting a single-label storage host with the direct key or one bucket-path
+prefix. A virtual-hosted `bucket.<32-hex-account>.r2.cloudflarestorage.com`
+requires the direct key only; additional host labels or path prefixes are rejected.
+It transfers via PUT without the API bearer token, then creates a single TikTok
 target with `publishNow: true`. The request explicitly uses public visibility,
 AI disclosure, `draft: false` and `isAdsOnly: false`. There is no Inbox/private
 fallback or internal mutation retry.
@@ -117,6 +156,8 @@ Consulted 2026-10-02; recheck when changing provider contracts:
 - [Post reconciliation](https://docs.zernio.com/posts/get-post)
 - [Idempotency](https://docs.zernio.com/guides/idempotency)
 - [Public OpenAPI](https://zernio.com/openapi.yaml)
+- [Assistant agency and account-wide authorization, sections 5.1–5.2](https://my.zernio.com/privacy-policy)
+- [Autonomous agents with MCP](https://docs.zernio.com/mcp)
 
 Tests live in `studio/test/tiktok-zernio.test.mjs`. Run them in GitHub Actions
 only; no local tests on this Mac.

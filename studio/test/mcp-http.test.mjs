@@ -172,6 +172,11 @@ test('HTTP cloud transport negotiates OAuth and isolates read/write/publish gran
       attestation: { renderSha256: 'a'.repeat(64), contentPreviewConfirmed: true, expressConsentGiven: true,
         previewWitness: 'owner', consentSource: 'owner_explicit', evidenceSha256: 'b'.repeat(64), recordedAt: '2026-10-02T22:00:00.000Z' },
       interactionSettings: { allow_comment: true, allow_duet: false, allow_stitch: false } } },
+    { name: 'ytfun_tiktok_zernio_consent_record', arguments: { episodeId, expectedReviewHash: 'a'.repeat(64),
+      attestation: { renderSha256: 'a'.repeat(64), contentPreviewConfirmed: true, expressConsentGiven: true,
+        previewWitness: 'authorized_agent', consentSource: 'owner_standing_authority', previewActorId: 'codex:01a0fb03-ce6a-7820-a7d4-cee666e81c7c',
+        previewMethod: 'visual_playback', authorityEvidenceSha256: 'c'.repeat(64), evidenceSha256: 'b'.repeat(64), recordedAt: '2026-10-02T22:00:00.000Z' },
+      interactionSettings: { allow_comment: true, allow_duet: false, allow_stitch: false } } },
   ]) {
     const refused = await writer.callTool(request);
     assert.equal(refused.isError, true);

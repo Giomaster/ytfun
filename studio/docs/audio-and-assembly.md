@@ -4,6 +4,14 @@ A política editorial única está em [ai-meow-operation.md](ai-meow-operation.m
 Este guia descreve os contratos técnicos das rotas. Não impõe master, número de
 cenas, duração mínima, revisão estética ou validação humana à operação.
 
+As rotas deste documento foram implementadas para o acervo histórico volume01.
+Seus números (96 bindings/WAVs, fontes de7,5s e master720s) descrevem os packets
+daquela implementação, não requisitos de uma obra nova. A rota selecionada ainda
+reutiliza o artifact original completo de áudio; não exige que todas essas fontes
+entrem no vídeo escolhido. Não gerar ou esperar96 áudios/cenas para adequar um
+novo roteiro a esse helper. Para outras origens, escolher uma rota compatível
+ou fazer manutenção concreta do worker, preservando a mídia existente.
+
 Os novos workers são produção explícita, sem inferência, envio a redes ou alteração
 do store canônico. Cada lançamento exige um packet privado gzip/base64 com menos
 de 48 KiB, vinculado pelo SHA-256 canônico ao arquivo público `launch`. Os workflows
@@ -12,7 +20,7 @@ Não há workflow_dispatch, chamadas pagas, POST ao provider ou nova imagem.
 Os testes usam mocks e uma integração real de montagem somente no GitHub CI;
 não executar testes, áudio ou render no laptop.
 
-## Montagem de uma seleção para Short ou vídeo regular
+## Montagem selecionada do acervo histórico volume01
 
 `selected-assembly-packets.mjs` e `remote-selected-assembly-worker.mjs` aceitam
 fontes distintas existentes de 7,5 s, sem exigir o master de 96 cenas.
@@ -83,9 +91,10 @@ audição, com `review-manifest.json`, no artifact `ai-meow-review-<batchId>`.
 Não gera imagens, inferência, aprovações, publicações ou registros canônicos.
 Recibos de revisão têm `reviewOnly:true`, `approved:false`, `published:false`;
 gerar/copiar um arquivo não atesta que alguém o ouviu ou revisou o sincronismo.
-A seleção parcial permite revisar material conhecido sem encerrar nem reenviar
-uma geração pendente de outra cena. O master continua exigindo as 96 fontes,
-manifesto exato, reconciliação e revisão completas.
+A seleção parcial permite observar material conhecido sem encerrar nem reenviar
+uma geração pendente de outra cena. Somente o packet do master histórico de96
+fontes descreve aquela coleção completa; esse formato não limita as publicações
+selecionadas nem cria uma etapa obrigatória de revisão estética atual.
 
 `AI Meow Audio Input Diagnosis` é uma verificação remota somente de leitura,
 lançada somente por uma alteração explícita de `review-diagnostic.json` com a
@@ -96,7 +105,7 @@ continuam obrigatórios no AI Studio CI.
 Falhas mostram somente rótulos de etapas e códigos internos conhecidos; nunca
 mensagens arbitrárias, caminhos, tokens ou respostas de transporte.
 
-## Áudio
+## Áudio do lote histórico de96 cenas
 
 `studio/scripts/assembly-packets.mjs` exporta `packAssemblyPacket`, `packetHash`
 e `canonicalJson`. Não escrever o conteúdo `encoded` em logs, comentários ou
@@ -137,7 +146,7 @@ como áudio original da cena, com evidência verdadeira de autoria/termos. Use
 `audioMode: "nonverbal"`. Não copie registros do store à mão. Só então exporte
 o manifesto atual com `Production.exportRenderManifest`.
 
-## Montagem
+## Montagem do master histórico volume01
 
 Secret `AI_MEOW_RENDER_PACKET`, preparado pelo mesmo helper:
 

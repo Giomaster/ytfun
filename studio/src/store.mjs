@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import { validateTikTokZernioAttestationShape } from './tiktok-zernio-attestation.mjs';
 
 const transactionTails = new Map();
 const collections = ['projects', 'episodes', 'trends', 'assets', 'publications', 'spending'];
@@ -25,6 +26,8 @@ function validateState(state) {
     for (const entity of state[name]) {
       if (!entity || typeof entity.id !== 'string' || !entity.id) throw new Error(`Invalid studio state: ${name} entity id is required`);
       if (ids.has(entity.id)) throw new Error(`Invalid studio state: duplicate ${name} id ${entity.id}`);
+      if (name === 'publications' && entity.consentEvidence !== undefined &&
+          (entity.platform !== 'tiktok' || entity.route !== 'zernio' || !validateTikTokZernioAttestationShape(entity.consentEvidence, entity.renderSha256))) throw new Error('Invalid publication preview/consent evidence');
       ids.add(entity.id);
     }
   }
@@ -60,10 +63,9 @@ function validateState(state) {
       const key = `${item?.episodeId}:${item?.accountId}:${item?.renderSha256}:${item?.reviewHash}`;
       if (!item || keys.has(key) || typeof item.episodeId !== 'string' || !/^[1-9]\d{0,63}$/.test(item.accountId ?? '') ||
           !/^[a-f0-9]{64}$/.test(item.renderSha256 ?? '') || !/^[a-f0-9]{64}$/.test(item.reviewHash ?? '') ||
-          item.attestation?.renderSha256 !== item.renderSha256 || item.attestation?.contentPreviewConfirmed !== true ||
-          item.attestation?.expressConsentGiven !== true || item.attestation?.previewWitness !== 'owner' || item.attestation?.consentSource !== 'owner_explicit' ||
-          !/^[a-f0-9]{64}$/.test(item.attestation?.evidenceSha256 ?? '') || !Number.isFinite(Date.parse(item.attestation?.recordedAt)) ||
-          !['allow_comment', 'allow_duet', 'allow_stitch'].every(k => typeof item.interactionSettings?.[k] === 'boolean')) throw new Error('Invalid exact owner preview/consent evidence');
+          !validateTikTokZernioAttestationShape(item.attestation, item.renderSha256) ||
+          (item.attestation.previewWitness === 'authorized_agent' && (!/^[a-f0-9]{24}$/.test(item.providerAccountId ?? '') || !/^[a-f0-9]{64}$/.test(item.bindingSha256 ?? ''))) ||
+          !['allow_comment', 'allow_duet', 'allow_stitch'].every(k => typeof item.interactionSettings?.[k] === 'boolean')) throw new Error('Invalid exact preview/consent evidence');
       keys.add(key);
     }
   }

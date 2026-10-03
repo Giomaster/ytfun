@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { validateTikTokZernioAttestation } from './tiktok-zernio-attestation.mjs';
+export { validateTikTokZernioAttestation } from './tiktok-zernio-attestation.mjs';
 
 const API = 'https://zernio.com/api/v1';
 const MAX_BYTES = 250 * 1024 * 1024; // Studio buffer ceiling, below TikTok's 4 GB limit.
@@ -44,10 +46,13 @@ export function zernioTikTokUploadTarget(data) {
   let upload, publicUrl;
   try { upload = new URL(data?.uploadUrl); publicUrl = new URL(data?.publicUrl); } catch { return null; }
   const key = data?.key;
-  const storagePaths = [`/${key}`, ...(/^\/[A-Za-z0-9][A-Za-z0-9_-]{0,62}\//.test(upload.pathname) ? [`/${upload.pathname.split('/')[1]}/${key}`] : [])];
+  const virtualBucket = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.[a-f0-9]{32}\.r2\.cloudflarestorage\.com$/.test(upload.hostname);
+  const singleLabel = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.r2\.cloudflarestorage\.com$/.test(upload.hostname);
+  // A virtual-hosted bucket is already in the hostname; only single-label hosts may include a bucket path.
+  const storagePaths = [`/${key}`, ...(!virtualBucket && /^\/[A-Za-z0-9][A-Za-z0-9_-]{0,62}\//.test(upload.pathname) ? [`/${upload.pathname.split('/')[1]}/${key}`] : [])];
   if (typeof key !== 'string' || !/^temp\/[A-Za-z0-9][A-Za-z0-9_.-]{1,240}\.mp4$/.test(key) || key.includes('..') ||
       !Number.isInteger(data?.expiresIn) || data.expiresIn < 1 || data.expiresIn > 3600 ||
-      upload.protocol !== 'https:' || !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.r2\.cloudflarestorage\.com$/.test(upload.hostname) ||
+      upload.protocol !== 'https:' || (!singleLabel && !virtualBucket) ||
       upload.port || upload.username || upload.password || upload.hash || !storagePaths.includes(upload.pathname) ||
       !/^[a-f0-9]{64}$/i.test(upload.searchParams.get('X-Amz-Signature') ?? '') ||
       upload.searchParams.getAll('X-Amz-Signature').length !== 1 ||
@@ -62,14 +67,6 @@ export function validateTikTokZernioRender(render = {}) {
   if (!Number.isInteger(render.width) || !Number.isInteger(render.height) || render.width < 1 || render.height < 1) reasons.push('TikTok Zernio requires valid video dimensions.');
   if (render.format !== 'mp4') reasons.push('This adapter accepts MP4 renders only.');
   return { ready: reasons.length === 0, reasons };
-}
-
-/** Provider-specific confirmation, not the editorial approval or an inferred human preview. */
-export function validateTikTokZernioAttestation(attestation, renderSha256) {
-  return SHA.test(renderSha256 ?? '') && attestation?.renderSha256 === renderSha256 &&
-    attestation.contentPreviewConfirmed === true && attestation.expressConsentGiven === true &&
-    attestation.previewWitness === 'owner' && attestation.consentSource === 'owner_explicit' &&
-    SHA.test(attestation.evidenceSha256 ?? '') && validTime(attestation.recordedAt);
 }
 
 function safePublicUrl(raw, handle, expectedPostId) {
@@ -106,6 +103,7 @@ export class TikTokZernio {
       providerAccountId: OID.test(this.#env.ZERNIO_TIKTOK_ACCOUNT_ID ?? '') ? this.#env.ZERNIO_TIKTOK_ACCOUNT_ID : null,
       handle: HANDLE.test(this.#env.TIKTOK_ACCOUNT_HANDLE ?? '') ? this.#env.TIKTOK_ACCOUNT_HANDLE : null,
       bindingSha256: SHA.test(this.#binding?.evidenceSha256 ?? '') ? this.#binding.evidenceSha256 : null,
+      standingAuthoritySha256: SHA.test(this.#env.YTFUN_TIKTOK_STANDING_AUTHORITY_SHA256 ?? '') ? this.#env.YTFUN_TIKTOK_STANDING_AUTHORITY_SHA256 : null,
       remoteAuthorizationVerified: false, syntheticDisclosureSupported: true, maxBytes: MAX_BYTES };
   }
 
@@ -154,7 +152,7 @@ export class TikTokZernio {
     if (!Buffer.isBuffer(media) || media.length < 1 || media.length > MAX_BYTES || !validateTikTokZernioRender(render).ready ||
         typeof caption !== 'string' || !caption.trim() || caption.length > 2200 || !UUID.test(publicationId ?? '') || typeof onReceipt !== 'function') throw new Error('TIKTOK_ZERNIO_UPLOAD_INPUT_INVALID');
     const renderSha256 = digest(media);
-    if (!validateTikTokZernioAttestation(attestation, renderSha256)) throw new Error('TIKTOK_ZERNIO_PREVIEW_AND_CONSENT_REQUIRED');
+    if (!validateTikTokZernioAttestation(attestation, renderSha256, { env: this.#env })) throw new Error('TIKTOK_ZERNIO_PREVIEW_AND_CONSENT_REQUIRED');
     if (!TOGGLES.every(k => typeof interactionSettings?.[k] === 'boolean')) throw new Error('TIKTOK_ZERNIO_EXPLICIT_INTERACTIONS_REQUIRED');
     const account = await this.verifyAccount();
     if (render.durationSeconds > account.maxDurationSeconds || TOGGLES.some(k => interactionSettings[k] && !account.interactionSettings[k].enabled)) throw new Error('TIKTOK_ZERNIO_CREATOR_LIMIT_EXCEEDED');

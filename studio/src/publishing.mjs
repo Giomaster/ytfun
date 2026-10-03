@@ -12,6 +12,7 @@ import { TikTokWeb } from './tiktok-web.mjs';
 import { privateSessionFile } from './tiktok-session.mjs';
 import { approvalReviewIsValid } from './review-policy.mjs';
 import { TikTokZernio, validateTikTokZernioAttestation, validateTikTokZernioRender } from './tiktok-zernio.mjs';
+import { sanitizeTikTokZernioAttestation } from './tiktok-zernio-attestation.mjs';
 import { YouTubeZernio, safeZernioYouTubePermalink } from './youtube-zernio.mjs';
 
 const DAY_MS = 86_400_000;
@@ -43,6 +44,15 @@ function verifyDeliveryClaim(state, deliveryId, plan, { privacy, madeForKids } =
 function providerBinding(env, platform) {
   try { return JSON.parse(env[`ZERNIO_${platform.toUpperCase()}_BINDING_JSON`] ?? 'null'); }
   catch { return null; }
+}
+
+function tiktokConsentPermitted(consent, renderSha256, env, readiness) {
+  if (!consent || !validateTikTokZernioAttestation(consent.attestation, renderSha256, { env })) return false;
+  if (env.ZERNIO_TIKTOK_ACCOUNT_ID !== readiness.providerAccountId || providerBinding(env, 'tiktok')?.evidenceSha256 !== readiness.bindingSha256) return false;
+  if (consent.attestation.previewWitness === 'authorized_agent' && readiness.standingAuthoritySha256 !== consent.attestation.authorityEvidenceSha256) return false;
+  // Historical explicit-owner records predate provider bindings; delegated records never do.
+  if (consent.providerAccountId === undefined && consent.bindingSha256 === undefined) return consent.attestation.previewWitness === 'owner';
+  return consent.providerAccountId === readiness.providerAccountId && consent.bindingSha256 === readiness.bindingSha256;
 }
 
 function publicEnabled(env) {
@@ -363,7 +373,7 @@ export class Publisher {
       if (platform === 'tiktok') {
         reasons.push(...validateTikTokZernioRender({ ...episode.render, format: 'mp4', sizeBytes: render?.sizeBytes }).reasons);
         const consent = state.zernioConsents?.find(item => item.episodeId === episode.id && item.accountId === accountId && item.reviewHash === reviewHash && item.renderSha256 === episode.render?.sha256);
-        if (!validateTikTokZernioAttestation(consent?.attestation, episode.render?.sha256)) reasons.push('Zernio requires actual owner preview and express consent for this exact TikTok render.');
+        if (!tiktokConsentPermitted(consent, episode.render?.sha256, this.env, providerReadiness)) reasons.push('Zernio requires an actual preview and owner-authorized consent for this exact TikTok render and account binding.');
       } else if (episode.render?.durationSeconds < 1 || episode.render?.durationSeconds > providerReadiness.maxDurationSeconds) reasons.push('YouTube Zernio video duration exceeds the configured adapter profile.');
     }
     const caption = metadata ? [metadata.title, metadata.description].filter(nonempty).join('\n\n') : '';
@@ -465,17 +475,24 @@ export class Publisher {
     }
   }
 
-  /** Record the provider's actual owner preview/consent, without changing editorial review. */
+  /** Record a true preview by the owner or an explicitly authorized delegate; never infer playback. */
   async recordTikTokZernioConsent({ episodeId, expectedReviewHash, attestation, interactionSettings }) {
     if (!['allow_comment', 'allow_duet', 'allow_stitch'].every(key => typeof interactionSettings?.[key] === 'boolean')) throw new Error('Explicit TikTok interaction selections are required.');
-    return this.store.transaction(state => {
+    return this.store.transaction(async state => {
+      const readiness = this.tiktokZernio.readiness();
       const episode = state.episodes.find(item => item.id === episodeId);
-      if (!episode || episodeReviewHash(episode) !== expectedReviewHash || !validateTikTokZernioAttestation(attestation, episode.render?.sha256)) throw new Error('Actual owner preview and consent must match this exact final media.');
+      if (!this.zernioSelected('tiktok') || !readiness.ready || readiness.accountId !== this.env.TIKTOK_ACCOUNT_ID ||
+          readiness.providerAccountId !== this.env.ZERNIO_TIKTOK_ACCOUNT_ID || readiness.bindingSha256 !== providerBinding(this.env, 'tiktok')?.evidenceSha256 ||
+          !/^[a-f0-9]{24}$/.test(readiness.providerAccountId ?? '') || !/^[a-f0-9]{64}$/.test(readiness.bindingSha256 ?? '') ||
+          !episode || episodeReviewHash(episode) !== expectedReviewHash || episode.approval?.reviewHash !== expectedReviewHash ||
+          !validateTikTokZernioAttestation(attestation, episode.render?.sha256, { env: this.env }) ||
+          attestation.previewWitness === 'authorized_agent' && readiness.standingAuthoritySha256 !== attestation.authorityEvidenceSha256) throw new Error('Actual authorized preview and consent must match this exact reviewed media and configured account.');
+      if (state.publications.some(item => item.episodeId === episodeId && item.platform === 'tiktok' && RESERVED_STATUSES.has(item.status))) throw new Error('An existing TikTok reservation must be reconciled without replacing its preview or consent.');
+      await verifiedFile(this.store.directory, episode.render.path, episode.render.sha256, maxFileBytes(this.env), { noSymlinks: true });
       state.zernioConsents ??= [];
       const record = { episodeId, reviewHash: expectedReviewHash, accountId: this.env.TIKTOK_ACCOUNT_ID,
-        renderSha256: episode.render.sha256, attestation: { renderSha256: attestation.renderSha256,
-          contentPreviewConfirmed: true, expressConsentGiven: true, previewWitness: 'owner', consentSource: 'owner_explicit',
-          evidenceSha256: attestation.evidenceSha256, recordedAt: attestation.recordedAt },
+        providerAccountId: readiness.providerAccountId, bindingSha256: readiness.bindingSha256,
+        renderSha256: episode.render.sha256, attestation: sanitizeTikTokZernioAttestation(attestation),
         interactionSettings: Object.fromEntries(['allow_comment', 'allow_duet', 'allow_stitch'].map(key => [key, interactionSettings[key]])) };
       const prior = state.zernioConsents.find(item => item.episodeId === episodeId && item.accountId === record.accountId && item.renderSha256 === record.renderSha256 && item.reviewHash === expectedReviewHash);
       if (prior) {
@@ -555,14 +572,15 @@ export class Publisher {
       verifyDeliveryClaim(state, deliveryId, plan, { privacy, madeForKids });
       if (platform === 'tiktok') {
         consent = state.zernioConsents?.find(item => item.episodeId === episodeId && item.accountId === plan.accountId && item.reviewHash === expectedReviewHash && item.renderSha256 === plan.render.sha256);
-        if (!validateTikTokZernioAttestation(consent?.attestation, plan.render.sha256)) throw new Error('Zernio requires the actual owner preview and express consent for this final TikTok media.');
+        if (!tiktokConsentPermitted(consent, plan.render.sha256, this.env, adapter.readiness())) throw new Error('Zernio requires an actual authorized preview and consent for this final TikTok media and account binding.');
       }
       const file = await verifiedFile(this.store.directory, plan.render.path, plan.render.sha256, maxFileBytes(this.env), { noSymlinks: true });
       media = await facebookMediaBody(this.store.directory, file, plan.render.sha256, maxFileBytes(this.env));
       const publication = { id: randomUUID(), episodeId, projectId: plan.projectId, platform, accountId: plan.accountId,
         providerAccountId: plan.providerAccountId, bindingSha256: plan.bindingSha256, reviewHash: plan.reviewHash,
         renderSha256: plan.render.sha256, route: 'zernio', privacy: 'public', status: 'uploading',
-        effectiveAt: plan.effectiveAt, createdAt: new Date().toISOString(), ...(platform === 'youtube' ? { madeForKids } : {}), ...(deliveryId ? { deliveryId } : {}) };
+        effectiveAt: plan.effectiveAt, createdAt: new Date().toISOString(), ...(platform === 'youtube' ? { madeForKids } : {}),
+        ...(platform === 'tiktok' ? { consentEvidence: sanitizeTikTokZernioAttestation(consent.attestation) } : {}), ...(deliveryId ? { deliveryId } : {}) };
       state.publications.push(publication);
       state.episodes.find(e => e.id === episodeId).status = 'publishing';
       return { publication, plan };

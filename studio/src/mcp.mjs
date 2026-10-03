@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
+import { TIKTOK_PREVIEW_ACTOR_PATTERN } from './tiktok-zernio-attestation.mjs';
 import { StudioStore } from './store.mjs';
 import { Studio } from './domain.mjs';
 import { Production, videoParametersSchema, imageParametersSchema } from './production.mjs';
@@ -25,6 +26,13 @@ const kind = z.enum(['image', 'video', 'audio']);
 const operationPolicy = () => readFile(new URL('../docs/ai-meow-operation.md', import.meta.url), 'utf8');
 const platform = z.enum(['youtube', 'facebook', 'tiktok', 'kwai']);
 const cadence = z.object({ minHoursBetweenPosts: z.number().finite().min(0), maxPostsPerRollingDay: z.number().int().positive().nullable() });
+const tiktokPreviewEvidence = { renderSha256: z.string().regex(/^[a-f0-9]{64}$/), contentPreviewConfirmed: z.literal(true), expressConsentGiven: z.literal(true),
+  evidenceSha256: z.string().regex(/^[a-f0-9]{64}$/), recordedAt: z.iso.datetime() };
+const tiktokPreviewAttestation = z.union([
+  z.object({ ...tiktokPreviewEvidence, previewWitness: z.literal('owner'), consentSource: z.literal('owner_explicit') }).strict(),
+  z.object({ ...tiktokPreviewEvidence, previewWitness: z.literal('authorized_agent'), consentSource: z.literal('owner_standing_authority'),
+    previewActorId: z.string().regex(TIKTOK_PREVIEW_ACTOR_PATTERN), previewMethod: z.literal('visual_playback'), authorityEvidenceSha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+]);
 const metadata = z.object({ description: z.string().max(5000), hashtags: z.array(z.string().trim().min(1).max(60).regex(/^#[\p{L}\p{N}_]+$/u)).max(8) });
 const assetProvenance = z.object({ provider: text, model: text, prompt: text, commercialLicense: license, synthetic: z.literal(true) });
 const generationSchema = {
@@ -135,8 +143,8 @@ export function createServer({ directory = process.env.YTFUN_STUDIO_DIR, env = p
   register('ytfun_kwai_export', 'Export the reviewed video, metadata and AI disclosure guidance for international Kwai. A Kuaishou API is not evidence of international Kwai support; export is not publication.', { episodeId: id, expectedReviewHash: z.string().regex(/^[a-f0-9]{64}$/) }, input => publisher.exportPackage({ ...input, platform: 'kwai' }));
   register('ytfun_delivery_enqueue', 'Authorize one reviewed delivery for a selected account and due time. Uses the explicitly configured provider, exact account binding and cadence. Zernio is public-only; exports are not publications. Queue time is not provider scheduling. Call separately for each distinct eligible work.', { episodeId: id, platform, expectedReviewHash: z.string().regex(/^[a-f0-9]{64}$/), privacy: z.enum(['private', 'unlisted', 'public']), madeForKids: z.boolean().optional(), dueAt: z.iso.datetime() }, input => deliveries.enqueue(input));
   register('ytfun_zernio_delivery_migrate', 'Explicitly move only a proved unstarted public YouTube/TikTok claim to the authorized Zernio account. Preserves due time and media hashes. Rejects all provider reservations, running claims and unknown attempts.', { deliveryId: id, expectedMode: z.enum(['official_api', 'experimental_session_rest']), expectedReviewHash: z.string().regex(/^[a-f0-9]{64}$/), reason: z.string().min(1).max(1000) }, input => deliveries.migrateUnstartedToZernio(input), { external: true });
-  register('ytfun_tiktok_zernio_consent_record', 'Record actual owner preview and express consent required by Zernio for the exact final TikTok media. Never infer watching from technical approval or general autonomous-publishing permission. Caller must have the owner evidence already.', { episodeId: id, expectedReviewHash: z.string().regex(/^[a-f0-9]{64}$/),
-    attestation: z.object({ renderSha256: z.string().regex(/^[a-f0-9]{64}$/), contentPreviewConfirmed: z.literal(true), expressConsentGiven: z.literal(true), previewWitness: z.literal('owner'), consentSource: z.literal('owner_explicit'), evidenceSha256: z.string().regex(/^[a-f0-9]{64}$/), recordedAt: z.iso.datetime() }),
+  register('ytfun_tiktok_zernio_consent_record', 'Record a real exact-render TikTok preview by the owner or an authorized Codex delegate. Delegated playback requires the explicitly enabled standing-authority hash and real observation evidence. Never claim the owner watched or infer playback from technical approval.', { episodeId: id, expectedReviewHash: z.string().regex(/^[a-f0-9]{64}$/),
+    attestation: tiktokPreviewAttestation,
     interactionSettings: z.object({ allow_comment: z.boolean(), allow_duet: z.boolean(), allow_stitch: z.boolean() }) }, input => publisher.recordTikTokZernioConsent(input));
   register('ytfun_delivery_list', 'Read persistent queued, running, completed and attention deliveries. Interrupted attempts are never replayed automatically.', {}, () => deliveries.list(), { readOnly: true });
   register('ytfun_delivery_run_due', 'Preview or execute one due delivery. Per-platform workers must select their platform. API uploads have external effects; creator exports remain distinct from public posts.', { execute: z.boolean().default(false), platform: platform.optional() }, input => deliveries.runDue(input), { external: true });
