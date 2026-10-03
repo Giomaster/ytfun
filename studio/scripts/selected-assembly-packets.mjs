@@ -50,7 +50,7 @@ const selectedManifestFor = format => {
     durationSeconds: z.number().finite().positive().max(limits.maxDurationSeconds),
     maxRenderBytes: z.literal(limits.maxRenderBytes),
     scenes: z.array(z.object({ sceneId: uuid,
-      durationSeconds: z.number().finite().positive().max(limits.maxDurationSeconds), scriptSha256: sha,
+      durationSeconds: z.number().finite().min(1).max(60), scriptSha256: sha,
       visual: descriptor('video'), audio: descriptor('audio') }).strict()).min(1).max(limits.maxScenes),
   }).strict();
 };

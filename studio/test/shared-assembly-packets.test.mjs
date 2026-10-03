@@ -84,13 +84,13 @@ test('four distinct shared fragments bind two native plans to exact 15-second au
 
 test('shared packets retain destination order, complete original audio inputs, variable scene durations and either exact canvas', () => {
   for (const profile of [PORTRAIT, LANDSCAPE]) {
-    const packet = fixture({ durations: [2.25, 3.125, 0.5], profile });
+    const packet = fixture({ durations: [2.25, 3.125, 1.5], profile });
     const source = sourceFor(packet, 2); const input = packet.audioInputs.find(item => item.id === source.audioInputId);
     source.sourceIndex = 96; source.audioSourceSceneId = input.audioBindings[95].sceneId;
     packet.manifest.scenes[2].audio.sha256 = input.audioBindings[95].audio.sha256;
     const packed = packSelectedAssemblyPacket(packet);
     assert.deepEqual(unpackSelectedAssemblyPacket(packed.encoded, launch(packet)), packet);
-    assert.equal(packet.manifest.durationSeconds, 5.875);
+    assert.equal(packet.manifest.durationSeconds, 6.875);
     const reordered = structuredClone(packet); reordered.manifest.scenes.reverse();
     assert.deepEqual(validateSelectedAssemblyPacket(reordered), reordered);
     assert.throws(() => unpackSelectedAssemblyPacket(packSelectedAssemblyPacket(reordered).encoded, launch(packet)), /differs/);
@@ -177,8 +177,9 @@ test('shared packet ranges, totals and manifest fields are finite, bounded and e
     ['string range', p => { p.sources[0].audioRangeSeconds[1] = '7.5'; }],
     ['zero scene duration', p => { p.manifest.scenes[0].durationSeconds = 0; }],
     ['negative scene duration', p => { p.manifest.scenes[0].durationSeconds = -7.5; }],
+    ['scene below domain bound', p => { p.manifest.scenes[0].durationSeconds = 0.5; }],
     ['infinite scene duration', p => { p.manifest.scenes[0].durationSeconds = Number.POSITIVE_INFINITY; }],
-    ['scene above format bound', p => { p.manifest.scenes[0].durationSeconds = 181; }],
+    ['scene above domain bound', p => { p.manifest.scenes[0].durationSeconds = 60.001; }],
     ['total mismatch', p => { p.manifest.durationSeconds = 15.001; }],
     ['total above format bound', p => { p.manifest.durationSeconds = 181; }],
     ['empty selection', p => { p.manifest.scenes = []; p.sources = []; p.manifest.durationSeconds = 0; }],
@@ -195,6 +196,11 @@ test('shared packet ranges, totals and manifest fields are finite, bounded and e
     const changed = fixture(); mutate(changed);
     assert.throws(() => validateSelectedAssemblyPacket(changed), undefined, name);
   }
+  for (const duration of [0.999, 60.001]) {
+    assert.throws(() => validateSelectedAssemblyPacket(fixture({ durations: [duration] })), undefined,
+      'Even exact ranges and totals must respect the 1-to-60-second scene contract exported by Production');
+  }
+  for (const duration of [1, 60]) assert.equal(validateSelectedAssemblyPacket(fixture({ durations: [duration] })).manifest.durationSeconds, duration);
   const tooManyShortScenes = fixture({ durations: Array.from({ length: 13 }, () => 7.5) });
   assert.throws(() => packSelectedAssemblyPacket(tooManyShortScenes));
   const tooManyLongScenes = fixture({ durations: Array.from({ length: 121 }, () => 1), format: 'long' });
