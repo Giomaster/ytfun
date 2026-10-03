@@ -1,5 +1,11 @@
 # ytfun
 
+The new direction is an **original AI content studio exposed through MCP**.
+See [studio/README.md](studio/README.md) for project/episode memory, audience
+research, remote generation, voiced editing, review, YouTube publishing and
+TikTok export. The CLI described below remains the historical compilation path.
+New production should use original synthetic assets and avoid internet footage.
+
 Legal-first orchestration for YouTube trend research and rights-gated video compilation.
 
 This project intentionally avoids scraping, stream ripping, and automatic reuse of third-party videos. The MVP uses the official YouTube Data API for metadata discovery, then requires a human-reviewed rights manifest before any local media is compiled.

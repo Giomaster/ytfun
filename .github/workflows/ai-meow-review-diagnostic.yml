@@ -1,0 +1,40 @@
+name: AI Meow Audio Input Diagnosis
+on:
+  push:
+    branches: ['codex/ai-original-studio']
+    # This is an operation on a prepared artifact, not a code-validation gate.
+    # Worker edits are covered by AI Studio CI and must not replay old packets.
+    paths: ['studio/batches/review-diagnostic.json']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: studio/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+        working-directory: studio
+      - uses: actions/github-script@v7
+        env:
+          AI_MEOW_REVIEW_PACKET: ${{ secrets.AI_MEOW_REVIEW_PACKET }}
+          HF_TOKEN: ${{ secrets.AI_MEOW_HF_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          script: |
+            const fs = require('node:fs/promises');
+            const expected = JSON.parse(await fs.readFile('studio/batches/review-launch.json', 'utf8'));
+            const diagnosis = JSON.parse(await fs.readFile('studio/batches/review-diagnostic.json', 'utf8'));
+            if (JSON.stringify(expected) !== JSON.stringify(diagnosis)) throw new Error('Diagnostic input differs from the prepared review');
+            const worker = await import(`${process.env.GITHUB_WORKSPACE}/studio/scripts/remote-review-worker.mjs`);
+            const result = await worker.runReviewWorker({audioOnly:true});
+            core.info(result.status);

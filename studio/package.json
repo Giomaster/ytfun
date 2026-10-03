@@ -1,0 +1,29 @@
+{
+  "name": "ytfun-ai-studio",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "MCP studio for original AI series, production and verified publishing.",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "ytfun-mcp": "src/mcp.mjs"
+  },
+  "scripts": {
+    "start": "node src/mcp.mjs",
+    "start:cloud": "node src/mcp-http.mjs",
+    "setup:youtube-auth": "node scripts/youtube-oauth-setup.mjs",
+    "inspect:kwai-har": "node scripts/inspect-kwai-har.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@actions/artifact": "2.3.2",
+    "@huggingface/inference": "4.13.30",
+    "@modelcontextprotocol/sdk": "1.31.0",
+    "google-auth-library": "11.1.0",
+    "jose": "6.2.12",
+    "zod": "4.6.5"
+  },
+  "packageManager": "pnpm@10.33.0"
+}

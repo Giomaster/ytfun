@@ -11,3 +11,6 @@ data/youtube-token.json
 *.webm
 *.mp3
 *.wav
+*.har
+*.har.json
+*.har.gz

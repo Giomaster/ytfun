@@ -1,0 +1,65 @@
+name: AI Meow Remote Production
+on:
+  push:
+    branches: ['codex/ai-original-studio']
+    paths: ['studio/batches/launch.json']
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: ai-meow-paid-production
+  cancel-in-progress: false
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - id: plan
+        env:
+          AI_MEOW_BATCH_PACKET: ${{ secrets.AI_MEOW_BATCH_PACKET }}
+        run: node studio/scripts/remote-batch-prepare.mjs
+  sphere:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: studio/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+        working-directory: studio
+      - name: Ensure media tools
+        run: |
+          if ! command -v ffmpeg >/dev/null; then
+            timeout 90s python3 -m pip install --target "$RUNNER_TEMP/ffmpeg-wheel" --no-deps --only-binary=:all: imageio-ffmpeg==0.6.0
+            mkdir -p "$RUNNER_TEMP/media-bin"
+            PYTHONPATH="$RUNNER_TEMP/ffmpeg-wheel" python3 -c 'import imageio_ffmpeg, os; os.symlink(imageio_ffmpeg.get_ffmpeg_exe(), os.path.join(os.environ["RUNNER_TEMP"], "media-bin", "ffmpeg"))'
+            printf '%s\n' "$RUNNER_TEMP/media-bin" >> "$GITHUB_PATH"
+          fi
+      - uses: actions/github-script@v7
+        env:
+          AI_MEOW_BATCH_PACKET: ${{ secrets.AI_MEOW_BATCH_PACKET }}
+          HF_TOKEN: ${{ secrets.AI_MEOW_HF_TOKEN }}
+          YTFUN_BATCH_PAID_ENABLED: 'true'
+          SPHERE_INDEX: ${{ matrix.index }}
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          script: |
+            const worker = await import(`${process.env.GITHUB_WORKSPACE}/studio/scripts/remote-batch-worker.mjs`);
+            const result = await worker.runWorker();
+            core.info(`Sphere ${result.index}: ${result.status}`);
