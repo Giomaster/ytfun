@@ -25,8 +25,9 @@ texturas, iluminação e efeitos adequados ao acontecimento. O som original não
 pode tornar visíveis o peso, contato, energia e espaço por meio da sincronização,
 textura e dinâmica. Não adicionar faíscas a todo corte, ruído a todo movimento ou
 efeitos sem função; escolher de acordo com o material, gênero e intenção. O idioma
-global do AI Meow permanece visual, sem exigir silêncio absoluto como escolha
-artística; o perfil técnico silencioso atual ainda descarta áudio.
+global do AI Meow permanece visual, com áudio original não verbal incorporado
+pela MESTRE. O perfil `silent` é uma opção técnica legada e não finaliza a nova
+entrega compartilhada; usar `nonverbal` para preservar a base sonora.
 
 ## Em todo vídeo: componentes relevantes muito detalhados, fundo estável
 
@@ -75,8 +76,8 @@ vale para um novo conteúdo; não autoriza outra tentativa para corrigir um resu
 
 ## Ficha por plano
 
-Preencher os campos pertinentes ao plano; marcar como não aplicável o que não fizer
-parte da cena. A ficha não exige cortes, personagens ou efeitos em toda obra.
+Usar somente os campos pertinentes ao plano. Não preencher campos sem função nem
+produzir uma ficha separada por obrigação; a direção pode estar no próprio roteiro.
 
 | Decisão | O que definir |
 | --- | --- |
@@ -92,7 +93,7 @@ parte da cena. A ficha não exige cortes, personagens ou efeitos em toda obra.
 | Encenação | Ordem dos acontecimentos, ações simultâneas dependentes, duração suficiente e momento de repouso. |
 | Personagem | Olhar, antecipação, emoção, esforço, contatos do personagem e reação ao acontecimento, quando aplicável. |
 | Luz e efeitos | Origem, gatilho, cor, intensidade, direção e influência sobre a cena. |
-| Som | Opcional, original e não verbal; ligado ao contato/ação. O renderer atual dos episódios silenciosos remove áudio. |
+| Som | Áudio-base original não verbal, incorporado pela MESTRE; contatos, ação e consequência orientam os efeitos. Modelo sem áudio precisa de pista separada na montagem. |
 | Continuidade | Identidade, escala, câmera, iluminação e estado dos objetos entre planos; fim completo do short. |
 | Intenções observáveis | Resultados desejados para orientar o prompt e aprender com conteúdos novos, sem gate estético após a geração. |
 | Modelo e custo | Controles realmente disponíveis, limites de complexidade, referências e custo estimado da tentativa. |

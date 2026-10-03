@@ -11,12 +11,12 @@ import { ownerAcceptedTechnicalReview, technicalReviewEnv } from './technical-re
 const projectInput = { title: 'Original worlds', premise: 'Small fictional stories with evolving characters', audience: 'Adults who enjoy speculative fiction', language: 'pt-BR', continuity: 'Remember events between episodes' };
 const episodeInput = (projectId, overrides = {}) => ({ projectId, title: 'The clockmaker discovers a floating island', hook: 'A broken clock starts counting backwards.', synopsis: 'The clockmaker chooses whether to follow the impossible countdown.', continuityNote: 'Introduce the clockmaker and her missing brother.', originalAngle: 'Use the countdown as a dilemma rather than a spectacle.', scenes: [{ durationSeconds: 60, narration: 'Helena repairs the ancient clock and sees an island rising above the harbor. The countdown threatens to erase her memories unless she repairs the missing spring.', visualPrompt: 'Original fictional clockmaker in a surreal floating island, painted illustration, no brands or real people.' }], metadata: { description: 'An original fictional story created with AI.', hashtags: ['#Ficção', '#HistóriaOriginal'] }, ...overrides });
 
-async function fixture(t) {
+async function fixture(t, projectOverrides = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'ytfun-domain-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const store = new StudioStore(directory);
   const studio = new Studio(store);
-  const project = await studio.createProject(projectInput);
+  const project = await studio.createProject({ ...projectInput, ...projectOverrides });
   return { directory, store, studio, project };
 }
 
@@ -63,7 +63,7 @@ test('cadence updates preserve publication records, audit the change and reject 
 });
 
 test('owner cadence can remove the editorial spacing and count cap without changing unknown reservations', async (t) => {
-  const f = await fixture(t);
+  const f = await fixture(t, { cadence: { minHoursBetweenPosts: 24, maxPostsPerRollingDay: 1 } });
   await f.store.transaction(state => state.publications.push({ id: randomUUID(), projectId: f.project.id, platform: 'tiktok', status: 'unknown', accountId: 'owned-channel', createdAt: new Date().toISOString() }));
   const before = await f.store.read();
   const input = { projectId: f.project.id, expectedCadence: f.project.cadence, cadence: { minHoursBetweenPosts: 0, maxPostsPerRollingDay: null }, reason: 'Owner authorizes multiple distinct beneficial works per dispatch; eighteen hours is a minimum presence target.' };
@@ -95,13 +95,13 @@ test('cadence updates reject malformed policies rather than imposing an arbitrar
   assert.deepEqual((await f.studio.listProjects())[0].cadence, f.project.cadence);
 });
 
-test('a legacy project with absent cadence fields keeps its effective defaults until an explicit compare-and-set update', async t => {
+test('absent cadence does not resurrect legacy editorial limits and explicit changes still use compare-and-set', async t => {
   const f = await fixture(t);
   await f.store.transaction(state => { delete state.projects[0].cadence; });
-  const changed = await f.studio.updateProjectCadence({ projectId: f.project.id, expectedCadence: { minHoursBetweenPosts: 24, maxPostsPerRollingDay: 1 },
-    cadence: { minHoursBetweenPosts: 0, maxPostsPerRollingDay: null }, reason: 'Explicit owner policy replaces historical defaults.' });
-  assert.deepEqual(changed.cadenceHistory[0].previous, { minHoursBetweenPosts: 24, maxPostsPerRollingDay: 1 });
-  assert.deepEqual(changed.cadence, { minHoursBetweenPosts: 0, maxPostsPerRollingDay: null });
+  const changed = await f.studio.updateProjectCadence({ projectId: f.project.id, expectedCadence: { minHoursBetweenPosts: 0, maxPostsPerRollingDay: null },
+    cadence: { minHoursBetweenPosts: 6, maxPostsPerRollingDay: 3 }, reason: 'Explicit account experiment supplies the editorial limits.' });
+  assert.deepEqual(changed.cadenceHistory[0].previous, { minHoursBetweenPosts: 0, maxPostsPerRollingDay: null });
+  assert.deepEqual(changed.cadence, { minHoursBetweenPosts: 6, maxPostsPerRollingDay: 3 });
 });
 
 test('asset review hashing retains the legacy wire format without a quality review and binds an added rejection', () => {
@@ -165,13 +165,13 @@ test('store refuses corrupted state and duplicate IDs without overwriting eviden
   assert.equal(await readFile(f.store.statePath, 'utf8'), '{truncated');
 });
 
-test('projects default to free-first with no fixed budget and conservative editorial cadence', async (t) => {
+test('projects default to free-first with no fixed budget or hidden editorial publication limits', async (t) => {
   const f = await fixture(t);
   assert.equal(f.project.budgetMonthlyUsd, null);
   assert.equal(f.project.costPolicy, 'free_first');
-  assert.deepEqual(f.project.cadence, { minHoursBetweenPosts: 24, maxPostsPerRollingDay: 1 });
-  assert.deepEqual((await f.studio.createProject({ ...projectInput, cadence: { minHoursBetweenPosts: 0 } })).cadence, { minHoursBetweenPosts: 0, maxPostsPerRollingDay: 1 });
-  assert.deepEqual((await f.studio.createProject({ ...projectInput, cadence: { maxPostsPerRollingDay: null } })).cadence, { minHoursBetweenPosts: 24, maxPostsPerRollingDay: null });
+  assert.deepEqual(f.project.cadence, { minHoursBetweenPosts: 0, maxPostsPerRollingDay: null });
+  assert.deepEqual((await f.studio.createProject({ ...projectInput, cadence: { minHoursBetweenPosts: 6 } })).cadence, { minHoursBetweenPosts: 6, maxPostsPerRollingDay: null });
+  assert.deepEqual((await f.studio.createProject({ ...projectInput, cadence: { maxPostsPerRollingDay: 4 } })).cadence, { minHoursBetweenPosts: 0, maxPostsPerRollingDay: 4 });
   assert.deepEqual((await f.studio.createProject({ ...projectInput, cadence: { minHoursBetweenPosts: 11, maxPostsPerRollingDay: 4 } })).cadence, { minHoursBetweenPosts: 11, maxPostsPerRollingDay: 4 });
   await assert.rejects(f.studio.createProject({ ...projectInput, cadence: { minHoursBetweenPosts: -1 } }), /minHoursBetweenPosts/);
   await assert.rejects(f.studio.createProject({ ...projectInput, cadence: { maxPostsPerRollingDay: 0 } }), /maxPostsPerRollingDay/);
@@ -201,12 +201,21 @@ test('factual mode requires claim-specific sources even with valid trend evidenc
   assert.equal(episode.factualSources.length, 1);
 });
 
-test('server scene IDs, duration caps and normalized near duplicates prevent repetitive plans', async (t) => {
+test('server scene IDs and duration caps stay enforced while text similarity is only an editorial advisory', async (t) => {
   const f = await fixture(t);
   const first = await f.studio.planEpisode(episodeInput(f.project.id));
   assert.match(first.scenes[0].id, /^[a-f0-9-]{36}$/);
-  await assert.rejects(f.studio.planEpisode(episodeInput(f.project.id, { title: first.title.toUpperCase() })), /Near duplicate/);
-  await assert.rejects(f.studio.planEpisode(episodeInput(f.project.id, { title: 'Completely different title' })), /narration token overlap/);
+  const similarTitle = await f.studio.planEpisode(episodeInput(f.project.id, { title: first.title.toUpperCase() }));
+  const similarScript = await f.studio.planEpisode(episodeInput(f.project.id, { title: 'Completely different title' }));
+  for (const episode of [similarTitle, similarScript]) {
+    await rendered(f, episode);
+    const result = await f.studio.editorialReview(episode.id);
+    assert.equal(result.readyForApproval, true);
+    assert.equal(result.limits.textSimilarityIsAdvisory, true);
+    assert.ok(result.advisories.some(entry => entry.code === 'text_similarity' && entry.relatedEpisodeId === first.id));
+    assert.ok(!result.findings.some(entry => entry.code === 'duplicate_episode'));
+    assert.equal((await f.studio.approveEpisode({ episodeId: episode.id, review })).status, 'approved');
+  }
   await assert.rejects(f.studio.planEpisode(episodeInput(f.project.id, { scenes: [{ id: randomUUID(), durationSeconds: 10, narration: 'Original text', visualPrompt: 'Original visual' }] })), /generated/);
   await assert.rejects(f.studio.planEpisode(episodeInput(f.project.id, { scenes: Array.from({ length: 4 }, (_, index) => ({ durationSeconds: 60, narration: `Original narration ${index}`, visualPrompt: `Original image ${index}` })) })), /180 seconds/);
   await assert.rejects(f.studio.planEpisode(episodeInput(f.project.id, { scenes: Array.from({ length: 13 }, () => ({ durationSeconds: 1, narration: 'Scene', visualPrompt: 'Visual' })) })), /12 scenes/);
@@ -293,7 +302,8 @@ test('derived shorts remap original synthetic assets, bind lineage and still req
   const changedAssets = structuredClone((await f.store.read()).assets);
   changedAssets.find(asset => asset.episodeId === short.id).lineage.sourceAssetId = randomUUID();
   assert.notEqual(approved.approval.assetReviewHash, episodeAssetHash(approved, changedAssets));
-  await assert.rejects(f.studio.planEpisode(episodeInput(f.project.id, { title: 'Unrelated upload with recycled narrative', scenes: longScenes })), /Near duplicate/);
+  const similar = await f.studio.planEpisode(episodeInput(f.project.id, { title: 'A new plan with shared technical wording', scenes: longScenes }));
+  assert.ok((await f.studio.editorialReview(similar.id)).advisories.some(entry => entry.relatedEpisodeId === parent.id));
 });
 
 test('derivation validates source order, bounded duration and duplicate selection inside the transaction', async t => {
@@ -349,6 +359,39 @@ test('rejected visual or audio sources invalidate an existing asset review and b
   }
 });
 
+test('owner-accepted operation retains aesthetic reviews through approval and exact source derivation', async t => {
+  for (const kind of ['image', 'audio']) {
+    const f = await fixture(t);
+    const enabled = new Studio(f.store, { env: technicalReviewEnv });
+    const parent = await enabled.planEpisode(episodeInput(f.project.id, { format: 'long', scenes: longScenes }));
+    const { assets } = await rendered(f, parent);
+    const target = assets.find(asset => asset.kind === kind);
+    await f.store.transaction(state => {
+      state.assets.find(asset => asset.id === target.id).qualityReview = {
+        decision: 'rejected', sha256: target.sha256, reviewedBy: 'Earlier aesthetic reviewer',
+        findings: 'The generated material behaved imperfectly; the owner accepts this result.',
+      };
+      state.spending.push({ id: randomUUID(), episodeId: parent.id, assetId: target.id, status: 'completed', estimatedCostUsd: 0.605 });
+    });
+    const before = await f.store.read();
+    assert.equal((await enabled.editorialReview(parent.id)).readyForApproval, true);
+    const approved = await enabled.approveEpisode({ episodeId: parent.id, review: ownerAcceptedTechnicalReview(await enabled.getEpisode(parent.id)) });
+    assert.equal(approved.approval.assetReviewHash, episodeAssetHash(approved, before.assets));
+    const short = await enabled.deriveShort(derivedInput(parent));
+    const copied = (await f.store.read()).assets.find(asset => asset.episodeId === short.id && asset.lineage.sourceAssetId === target.id);
+    assert.equal(copied.sha256, target.sha256);
+    assert.deepEqual(copied.qualityReview, before.assets.find(asset => asset.id === target.id).qualityReview);
+    await renderDerived(f, short);
+    const derivedApproved = await enabled.approveEpisode({ episodeId: short.id, review: ownerAcceptedTechnicalReview(await enabled.getEpisode(short.id)) });
+    assert.equal(derivedApproved.status, 'approved');
+    const after = await f.store.read();
+    assert.deepEqual(after.assets.filter(asset => asset.episodeId === parent.id), before.assets);
+    assert.deepEqual(after.spending, before.spending);
+    await writeFile(join(f.directory, target.path), 'tampered original asset');
+    assert.ok((await enabled.editorialReview(short.id)).findings.some(entry => /hash changed/.test(entry.message)), 'Acceptance never waives source-byte integrity');
+  }
+});
+
 test('derived approval rejects the original or copied source even if a parent hash is manually refreshed', async t => {
   for (const originalRejected of [true, false]) {
     const f = await fixture(t);
@@ -368,25 +411,30 @@ test('derived approval rejects the original or copied source even if a parent ha
   }
 });
 
-test('parent-child narrative reuse is narrow: repeated titles and sibling stories remain blocked', async t => {
+test('derived selection identity blocks repeats while repeated titles and sibling wording do not', async t => {
   const f = await fixture(t);
   const narration = 'An amber moon opens to release silver rain that fills a basin and settles into a luminous garden.';
   const parent = await f.studio.planEpisode(episodeInput(f.project.id, { format: 'long', title: 'Amber moon anthology with complete reveals', scenes: [0, 1].map(() => ({ durationSeconds: 10, narration, visualPrompt: 'Amber moon releases silver rain into a luminous basin garden.' })) }));
   await rendered(f, parent);
-  await assert.rejects(f.studio.deriveShort(derivedInput(parent, { title: parent.title, sceneIds: [parent.scenes[0].id] })), /Near duplicate/);
-  await f.studio.deriveShort(derivedInput(parent, { sceneIds: [parent.scenes[0].id] }));
-  await assert.rejects(f.studio.deriveShort(derivedInput(parent, { title: 'Silver rain creates a basin garden', sceneIds: [parent.scenes[1].id] })), /Near duplicate/);
-  assert.equal((await f.store.read()).episodes.length, 2);
+  const first = await f.studio.deriveShort(derivedInput(parent, { title: parent.title, sceneIds: [parent.scenes[0].id] }));
+  await assert.rejects(f.studio.deriveShort(derivedInput(parent, { title: 'Another headline cannot disguise this selection', sceneIds: [parent.scenes[0].id] })), /already been derived/);
+  const second = await f.studio.deriveShort(derivedInput(parent, { title: 'Silver rain creates a basin garden', sceneIds: [parent.scenes[1].id] }));
+  for (const episode of [first, second]) {
+    await renderDerived(f, episode);
+    assert.equal((await f.studio.editorialReview(episode.id)).readyForApproval, true);
+  }
+  assert.equal((await f.store.read()).episodes.length, 3);
 });
 
-test('nonverbal episodes require original audio, forbid narration/captions and deduplicate their visual story', async t => {
+test('nonverbal episodes require original audio, forbid narration/captions and advise about repeated visual wording', async t => {
   const f = await fixture(t);
   const input = episodeInput(f.project.id, { audioMode: 'nonverbal', scenes: [{ durationSeconds: 10, narration: '', visualPrompt: 'A quartz sphere reveals a complete tiny aurora and its crystal shell settles on the table.' }] });
   await assert.rejects(f.studio.planEpisode({ ...input, scenes: [{ ...input.scenes[0], narration: 'This would introduce spoken language.' }] }), /Nonverbal episodes cannot contain narration/);
   const episode = await f.studio.planEpisode(input);
   await rendered(f, episode);
   assert.equal((await f.studio.editorialReview(episode.id)).readyForApproval, true);
-  await assert.rejects(f.studio.planEpisode({ ...input, title: 'A completely different headline' }), /visual story token overlap/);
+  const similar = await f.studio.planEpisode({ ...input, title: 'A completely different headline' });
+  assert.ok((await f.studio.editorialReview(similar.id)).advisories.some(entry => entry.relatedEpisodeId === episode.id));
   await f.store.transaction(state => { state.episodes[0].render.captionsTiming = 'scene-approximate'; });
   assert.ok((await f.studio.editorialReview(episode.id)).findings.some(finding => finding.code === 'nonverbal_render_invalid'));
   await f.store.transaction(state => { delete state.episodes[0].render.captionsTiming; delete state.episodes[0].render.sceneAssets[0].audioAssetId; });
@@ -576,13 +624,15 @@ test('silent editorial review accepts visual-only mappings and rejects audio or 
   }
 });
 
-test('silent duplicate detection compares visual stories without treating empty narration as a duplicate', async t => {
+test('silent text advisories compare visual stories without treating empty narration as evidence of duplication', async t => {
   const f = await fixture(t);
   const input = episodeInput(f.project.id, { audioMode: 'silent', scenes: [{ durationSeconds: 5, visualPrompt: 'A golden pear opens to reveal a coral reef with tiny swimming fish.' }] });
-  await f.studio.planEpisode(input);
-  await assert.rejects(f.studio.planEpisode({ ...input, title: 'Another unrelated title' }), /visual story token overlap/);
+  const first = await f.studio.planEpisode(input);
+  const similar = await f.studio.planEpisode({ ...input, title: 'Another unrelated title' });
+  assert.ok((await f.studio.editorialReview(similar.id)).advisories.some(entry => entry.relatedEpisodeId === first.id));
   const distinct = await f.studio.planEpisode({ ...input, title: 'The portal beneath the black stone', originalAngle: 'A comic kitten struggles against gravity in a miniature living room.', scenes: [{ durationSeconds: 5, visualPrompt: 'A dark obsidian cube forms a gravitational vortex that pulls a silver kitten and purple couch inward.' }] });
   assert.equal(distinct.audioMode, 'silent');
+  assert.equal((await f.studio.editorialReview(distinct.id)).advisories.length, 0);
 });
 
 test('review hashes bind planned audio mode and final stream attestation', () => {

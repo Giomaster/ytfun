@@ -896,7 +896,7 @@ test('explicit unlimited cadence has no implicit three-post cap and still blocks
   assert.ok(malformed.reasons.some(reason => reason.includes('invalid reservation time')));
 });
 
-test('null count cap is distinct from an absent legacy field and stricter policies still apply across shared-channel projects', async t => {
+test('absent count caps are unlimited while explicit stricter policies apply across shared-channel projects', async t => {
   const f = await fixture(t);
   await f.store.transaction(state => {
     state.projects[0].cadence = { minHoursBetweenPosts: 0, maxPostsPerRollingDay: null };
@@ -907,8 +907,8 @@ test('null count cap is distinct from an absent legacy field and stricter polici
   const publisher = new Publisher(f.store, { env: f.env });
   const input = { episodeId: f.episode.id, platform: 'youtube', privacy: 'private' };
   const legacy = await publisher.preflight(input);
-  assert.equal(legacy.ready, false);
-  assert.ok(legacy.reasons.some(reason => reason.includes('at most 1')));
+  assert.equal(legacy.ready, true);
+  assert.ok(legacy.reasons.every(reason => !reason.includes('at most 1')));
   await f.store.transaction(state => { state.projects[1].cadence = { minHoursBetweenPosts: 0, maxPostsPerRollingDay: null }; });
   assert.equal((await publisher.preflight(input)).ready, true);
   await f.store.transaction(state => { state.projects[1].cadence.minHoursBetweenPosts = 12; });

@@ -3,7 +3,7 @@ import { constants, createReadStream } from 'node:fs';
 import { lstat, mkdir, open, realpath, rename, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { episodeAssetHash, episodeReviewHash, validateEpisodeDerivation, normalizeProjectCadence } from './domain.mjs';
+import { episodeAssetHash, episodeReviewHash, validateEpisodeDerivation, normalizeProjectCadence, assetQualityRejectionBlocks } from './domain.mjs';
 import { YouTubeAuth, YOUTUBE_UPLOAD_SCOPE, YOUTUBE_READONLY_SCOPE } from './oauth.mjs';
 import { FacebookPageVideo, FacebookReels, safeFacebookVideoPermalink, validateFacebookPageVideo, validateFacebookReel } from './facebook.mjs';
 import { distributionCapabilities, publicationPackage } from './distribution.mjs';
@@ -11,6 +11,8 @@ import { assertYouTubeConnected, youtubeApiData, youtubeBlocked } from './youtub
 import { TikTokWeb } from './tiktok-web.mjs';
 import { privateSessionFile } from './tiktok-session.mjs';
 import { approvalReviewIsValid } from './review-policy.mjs';
+import { publicationMetadataSnapshot, publicationMetadataBindingsMatch, requirePublicMetadataRoute, presentationFor } from './publication-metadata.mjs';
+export { normalizeYouTubeMetadata, youtubeMetadataHash, youtubeMetadataSnapshot, youtubeMetadataBindingsMatch } from './publication-metadata.mjs';
 import { TikTokZernio, validateTikTokZernioAttestation, validateTikTokZernioRender } from './tiktok-zernio.mjs';
 import { sanitizeTikTokZernioAttestation } from './tiktok-zernio-attestation.mjs';
 import { YouTubeZernio, safeZernioYouTubePermalink } from './youtube-zernio.mjs';
@@ -39,6 +41,7 @@ function verifyDeliveryClaim(state, deliveryId, plan, { privacy, madeForKids } =
       (plan.deliveryMode === 'zernio' && (delivery.providerAccountId !== plan.providerAccountId || delivery.bindingSha256 !== plan.bindingSha256))) {
     throw new Error('Delivery provider or account binding changed; explicitly migrate an unstarted claim.');
   }
+  if (!publicationMetadataBindingsMatch(delivery, plan, plan.platform)) throw new Error('Delivery publication metadata snapshot changed.');
 }
 
 function providerBinding(env, platform) {
@@ -46,8 +49,9 @@ function providerBinding(env, platform) {
   catch { return null; }
 }
 
-function tiktokConsentPermitted(consent, renderSha256, env, readiness) {
+function tiktokConsentPermitted(consent, renderSha256, env, readiness, metadataBinding = {}) {
   if (!consent || !validateTikTokZernioAttestation(consent.attestation, renderSha256, { env })) return false;
+  try { if (!publicationMetadataBindingsMatch(consent, metadataBinding, 'tiktok')) return false; } catch { return false; }
   if (env.ZERNIO_TIKTOK_ACCOUNT_ID !== readiness.providerAccountId || providerBinding(env, 'tiktok')?.evidenceSha256 !== readiness.bindingSha256) return false;
   if (consent.attestation.previewWitness === 'authorized_agent' && readiness.standingAuthoritySha256 !== consent.attestation.authorityEvidenceSha256) return false;
   // Historical explicit-owner records predate provider bindings; delegated records never do.
@@ -163,6 +167,21 @@ function metadataFor(episode) {
   return { title: episode.title, description: fullDescription, tags, hashtags };
 }
 
+/** Source-byte order/timing and output format identify a composition independently of copy or encoding. */
+function compositionHash(state, episode) {
+  if (!episode?.render || !episode.scenes?.length || !Array.isArray(episode.render.sceneAssets)) return null;
+  const sources = episode.scenes.map(scene => {
+    const mapping = episode.render.sceneAssets.find(item => item.sceneId === scene.id);
+    const visual = state.assets.find(item => item.id === mapping?.visualAssetId);
+    const audio = state.assets.find(item => item.id === mapping?.audioAssetId);
+    if (!/^[a-f0-9]{64}$/.test(visual?.sha256 ?? '') || (episode.audioMode !== 'silent' && !/^[a-f0-9]{64}$/.test(audio?.sha256 ?? ''))) return null;
+    return { visual: visual.sha256, audio: audio?.sha256 ?? null, durationSeconds: scene.durationSeconds };
+  });
+  if (sources.some(item => item === null)) return null;
+  const ratio = Number.isFinite(episode.render.width / episode.render.height) ? episode.render.width / episode.render.height : null;
+  return createHash('sha256').update(JSON.stringify({ format: episode.format ?? 'short', audioMode: episode.audioMode ?? 'narrated', ratio, sources })).digest('hex');
+}
+
 function cadenceIssues(state, project, platform, accountId, effectiveAt, { waiveFrequency = false } = {}) {
   let cadence;
   try { cadence = normalizeProjectCadence(project.cadence, { defaults: true }); }
@@ -249,7 +268,7 @@ export class Publisher {
     return { platforms: distributionCapabilities(this.env), youtubeAuth: this.youtubeAuth.readiness(), facebook: this.facebook.readiness(), facebookPageVideo: this.facebookPageVideo.readiness(), tiktokSession: this.tiktok.readiness(), tiktokZernio: this.tiktokZernio.readiness(), youtubeZernio: this.youtubeZernio.readiness() };
   }
 
-  async plan(state, { episodeId, platform, privacy = 'private', publishAt, cadenceExceptionId, deliveryId }, now = Date.now()) {
+  async plan(state, { episodeId, platform, privacy = 'private', publishAt, cadenceExceptionId, deliveryId, publicationMetadata, publicationMetadataSha256, youtubeMetadata, youtubeMetadataSha256 }, now = Date.now()) {
     if (!['youtube', 'facebook', 'tiktok', 'kwai'].includes(platform)) throw new Error('Platform must be youtube, facebook, tiktok, or kwai.');
     if (!['private', 'unlisted', 'public'].includes(privacy)) throw new Error('Privacy must be private, unlisted, or public.');
     const episode = state.episodes.find((item) => item.id === episodeId);
@@ -257,6 +276,8 @@ export class Publisher {
     const project = state.projects.find((item) => item.id === episode.projectId);
     if (!project) throw new Error('Episode project not found.');
     const reasons = [];
+    const metadataBinding = publicationMetadataSnapshot({ publicationMetadata, publicationMetadataSha256, youtubeMetadata, youtubeMetadataSha256 }, platform);
+    requirePublicMetadataRoute(metadataBinding, { platform, privacy });
     const zernio = this.zernioSelected(platform);
     const providerReadiness = zernio ? this.zernioAdapter(platform).readiness() : null;
     if (platform === 'youtube' && !zernio && youtubeBlocked(state, { YTFUN_YOUTUBE_GRANT_ID: this.youtubeGrantId })) reasons.push('YouTube is disconnected; obtain fresh consent and restart the MCP.');
@@ -273,7 +294,7 @@ export class Publisher {
     if (episode.approval?.assetReviewHash !== episodeAssetHash(episode, state.assets)) {
       reasons.push('Generated asset fingerprints or license evidence changed after editorial review.');
     }
-    try { await validateEpisodeDerivation(state, episode, this.store.directory); }
+    try { await validateEpisodeDerivation(state, episode, this.store.directory, { env: this.env }); }
     catch { reasons.push('Derived source lineage is missing, invalid or changed; re-review the original source and this short before delivery.'); }
     if (!nonempty(episode.originalAngle)) reasons.push('Episode requires its own original creative angle.');
     if (episode.render?.synthetic !== true || !Number.isFinite(episode.render?.durationSeconds) || episode.render.durationSeconds <= 0) {
@@ -304,8 +325,8 @@ export class Publisher {
         const assets = [[mapping?.visualAssetId, ['image', 'video']], ...(!silent ? [[mapping?.audioAssetId, ['audio']]] : [])];
         for (const [assetId, allowedKinds] of assets) {
           const asset = state.assets.find((item) => item.id === assetId);
-          if (asset?.qualityReview?.decision === 'rejected') {
-            reasons.push('A render source asset was rejected by quality review; replace it explicitly and review a new render before publication or export.');
+          if (assetQualityRejectionBlocks(asset, this.env)) {
+            reasons.push('A render source asset was rejected by quality review; owner-accepted technical operation is required to retain its imperfections.');
             continue;
           }
           const license = asset?.provenance?.commercialLicense;
@@ -323,7 +344,7 @@ export class Publisher {
       }
     }
     let metadata;
-    try { metadata = metadataFor(episode); } catch (error) { reasons.push(error.message); }
+    try { metadata = metadataBinding.publicationMetadata ? presentationFor(metadataBinding.publicationMetadata) : metadataFor(episode); } catch (error) { reasons.push(error.message); }
     let effectiveAt = new Date(now).toISOString();
     if (publishAt !== undefined) {
       const scheduled = Date.parse(publishAt);
@@ -334,6 +355,14 @@ export class Publisher {
     const accountId = { youtube: this.env.YOUTUBE_CHANNEL_ID, facebook: this.env.FACEBOOK_PAGE_ID, tiktok: this.env.TIKTOK_ACCOUNT_ID, kwai: this.env.KWAI_ACCOUNT_ID }[platform] ?? null;
     const existing = state.publications.find((item) => item.episodeId === episode.id && item.platform === platform && RESERVED_STATUSES.has(item.status));
     if (existing) reasons.push('This reviewed episode already has an upload or reservation; reconcile its existing publication.');
+    const duplicateMedia = state.publications.find(item => item.platform === platform && (item.accountId === accountId || item.localOnly === true) &&
+      item.episodeId !== episode.id && item.renderSha256 === episode.render?.sha256 && RESERVED_STATUSES.has(item.status));
+    if (duplicateMedia) reasons.push('This exact media already has a publication or reservation on this account; changed episode IDs or metadata do not authorize duplication.');
+    const compositionSha256 = compositionHash(state, episode);
+    const duplicateComposition = compositionSha256 && state.publications.find(item => item.platform === platform && (item.accountId === accountId || item.localOnly === true) &&
+      item.episodeId !== episode.id && RESERVED_STATUSES.has(item.status) &&
+      (item.compositionSha256 ?? compositionHash(state, state.episodes.find(source => source.id === item.episodeId))) === compositionSha256);
+    if (duplicateComposition) reasons.push('This source composition already has a publication or reservation on this account; a new encoding or title does not make another work.');
     const ordinaryCadence = cadenceIssues(state, project, platform, accountId, effectiveAt);
     let exception;
     try { exception = facebookCadenceException(state, { cadenceExceptionId, deliveryId, episode, reviewHash, accountId, platform, privacy }, now); }
@@ -368,19 +397,21 @@ export class Publisher {
     }
     if (zernio) {
       if (privacy !== 'public' || publishAt !== undefined) reasons.push('Zernio requires immediate public publication; due times remain in the local queue.');
+      if (platform === 'youtube' && !nonempty(metadata?.description)) reasons.push('The configured YouTube Zernio adapter requires a nonempty description; provide it before reserving an upload.');
       if (providerReadiness.accountId !== accountId) reasons.push('Zernio native account binding changed.');
       reasons.push(...providerReadiness.reasons, ...(platform === 'tiktok' ? cadence : []));
       if (platform === 'tiktok') {
         reasons.push(...validateTikTokZernioRender({ ...episode.render, format: 'mp4', sizeBytes: render?.sizeBytes }).reasons);
-        const consent = state.zernioConsents?.find(item => item.episodeId === episode.id && item.accountId === accountId && item.reviewHash === reviewHash && item.renderSha256 === episode.render?.sha256);
-        if (!tiktokConsentPermitted(consent, episode.render?.sha256, this.env, providerReadiness)) reasons.push('Zernio requires an actual preview and owner-authorized consent for this exact TikTok render and account binding.');
+        const consent = state.zernioConsents?.find(item => item.episodeId === episode.id && item.accountId === accountId && item.reviewHash === reviewHash && item.renderSha256 === episode.render?.sha256 && tiktokConsentPermitted(item, episode.render?.sha256, this.env, providerReadiness, metadataBinding));
+        if (!consent) reasons.push('Zernio requires an actual preview and owner-authorized consent for this exact TikTok render and account binding.');
       } else if (episode.render?.durationSeconds < 1 || episode.render?.durationSeconds > providerReadiness.maxDurationSeconds) reasons.push('YouTube Zernio video duration exceeds the configured adapter profile.');
     }
     const caption = metadata ? [metadata.title, metadata.description].filter(nonempty).join('\n\n') : '';
     if (platform === 'facebook' && caption.length > 5000) reasons.push('Facebook caption exceeds the studio 5000-character limit.');
     if (platform === 'tiktok' && caption.length > 2200) reasons.push('TikTok caption exceeds 2200 UTF-16 code units.');
     return {
-      episodeId: episode.id, projectId: project.id, platform, accountId, reviewHash, privacy,
+      episodeId: episode.id, projectId: project.id, platform, accountId, reviewHash, privacy, ...metadataBinding,
+      ...(compositionSha256 ? { compositionSha256 } : {}),
       ...(platform === 'youtube' && !zernio ? { youtubeGrantId: this.youtubeGrantId } : {}),
       ...(platform === 'facebook' ? { facebookVideoKind } : {}),
       uploadPrivacy: publishAt === undefined ? privacy : 'private', effectiveAt,
@@ -423,7 +454,7 @@ export class Publisher {
         return { duplicate: true, exception: previous, delivery };
       }
       if (delivery.cadenceExceptionId) throw new Error('This delivery already has an exception; reconcile it without renewing the authorization.');
-      const plan = await this.plan(state, { episodeId: delivery.episodeId, platform: 'facebook', privacy: 'public' });
+      const plan = await this.plan(state, { episodeId: delivery.episodeId, platform: 'facebook', privacy: 'public', ...publicationMetadataSnapshot(delivery, 'facebook', { requireCanonical: true }) });
       const project = state.projects.find(item => item.id === plan.projectId);
       const structuralCadence = cadenceIssues(state, project, 'facebook', accountId, plan.effectiveAt, { waiveFrequency: true });
       const frequencyReasons = plan.cadence.warnings.filter(item => !structuralCadence.includes(item));
@@ -448,6 +479,15 @@ export class Publisher {
       delivery.updatedAt = createdAt;
       return { exception, delivery };
     });
+  }
+
+  async verifyPublicationMetadata(publicationId, plan, deliveryId, choices) {
+    const state = await this.store.read();
+    const publication = state.publications.find(item => item.id === publicationId);
+    if (!publication || publication.episodeId !== plan.episodeId || publication.platform !== plan.platform ||
+        publication.accountId !== plan.accountId || publication.reviewHash !== plan.reviewHash || publication.renderSha256 !== plan.render.sha256 ||
+        !publicationMetadataBindingsMatch(publication, plan, plan.platform)) throw new Error('Reserved publication presentation or reviewed media changed before transport.');
+    verifyDeliveryClaim(state, deliveryId, plan, choices);
   }
 
   async updatePublication(id, changes) {
@@ -476,7 +516,8 @@ export class Publisher {
   }
 
   /** Record a true preview by the owner or an explicitly authorized delegate; never infer playback. */
-  async recordTikTokZernioConsent({ episodeId, expectedReviewHash, attestation, interactionSettings }) {
+  async recordTikTokZernioConsent({ episodeId, expectedReviewHash, attestation, interactionSettings, publicationMetadata, publicationMetadataSha256 }) {
+    const metadataBinding = publicationMetadataSnapshot({ publicationMetadata, publicationMetadataSha256 }, 'tiktok');
     if (!['allow_comment', 'allow_duet', 'allow_stitch'].every(key => typeof interactionSettings?.[key] === 'boolean')) throw new Error('Explicit TikTok interaction selections are required.');
     return this.store.transaction(async state => {
       const readiness = this.tiktokZernio.readiness();
@@ -492,9 +533,9 @@ export class Publisher {
       state.zernioConsents ??= [];
       const record = { episodeId, reviewHash: expectedReviewHash, accountId: this.env.TIKTOK_ACCOUNT_ID,
         providerAccountId: readiness.providerAccountId, bindingSha256: readiness.bindingSha256,
-        renderSha256: episode.render.sha256, attestation: sanitizeTikTokZernioAttestation(attestation),
+        renderSha256: episode.render.sha256, ...metadataBinding, attestation: sanitizeTikTokZernioAttestation(attestation),
         interactionSettings: Object.fromEntries(['allow_comment', 'allow_duet', 'allow_stitch'].map(key => [key, interactionSettings[key]])) };
-      const prior = state.zernioConsents.find(item => item.episodeId === episodeId && item.accountId === record.accountId && item.renderSha256 === record.renderSha256 && item.reviewHash === expectedReviewHash);
+      const prior = state.zernioConsents.find(item => item.episodeId === episodeId && item.accountId === record.accountId && item.renderSha256 === record.renderSha256 && item.reviewHash === expectedReviewHash && publicationMetadataBindingsMatch(item, metadataBinding, 'tiktok'));
       if (prior) {
         if (JSON.stringify(prior) !== JSON.stringify(record)) throw new Error('An existing provider consent cannot be silently replaced.');
         return prior;
@@ -514,11 +555,13 @@ export class Publisher {
       videoId, channelId: item?.snippet?.channelId ?? null, privacyStatus: item?.status?.privacyStatus ?? null, uploadStatus: item?.status?.uploadStatus ?? null };
   }
 
-  async zernioReceipt(publicationId, receipt) {
+  async zernioReceipt(publicationId, receipt, expectedMetadataBinding) {
     return this.store.transaction(state => {
       const item = state.publications.find(p => p.id === publicationId && p.route === 'zernio');
       if (!item || receipt?.route !== 'zernio' || receipt.publicationId !== item.id || receipt.accountId !== item.accountId ||
           receipt.providerAccountId !== item.providerAccountId || receipt.renderSha256 !== item.renderSha256) throw new Error('Zernio receipt does not match the exact reserved publication.');
+      const metadataBinding = publicationMetadataSnapshot(item, item.platform, { requireCanonical: true });
+      if (expectedMetadataBinding !== undefined && !publicationMetadataBindingsMatch(metadataBinding, expectedMetadataBinding, item.platform)) throw new Error('Reserved publication metadata changed before the provider receipt.');
       if (item.providerPostId && receipt.providerPostId && item.providerPostId !== receipt.providerPostId) throw new Error('Provider post receipt changed.');
       if (receipt.providerPostId !== undefined && !/^[a-f0-9]{24}$/.test(receipt.providerPostId)) throw new Error('Invalid provider post ID.');
       const published = receipt.status === 'published' && receipt.confirmed === true && receipt.privacy === 'public' && Number.isFinite(Date.parse(receipt.publishedAt));
@@ -553,10 +596,12 @@ export class Publisher {
     });
   }
 
-  async publishZernio({ episodeId, platform, privacy, publishAt, expectedReviewHash, madeForKids, execute = false, deliveryId }) {
+  async publishZernio({ episodeId, platform, privacy, publishAt, expectedReviewHash, madeForKids, execute = false, deliveryId, publicationMetadata, publicationMetadataSha256 }) {
+    const metadataBinding = publicationMetadataSnapshot({ publicationMetadata, publicationMetadataSha256 }, platform);
+    requirePublicMetadataRoute(metadataBinding, { platform, privacy });
     if (!this.zernioSelected(platform) || privacy !== 'public' || publishAt !== undefined || typeof execute !== 'boolean' ||
         (platform === 'youtube' && typeof madeForKids !== 'boolean')) throw new Error('Zernio requires the selected public route and explicit audience/execute choices.');
-    const initial = await this.preflight({ episodeId, platform, privacy });
+    const initial = await this.preflight({ episodeId, platform, privacy, ...metadataBinding });
     if (expectedReviewHash !== initial.reviewHash) throw new Error('Reviewed media changed.');
     if (!execute) return { ...initial, execute: false };
     if (initial.publication) return { duplicate: true, publication: initial.publication };
@@ -566,19 +611,19 @@ export class Publisher {
     if (identity.accountId !== initial.accountId || identity.providerAccountId !== initial.providerAccountId || !Number.isFinite(identity.maxDurationSeconds) || initial.render.durationSeconds > identity.maxDurationSeconds) throw new Error('Zernio account identity or duration is not permitted.');
     let media, consent;
     const reserved = await this.store.transaction(async state => {
-      const plan = await this.plan(state, { episodeId, platform, privacy });
+      const plan = await this.plan(state, { episodeId, platform, privacy, ...metadataBinding });
       if (plan.publication) return { duplicate: true, publication: plan.publication };
       if (!plan.ready || plan.reviewHash !== expectedReviewHash || plan.accountId !== identity.accountId || plan.providerAccountId !== identity.providerAccountId) throw new Error('Zernio reviewed identity or cadence changed.');
       verifyDeliveryClaim(state, deliveryId, plan, { privacy, madeForKids });
       if (platform === 'tiktok') {
-        consent = state.zernioConsents?.find(item => item.episodeId === episodeId && item.accountId === plan.accountId && item.reviewHash === expectedReviewHash && item.renderSha256 === plan.render.sha256);
-        if (!tiktokConsentPermitted(consent, plan.render.sha256, this.env, adapter.readiness())) throw new Error('Zernio requires an actual authorized preview and consent for this final TikTok media and account binding.');
+        consent = state.zernioConsents?.find(item => item.episodeId === episodeId && item.accountId === plan.accountId && item.reviewHash === expectedReviewHash && item.renderSha256 === plan.render.sha256 && tiktokConsentPermitted(item, plan.render.sha256, this.env, adapter.readiness(), metadataBinding));
+        if (!consent) throw new Error('Zernio requires an actual authorized preview and consent for this final TikTok media and account binding.');
       }
       const file = await verifiedFile(this.store.directory, plan.render.path, plan.render.sha256, maxFileBytes(this.env), { noSymlinks: true });
       media = await facebookMediaBody(this.store.directory, file, plan.render.sha256, maxFileBytes(this.env));
       const publication = { id: randomUUID(), episodeId, projectId: plan.projectId, platform, accountId: plan.accountId,
         providerAccountId: plan.providerAccountId, bindingSha256: plan.bindingSha256, reviewHash: plan.reviewHash,
-        renderSha256: plan.render.sha256, route: 'zernio', privacy: 'public', status: 'uploading',
+        renderSha256: plan.render.sha256, ...(plan.compositionSha256 ? { compositionSha256: plan.compositionSha256 } : {}), ...metadataBinding, route: 'zernio', privacy: 'public', status: 'uploading',
         effectiveAt: plan.effectiveAt, createdAt: new Date().toISOString(), ...(platform === 'youtube' ? { madeForKids } : {}),
         ...(platform === 'tiktok' ? { consentEvidence: sanitizeTikTokZernioAttestation(consent.attestation) } : {}), ...(deliveryId ? { deliveryId } : {}) };
       state.publications.push(publication);
@@ -588,11 +633,12 @@ export class Publisher {
     if (reserved.duplicate) return reserved;
     const { publication, plan } = reserved;
     try {
+      await this.verifyPublicationMetadata(publication.id, plan, deliveryId, { privacy, madeForKids });
       const receipt = await adapter.upload({ media, caption: platform === 'youtube' ? plan.metadata.description : plan.caption,
         title: plan.metadata.title, tags: plan.metadata.tags, madeForKids, render: { ...plan.render, format: 'mp4' }, publicationId: publication.id,
         ...(platform === 'tiktok' ? { attestation: consent.attestation, interactionSettings: consent.interactionSettings } : {}),
-        onReceipt: r => this.zernioReceipt(publication.id, r) });
-      return { publication: await this.zernioReceipt(publication.id, receipt) };
+        onReceipt: r => this.zernioReceipt(publication.id, r, metadataBinding) });
+      return { publication: await this.zernioReceipt(publication.id, receipt, metadataBinding) };
     } catch {
       return { publication: await this.updatePublication(publication.id, { status: 'unknown', error: 'Zernio outcome requires GET-only reconciliation; no automatic retry.' }) };
     }
@@ -601,19 +647,22 @@ export class Publisher {
   async syncZernio({ publicationId }) {
     const publication = (await this.store.read()).publications.find(p => p.id === publicationId && p.route === 'zernio');
     if (!publication?.providerPostId || !['youtube', 'tiktok'].includes(publication.platform)) throw new Error('Original Zernio provider post receipt is required; no mutation is retried.');
+    const metadataBinding = publicationMetadataSnapshot(publication, publication.platform, { requireCanonical: true });
     const adapter = this.zernioAdapter(publication.platform), readiness = adapter.readiness();
     if (readiness.accountId !== publication.accountId || readiness.providerAccountId !== publication.providerAccountId ||
         providerBinding(this.env, publication.platform)?.evidenceSha256 !== publication.bindingSha256) throw new Error('Reconcile with the original provider account binding.');
     const receipt = await adapter.status({ providerPostId: publication.providerPostId, publicationId: publication.id, renderSha256: publication.renderSha256,
       ...(publication.postId ? { postId: publication.postId } : {}) });
-    return { verified: receipt.confirmed === true && receipt.status === 'published', publication: await this.zernioReceipt(publication.id, receipt) };
+    return { verified: receipt.confirmed === true && receipt.status === 'published', publication: await this.zernioReceipt(publication.id, receipt, metadataBinding) };
   }
 
-  async publishYouTube({ episodeId, privacy = 'private', publishAt, expectedReviewHash, madeForKids, execute = false, deliveryId }) {
-    if (this.zernioSelected('youtube')) return this.publishZernio({ episodeId, platform: 'youtube', privacy, publishAt, expectedReviewHash, madeForKids, execute, deliveryId });
+  async publishYouTube({ episodeId, privacy = 'private', publishAt, expectedReviewHash, madeForKids, execute = false, deliveryId, publicationMetadata, publicationMetadataSha256, youtubeMetadata, youtubeMetadataSha256 }) {
+    const metadataBinding = publicationMetadataSnapshot({ publicationMetadata, publicationMetadataSha256, youtubeMetadata, youtubeMetadataSha256 }, 'youtube');
+    requirePublicMetadataRoute(metadataBinding, { platform: 'youtube', privacy });
+    if (this.zernioSelected('youtube')) return this.publishZernio({ episodeId, platform: 'youtube', privacy, publishAt, expectedReviewHash, madeForKids, execute, deliveryId, ...metadataBinding });
     if (typeof madeForKids !== 'boolean') throw new Error('madeForKids must be explicitly selected as a boolean.');
     if (typeof execute !== 'boolean') throw new Error('execute must be a boolean.');
-    const initial = await this.preflight({ episodeId, platform: 'youtube', privacy, publishAt });
+    const initial = await this.preflight({ episodeId, platform: 'youtube', privacy, publishAt, ...metadataBinding });
     if (!nonempty(expectedReviewHash) || expectedReviewHash !== initial.reviewHash) throw new Error('Expected review fingerprint does not match the current episode.');
     if (!execute) return { ...initial, execute: false, madeForKids };
     if (initial.publication) return { duplicate: true, publication: initial.publication };
@@ -631,7 +680,7 @@ export class Publisher {
     }
     let uploadBody;
     const reserved = await this.store.transaction(async (state) => {
-      const plan = await this.plan(state, { episodeId, platform: 'youtube', privacy, publishAt });
+      const plan = await this.plan(state, { episodeId, platform: 'youtube', privacy, publishAt, ...metadataBinding });
       if (plan.reviewHash !== expectedReviewHash) throw new Error('Episode changed after publication was requested.');
       if (plan.publication) return { duplicate: true, publication: plan.publication };
       if (!plan.ready) throw new Error(plan.reasons.join(' '));
@@ -643,7 +692,7 @@ export class Publisher {
       }
       const publication = {
         id: randomUUID(), episodeId, projectId: plan.projectId, platform: 'youtube', accountId: plan.accountId,
-        reviewHash: plan.reviewHash, renderSha256: plan.render.sha256, status: 'uploading',
+        reviewHash: plan.reviewHash, renderSha256: plan.render.sha256, ...(plan.compositionSha256 ? { compositionSha256: plan.compositionSha256 } : {}), ...metadataBinding, status: 'uploading',
         effectiveAt: plan.effectiveAt, createdAt: new Date().toISOString(), privacy, madeForKids,
         apiData: youtubeApiData({ authorized: true, grantId: this.youtubeGrantId }),
         ...(publishAt !== undefined ? { publishAt: plan.effectiveAt } : {}),
@@ -660,6 +709,7 @@ export class Publisher {
     const body = uploadBody;
     const authHeaders = { Authorization: `Bearer ${accessToken}` };
     try {
+      await this.verifyPublicationMetadata(publication.id, plan, deliveryId, { privacy, madeForKids });
       const init = await this.fetch(`${GOOGLE_API}/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status`, {
         method: 'POST', redirect: 'error', signal: AbortSignal.timeout(30_000),
         headers: { ...authHeaders, 'Content-Type': 'application/json', 'X-Upload-Content-Type': 'video/mp4', 'X-Upload-Content-Length': String(body.length) },
@@ -733,10 +783,12 @@ export class Publisher {
     return this.exportPackage({ episodeId, expectedReviewHash, platform: 'tiktok' });
   }
 
-  async publishTikTok({ episodeId, expectedReviewHash, privacy, execute = false, deliveryId }) {
-    if (this.zernioSelected('tiktok')) return this.publishZernio({ episodeId, platform: 'tiktok', privacy, expectedReviewHash, execute, deliveryId });
+  async publishTikTok({ episodeId, expectedReviewHash, privacy, execute = false, deliveryId, publicationMetadata, publicationMetadataSha256 }) {
+    const metadataBinding = publicationMetadataSnapshot({ publicationMetadata, publicationMetadataSha256 }, 'tiktok');
+    requirePublicMetadataRoute(metadataBinding, { platform: 'tiktok', privacy });
+    if (this.zernioSelected('tiktok')) return this.publishZernio({ episodeId, platform: 'tiktok', privacy, expectedReviewHash, execute, deliveryId, ...metadataBinding });
     if (privacy !== 'public' || typeof execute !== 'boolean') throw new Error('TikTok REST publishing requires public visibility and an explicit execute flag.');
-    const initial = await this.preflight({ episodeId, platform: 'tiktok', privacy });
+    const initial = await this.preflight({ episodeId, platform: 'tiktok', privacy, ...metadataBinding });
     if (!nonempty(expectedReviewHash) || initial.reviewHash !== expectedReviewHash) throw new Error('TikTok reviewed fingerprint changed.');
     if (!execute) return { ...initial, execute: false };
     if (initial.publication) return { duplicate: true, publication: initial.publication };
@@ -745,7 +797,7 @@ export class Publisher {
     if (identity.accountId !== initial.accountId || !Number.isFinite(identity.maxDurationSeconds) || initial.render.durationSeconds > identity.maxDurationSeconds) throw new Error('TikTok account or supported duration was not confirmed.');
     let media;
     const reserved = await this.store.transaction(async state => {
-      const plan = await this.plan(state, { episodeId, platform: 'tiktok', privacy });
+      const plan = await this.plan(state, { episodeId, platform: 'tiktok', privacy, ...metadataBinding });
       if (plan.reviewHash !== expectedReviewHash || plan.accountId !== identity.accountId) throw new Error('TikTok reviewed identity changed.');
       if (plan.publication) return { duplicate: true, publication: plan.publication };
       if (!plan.ready) throw new Error(plan.reasons.join(' '));
@@ -753,7 +805,7 @@ export class Publisher {
       const file = await verifiedFile(this.store.directory, plan.render.path, plan.render.sha256, 8 * 1024 * 1024, { noSymlinks: true });
       media = await facebookMediaBody(this.store.directory, file, plan.render.sha256, 8 * 1024 * 1024);
       const publication = { id: randomUUID(), episodeId, projectId: plan.projectId, platform: 'tiktok', accountId: plan.accountId,
-        reviewHash: plan.reviewHash, renderSha256: plan.render.sha256, status: 'uploading', privacy, route: 'experimental_session_rest',
+        reviewHash: plan.reviewHash, renderSha256: plan.render.sha256, ...(plan.compositionSha256 ? { compositionSha256: plan.compositionSha256 } : {}), ...metadataBinding, status: 'uploading', privacy, route: 'experimental_session_rest',
         effectiveAt: plan.effectiveAt, createdAt: new Date().toISOString(), ...(deliveryId ? { deliveryId } : {}) };
       state.publications.push(publication);
       return { publication, plan };
@@ -761,6 +813,7 @@ export class Publisher {
     if (reserved.duplicate) return reserved;
     const { publication, plan } = reserved;
     try {
+      await this.verifyPublicationMetadata(publication.id, plan, deliveryId, { privacy });
       const receipt = await this.tiktok.upload({ media, caption: plan.caption, render: plan.render, onReceipt: async r => {
         if (!/^[A-Za-z0-9_-]{16,64}$/.test(r.creationId ?? '') || !['uploading', 'uploaded'].includes(r.status) ||
             !['project-create', 'allocation', 'transfer', 'commit', 'post'].includes(r.phase)) throw new Error('TikTok phase receipt invalid.');
@@ -811,7 +864,7 @@ export class Publisher {
           publication.accountId !== this.env.TIKTOK_ACCOUNT_ID || publication.status !== 'unknown' || publication.providerPhase !== 'allocation' ||
           publication.providerCode !== 'TIKTOK_STORAGE_TARGET_NOT_CONFIRMED' || publication.reviewHash !== expectedReviewHash || !publication.creationId) throw new Error('This TikTok attempt is not a locally rejected, untransferred allocation.');
       const withoutOwnReservation = { ...state, publications: state.publications.filter(p => p.id !== publicationId) };
-      const plan = await this.plan(withoutOwnReservation, { episodeId: publication.episodeId, platform: 'tiktok', privacy: 'public' });
+      const plan = await this.plan(withoutOwnReservation, { episodeId: publication.episodeId, platform: 'tiktok', privacy: 'public', ...publicationMetadataSnapshot(publication, 'tiktok', { requireCanonical: true }) });
       if (!plan.ready || plan.reviewHash !== expectedReviewHash || plan.render.sha256 !== publication.renderSha256 || !Number.isFinite(identity.maxDurationSeconds) || plan.render.durationSeconds > identity.maxDurationSeconds) throw new Error('TikTok allocation recovery no longer matches review, account or cadence.');
       const file = await verifiedFile(this.store.directory, plan.render.path, plan.render.sha256, 8 * 1024 * 1024, { noSymlinks: true });
       media = await facebookMediaBody(this.store.directory, file, plan.render.sha256, 8 * 1024 * 1024);
@@ -833,10 +886,12 @@ export class Publisher {
       ...(receipt?.code && /^TIKTOK_[A-Z_]+$/.test(receipt.code) ? { providerCode: receipt.code } : {}) }) };
   }
 
-  async publishFacebook({ episodeId, expectedReviewHash, privacy, execute = false, deliveryId, cadenceExceptionId }) {
+  async publishFacebook({ episodeId, expectedReviewHash, privacy, execute = false, deliveryId, cadenceExceptionId, publicationMetadata, publicationMetadataSha256 }) {
+    const metadataBinding = publicationMetadataSnapshot({ publicationMetadata, publicationMetadataSha256 }, 'facebook');
+    requirePublicMetadataRoute(metadataBinding, { platform: 'facebook', privacy });
     if (privacy !== 'public') throw new Error('Facebook Page publishing requires explicit public visibility.');
     if (typeof execute !== 'boolean') throw new Error('execute must be a boolean.');
-    const initial = await this.preflight({ episodeId, platform: 'facebook', privacy, deliveryId, cadenceExceptionId });
+    const initial = await this.preflight({ episodeId, platform: 'facebook', privacy, deliveryId, cadenceExceptionId, ...metadataBinding });
     if (!nonempty(expectedReviewHash) || expectedReviewHash !== initial.reviewHash) throw new Error('Expected review fingerprint does not match the current episode.');
     if (!execute) return { ...initial, execute: false };
     if (initial.publication) return { duplicate: true, publication: initial.publication };
@@ -845,7 +900,7 @@ export class Publisher {
     await adapter.verifyAccount();
     let media;
     const reservation = await this.store.transaction(async state => {
-      const plan = await this.plan(state, { episodeId, platform: 'facebook', privacy, deliveryId, cadenceExceptionId });
+      const plan = await this.plan(state, { episodeId, platform: 'facebook', privacy, deliveryId, cadenceExceptionId, ...metadataBinding });
       if (plan.reviewHash !== expectedReviewHash) throw new Error('Episode changed after publication was requested.');
       if (plan.facebookVideoKind !== initial.facebookVideoKind) throw new Error('Facebook upload route changed after publication was requested.');
       if (plan.publication) return { duplicate: true, publication: plan.publication };
@@ -854,7 +909,7 @@ export class Publisher {
       const file = await verifiedFile(this.store.directory, plan.render.path, plan.render.sha256, maxFileBytes(this.env), { noSymlinks: true });
       media = await facebookMediaBody(this.store.directory, file, plan.render.sha256, maxFileBytes(this.env));
       if (createHash('sha256').update(media).digest('hex') !== plan.render.sha256.toLowerCase()) throw new Error('Render changed while preparing the upload.');
-      const publication = { id: randomUUID(), episodeId, projectId: plan.projectId, platform: 'facebook', facebookVideoKind: plan.facebookVideoKind, accountId: plan.accountId, reviewHash: plan.reviewHash, renderSha256: plan.render.sha256, status: 'uploading', privacy, effectiveAt: plan.effectiveAt, createdAt: new Date().toISOString(), ...(deliveryId ? { deliveryId } : {}) };
+      const publication = { id: randomUUID(), episodeId, projectId: plan.projectId, platform: 'facebook', facebookVideoKind: plan.facebookVideoKind, accountId: plan.accountId, reviewHash: plan.reviewHash, renderSha256: plan.render.sha256, ...(plan.compositionSha256 ? { compositionSha256: plan.compositionSha256 } : {}), ...metadataBinding, status: 'uploading', privacy, effectiveAt: plan.effectiveAt, createdAt: new Date().toISOString(), ...(deliveryId ? { deliveryId } : {}) };
       if (cadenceExceptionId !== undefined) {
         const exception = facebookCadenceException(state, { cadenceExceptionId, deliveryId, episode: state.episodes.find(item => item.id === episodeId),
           reviewHash: plan.reviewHash, accountId: plan.accountId, platform: 'facebook', privacy }, Date.now());
@@ -868,6 +923,7 @@ export class Publisher {
     if (reservation.duplicate) return reservation;
     const { publication, plan } = reservation;
     try {
+      await this.verifyPublicationMetadata(publication.id, plan, deliveryId, { privacy });
       const receipt = await adapter.upload({ media, caption: plan.caption, title: plan.metadata.title, synthetic: true, onReceipt: async ({ videoId, status, phase }) => {
         if (!/^\d+$/.test(videoId ?? '')) throw new Error('Facebook returned an invalid receipt.');
         if (!['unknown', 'uploaded', 'processing'].includes(status) || !['start', 'transfer', 'finish'].includes(phase)) throw new Error('Facebook returned an invalid upload phase.');

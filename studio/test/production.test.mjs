@@ -1384,7 +1384,7 @@ test('production revalidates long scene/duration caps and the legacy short defau
   }
 });
 
-async function remoteRenderContext(t, { format = 'long', sceneCount = 15, sceneDurationSeconds = 15, audioMode = 'silent', renderCanvas, probeHook, probeChange } = {}) {
+async function remoteRenderContext(t, { format = 'long', sceneCount = 15, sceneDurationSeconds = 15, audioMode = 'silent', renderCanvas, probeHook, probeChange, productionEnv = env } = {}) {
   const context = await setup(t, { format, sceneCount, sceneDurationSeconds, audioMode, renderCanvas });
   const calls = [];
   const runner = async (command, args, options) => {
@@ -1399,7 +1399,7 @@ async function remoteRenderContext(t, { format = 'long', sceneCount = 15, sceneD
     if (probeChange) probeChange(probe);
     return { exitCode: 0, stdout: JSON.stringify(probe) };
   };
-  const production = new Production(context.store, { env, runner });
+  const production = new Production(context.store, { env: productionEnv, runner });
   const sources = await addSourceAssets(context, production);
   const localPath = join(context.directory, 'returned-master.mp4');
   await writeFile(localPath, MP4);
@@ -1499,6 +1499,65 @@ test('rejected current visual/audio selection blocks rendering and manifest expo
     assert.equal(runnerCalls, 0);
     assert.deepEqual(await context.store.read(), before);
   }
+});
+
+test('owner-accepted assembly retains the current imperfect selection and its review instead of falling back', async t => {
+  for (const kind of ['video', 'audio', 'image']) {
+    const context = await setup(t);
+    const fake = fakeRenderer(3);
+    const production = new Production(context.store, {
+      env: { ...env, YTFUN_OWNER_ACCEPTED_TECHNICAL_REVIEW_ENABLED: 'true' }, runner: fake.runner,
+    });
+    const [sources] = await addSourceAssets(context, production, { alsoVideo: kind === 'video' });
+    const target = kind === 'video'
+      ? await production.registerAsset({ episodeId: context.episode.id, sceneId: context.episode.scenes[0].id, kind, localPath: join(context.directory, 'source.mp4'), provenance })
+      : sources[kind];
+    await context.store.transaction(state => {
+      state.assets.find(asset => asset.id === target.id).qualityReview = { decision: 'rejected', sha256: target.sha256, findings: 'An earlier reviewer objected to the generated physical behavior.' };
+    });
+    const before = await context.store.read();
+    const manifest = await production.exportRenderManifest({ episodeId: context.episode.id });
+    assert.equal(manifest.scenes[0][kind === 'audio' ? 'audio' : 'visual'].assetId, target.id);
+    assert.equal(fake.calls.length, 0, 'Export remains read-only and does not run a media process');
+    const render = await production.renderEpisode({ episodeId: context.episode.id });
+    assert.equal(render.sceneAssets[0][kind === 'audio' ? 'audioAssetId' : 'visualAssetId'], target.id);
+    assert.deepEqual((await context.store.read()).assets, before.assets);
+  }
+});
+
+test('owner acceptance of aesthetic defects never bypasses synthetic rights or source-byte integrity', async t => {
+  for (const failure of ['rights', 'synthetic', 'bytes']) {
+    const context = await setup(t);
+    const production = new Production(context.store, {
+      env: { ...env, YTFUN_OWNER_ACCEPTED_TECHNICAL_REVIEW_ENABLED: 'true' },
+      runner: async () => assert.fail('Invalid source evidence must not reach a media process'),
+    });
+    const [{ image }] = await addSourceAssets(context, production);
+    await context.store.transaction(state => {
+      const asset = state.assets.find(entry => entry.id === image.id);
+      asset.qualityReview = { decision: 'rejected', sha256: asset.sha256, findings: 'Accepted visual imperfection.' };
+      if (failure === 'rights') asset.provenance.commercialLicense.notes = '';
+      if (failure === 'synthetic') asset.synthetic = false;
+    });
+    if (failure === 'bytes') await writeFile(join(context.directory, image.path), 'tampered source');
+    await assert.rejects(production.exportRenderManifest({ episodeId: context.episode.id }),
+      failure === 'rights' ? /commercialLicense/ : failure === 'synthetic' ? /synthetic assets/ : /Source asset changed/);
+  }
+});
+
+test('owner-accepted remote assembly preserves a historical aesthetic rejection on the exact exported source', async t => {
+  const context = await remoteRenderContext(t, { sceneCount: 1,
+    productionEnv: { ...env, YTFUN_OWNER_ACCEPTED_TECHNICAL_REVIEW_ENABLED: 'true' } });
+  await context.store.transaction(state => {
+    const asset = state.assets[0];
+    asset.qualityReview = { decision: 'rejected', sha256: asset.sha256, findings: 'An accepted imperfection in the generated result.' };
+  });
+  const before = await context.store.read();
+  const manifest = await context.production.exportRenderManifest({ episodeId: context.episode.id });
+  const render = await context.production.registerRemoteRender({ ...context.input, manifest });
+  assert.equal(render.sceneAssets[0].visualAssetId, before.assets[0].id);
+  assert.deepEqual((await context.store.read()).assets, before.assets);
+  assert.ok(context.calls.length > 0);
 });
 
 test('a source rejected after manifest export cannot be registered as a remote render', async t => {

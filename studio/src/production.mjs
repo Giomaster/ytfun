@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { spawn } from 'node:child_process';
 import { z } from 'zod';
-import { episodeLimits, episodeReviewHash } from './domain.mjs';
+import { assetQualityRejectionBlocks, episodeLimits, episodeReviewHash, validateEpisodeDerivation } from './domain.mjs';
 import { renderProfile } from './render-profile.mjs';
 import { falQueueReceiptFetch } from './fal-queue-receipt.mjs';
 import { recoverFalVideo } from './fal-queue-recovery.mjs';
@@ -359,7 +359,7 @@ function canonicalJson(value) {
   return JSON.stringify(value);
 }
 
-function renderPlan(state, episode) {
+function renderPlan(state, episode, env) {
   const limits = episodeLimits(episode);
   const profile = renderProfile(episode.renderCanvas);
   if (!Array.isArray(episode.scenes) || !episode.scenes.length || episode.scenes.length > limits.maxScenes) throw new Error(`Rendering requires 1 to ${limits.maxScenes} scenes`);
@@ -373,7 +373,7 @@ function renderPlan(state, episode) {
     durationSeconds += scene.durationSeconds;
   }
   if (durationSeconds > limits.maxDurationSeconds) throw new Error(`Rendered episodes cannot exceed ${limits.maxDurationSeconds} seconds`);
-  return { selected: selectSceneAssets(state, episode), limits, durationSeconds, audioMode: mode, profile };
+  return { selected: selectSceneAssets(state, episode, env), limits, durationSeconds, audioMode: mode, profile };
 }
 
 function renderManifest(episode, plan) {
@@ -420,18 +420,23 @@ function validateFinalProbe(probe, snapshot) {
   return { durationSeconds, width: videoStream.width, height: videoStream.height, framesPerSecond, hasAudio: Boolean(audioStream) };
 }
 
-function selectSceneAssets(state, episode) {
+function selectSceneAssets(state, episode, env) {
   const mode = audioMode(episode);
   const withAudio = mode !== 'silent';
   return episode.scenes.map((scene) => {
     const matching = state.assets.filter((asset) => asset.episodeId === episode.id && asset.sceneId === scene.id);
-    const visual = matching.findLast((asset) => asset.kind === 'video') ?? matching.findLast((asset) => asset.kind === 'image');
-    const audio = withAudio ? matching.findLast((asset) => asset.kind === 'audio') : undefined;
+    const bound = episode.fragmentComposition?.sceneBindings?.find(item => item.sceneId === scene.id);
+    const visual = episode.fragmentComposition === undefined
+      ? matching.findLast((asset) => asset.kind === 'video') ?? matching.findLast((asset) => asset.kind === 'image')
+      : matching.find(asset => asset.id === bound?.visual?.assetId);
+    const audio = withAudio ? (episode.fragmentComposition === undefined
+      ? matching.findLast((asset) => asset.kind === 'audio')
+      : matching.find(asset => asset.id === bound?.audio?.assetId)) : undefined;
     if (!visual || (withAudio && !audio)) throw new Error(`Scene ${scene.id} requires synthetic visual${withAudio ? ` and ${mode === 'narrated' ? 'narration' : 'nonverbal'} audio` : ''} assets`);
     for (const asset of [visual, ...(audio ? [audio] : [])]) {
-      // Keep the current selection: rejection must stop assembly, never cause
-      // an implicit fallback to a previous visual or audio asset.
-      if (asset.qualityReview?.decision === 'rejected') throw new Error(`Asset ${asset.id} was rejected by quality review; select an explicit reviewed replacement before rendering`);
+      // Keep the actual current selection and its historical review; never fall
+      // back to an older asset to disguise an owner-accepted imperfection.
+      if (assetQualityRejectionBlocks(asset, env)) throw new Error(`Asset ${asset.id} was rejected by quality review; owner-accepted technical operation is required to retain it`);
       if (asset.synthetic !== true) throw new Error('Only attested synthetic assets can be rendered');
       evidence(asset.provenance?.commercialLicense);
     }
@@ -702,7 +707,8 @@ export class Production {
     if (!episode) throw new Error('Episode does not exist');
     mutableEpisode(episode, state);
     if (state.spending.some(item => item.episodeId === episodeId && ['reserved', 'unknown'].includes(item.status))) throw new Error('Reconcile outstanding generation reservations before rendering');
-    const plan = renderPlan(state, episode);
+    if (episode.fragmentComposition !== undefined) await validateEpisodeDerivation(state, episode, this.store.directory, { env: this.env });
+    const plan = renderPlan(state, episode, this.env);
     const manifest = renderManifest(episode, plan);
     await verifyRenderSources(this.store, plan.selected);
     // Export is read-only. Refuse a race rather than returning a stale plan.
@@ -710,7 +716,8 @@ export class Production {
     const latest = current.episodes.find(item => item.id === episodeId);
     if (!latest) throw new Error('Episode changed during manifest export');
     mutableEpisode(latest, current);
-    if (current.spending.some(item => item.episodeId === episodeId && ['reserved', 'unknown'].includes(item.status)) || canonicalJson(renderManifest(latest, renderPlan(current, latest))) !== canonicalJson(manifest)) throw new Error('Episode or selected assets changed during manifest export');
+    if (latest.fragmentComposition !== undefined) await validateEpisodeDerivation(current, latest, this.store.directory, { env: this.env });
+    if (current.spending.some(item => item.episodeId === episodeId && ['reserved', 'unknown'].includes(item.status)) || canonicalJson(renderManifest(latest, renderPlan(current, latest, this.env))) !== canonicalJson(manifest)) throw new Error('Episode or selected assets changed during manifest export');
     return manifest;
   }
 
@@ -720,12 +727,13 @@ export class Production {
     if (provenance?.synthetic !== true) throw new Error('provenance.synthetic=true must attest original assembly from the exact manifest sources');
     const normalized = { provider: requiredText(provenance.provider, 'provenance.provider', 100), model: requiredText(provenance.model, 'provenance.model', 300), prompt: requiredText(provenance.prompt, 'provenance.prompt'), commercialLicense: evidence(provenance.commercialLicense) };
     const attemptId = randomUUID();
-    const snapshot = await this.store.transaction(state => {
+    const snapshot = await this.store.transaction(async state => {
       const episode = state.episodes.find(item => item.id === episodeId);
       if (!episode) throw new Error('Episode does not exist');
       mutableEpisode(episode, state);
       if (state.spending.some(item => item.episodeId === episodeId && ['reserved', 'unknown'].includes(item.status))) throw new Error('Reconcile outstanding generation reservations before rendering');
-      const plan = renderPlan(state, episode);
+      if (episode.fragmentComposition !== undefined) await validateEpisodeDerivation(state, episode, this.store.directory, { env: this.env });
+      const plan = renderPlan(state, episode, this.env);
       const expected = renderManifest(episode, plan);
       if (canonicalJson(manifest) !== canonicalJson(expected)) throw new Error('Remote render manifest does not match the current episode and source assets');
       invalidate(episode);
@@ -761,7 +769,8 @@ export class Production {
       };
       return await this.store.transaction(async state => {
         const episode = state.episodes.find(item => item.id === episodeId);
-        if (!episode || episode.status !== 'rendering' || episode.renderAttempt?.id !== attemptId || fingerprint(episode, selectSceneAssets(state, episode)) !== snapshot.fingerprint) throw new Error('Episode or selected assets changed during rendering');
+        if (episode?.fragmentComposition !== undefined) await validateEpisodeDerivation(state, episode, this.store.directory, { env: this.env });
+        if (!episode || episode.status !== 'rendering' || episode.renderAttempt?.id !== attemptId || fingerprint(episode, selectSceneAssets(state, episode, this.env)) !== snapshot.fingerprint) throw new Error('Episode or selected assets changed during rendering');
         if (state.projects.find(item => item.id === episode.projectId)?.status !== 'active' || state.publications.some(item => item.episodeId === episodeId && PUBLICATION_FREEZE_STATUSES.has(item.status)) || state.spending.some(item => item.episodeId === episodeId && ['reserved', 'unknown'].includes(item.status))) throw new Error('Episode production was frozen during rendering');
         await verifyRenderSources(this.store, snapshot.selected);
         if ((await renderFileDigest(finalPath, snapshot.limits.maxRenderBytes)).sha256 !== digest.sha256) throw new Error('Remote render changed during verification');
@@ -792,12 +801,13 @@ export class Production {
 
   async renderEpisode({ episodeId }) {
     const attemptId = randomUUID();
-    const snapshot = await this.store.transaction((state) => {
+    const snapshot = await this.store.transaction(async (state) => {
       const episode = state.episodes.find((item) => item.id === episodeId);
       if (!episode) throw new Error('Episode does not exist');
       mutableEpisode(episode, state);
       if (state.spending.some((item) => item.episodeId === episodeId && ['reserved', 'unknown'].includes(item.status))) throw new Error('Reconcile outstanding generation reservations before rendering');
-      const plan = renderPlan(state, episode);
+      if (episode.fragmentComposition !== undefined) await validateEpisodeDerivation(state, episode, this.store.directory, { env: this.env });
+      const plan = renderPlan(state, episode, this.env);
       invalidate(episode);
       episode.status = 'rendering';
       episode.renderAttempt = { id: attemptId, status: 'rendering', startedAt: new Date().toISOString() };
@@ -863,9 +873,10 @@ export class Production {
         }
       }
       const render = { path: `assets/render-${attemptId}.mp4`, ...digest, ...metadata, format: 'mp4', audioMode: snapshot.audioMode, ...(narrated ? { captionsPath: `assets/render-${attemptId}.srt`, captionsSha256: sha256(await boundedFile(captionsPath)), captionsTiming: 'scene-approximate' } : {}), sceneAssets: snapshot.selected.map(({ sceneId, visual, audio }) => ({ sceneId, visualAssetId: visual.id, ...(audio ? { audioAssetId: audio.id } : {}) })), visualMethod: snapshot.selected.some(({ visual }) => visual.kind === 'image') ? 'includes-animated-images' : 'generated-video', synthetic: true, createdAt: new Date().toISOString() };
-      return await this.store.transaction((state) => {
+      return await this.store.transaction(async (state) => {
         const episode = state.episodes.find((item) => item.id === episodeId);
-        if (!episode || episode.status !== 'rendering' || episode.renderAttempt?.id !== attemptId || fingerprint(episode, selectSceneAssets(state, episode)) !== snapshot.fingerprint) throw new Error('Episode or selected assets changed during rendering; render cannot be committed');
+        if (episode?.fragmentComposition !== undefined) await validateEpisodeDerivation(state, episode, this.store.directory, { env: this.env });
+        if (!episode || episode.status !== 'rendering' || episode.renderAttempt?.id !== attemptId || fingerprint(episode, selectSceneAssets(state, episode, this.env)) !== snapshot.fingerprint) throw new Error('Episode or selected assets changed during rendering; render cannot be committed');
         episode.render = render;
         episode.approval = null;
         episode.status = 'rendered';

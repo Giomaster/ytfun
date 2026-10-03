@@ -21,7 +21,7 @@ test('stdio MCP negotiates, lists tools and persists a series across restarts', 
   const client = await connect();
   t.after(() => client.close());
   const tools = await client.listTools();
-  assert.equal(tools.tools.length, 43);
+  assert.equal(tools.tools.length, 45);
   const reviewSchema = tools.tools.find(tool => tool.name === 'ytfun_episode_approve').inputSchema.properties.review;
   const ownerReview = reviewSchema.anyOf.find(schema => schema.properties.mode?.const === 'owner_accepted_technical');
   assert.equal(ownerReview.properties.renderWatched.const, false);
@@ -83,6 +83,19 @@ test('stdio MCP negotiates, lists tools and persists a series across restarts', 
   const derivationSchema = tools.tools.find(tool => tool.name === 'ytfun_episode_derive_short').inputSchema;
   assert.equal(derivationSchema.properties.parentEpisodeId.format, 'uuid');
   assert.equal(derivationSchema.properties.sceneIds.maxItems, 12);
+  const compose = tools.tools.find(tool => tool.name === 'ytfun_episode_compose').inputSchema;
+  assert.deepEqual(compose.properties.format.enum, ['short', 'long']);
+  assert.ok(compose.required.includes('sources'));
+  assert.ok(!compose.required.includes('parentEpisodeId'));
+  assert.equal(compose.properties.sources.items.additionalProperties, false);
+  const presentation = tools.tools.find(tool => tool.name === 'ytfun_publication_metadata_prepare');
+  assert.equal(presentation.annotations.readOnlyHint, true);
+  assert.equal(presentation.inputSchema.properties.publicationMetadata.additionalProperties, false);
+  for (const name of ['ytfun_publish_plan', 'ytfun_facebook_publish', 'ytfun_tiktok_publish', 'ytfun_youtube_publish', 'ytfun_delivery_enqueue']) {
+    const input = tools.tools.find(tool => tool.name === name).inputSchema;
+    assert.ok(input.properties.publicationMetadata);
+    assert.ok(input.properties.publicationMetadataSha256);
+  }
   assert.ok(tools.tools.find(tool => tool.name === 'ytfun_episode_render_manifest').annotations.readOnlyHint);
   const registrationSchema = tools.tools.find(tool => tool.name === 'ytfun_episode_render_register').inputSchema;
   assert.equal(registrationSchema.properties.manifest.type, 'object');

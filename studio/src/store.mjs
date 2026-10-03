@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { validateTikTokZernioAttestationShape } from './tiktok-zernio-attestation.mjs';
+import { publicationMetadataSnapshot, requirePublicMetadataRoute } from './publication-metadata.mjs';
 
 const transactionTails = new Map();
 const collections = ['projects', 'episodes', 'trends', 'assets', 'publications', 'spending'];
@@ -28,6 +29,7 @@ function validateState(state) {
       if (ids.has(entity.id)) throw new Error(`Invalid studio state: duplicate ${name} id ${entity.id}`);
       if (name === 'publications' && entity.consentEvidence !== undefined &&
           (entity.platform !== 'tiktok' || entity.route !== 'zernio' || !validateTikTokZernioAttestationShape(entity.consentEvidence, entity.renderSha256))) throw new Error('Invalid publication preview/consent evidence');
+      if (name === 'publications') requirePublicMetadataRoute(publicationMetadataSnapshot(entity, entity.platform, { requireCanonical: true }), entity);
       ids.add(entity.id);
     }
   }
@@ -36,6 +38,7 @@ function validateState(state) {
     const ids = new Set();
     for (const item of state.deliveries) {
       if (!item || typeof item.id !== 'string' || !item.id || ids.has(item.id) || !['queued', 'running', 'completed', 'attention', 'cancelled'].includes(item.status)) throw new Error('Invalid studio delivery record');
+      requirePublicMetadataRoute(publicationMetadataSnapshot(item, item.platform, { requireCanonical: true }), item);
       ids.add(item.id);
     }
   }
@@ -60,7 +63,8 @@ function validateState(state) {
     if (!Array.isArray(state.zernioConsents)) throw new Error('Invalid Zernio consent collection');
     const keys = new Set();
     for (const item of state.zernioConsents) {
-      const key = `${item?.episodeId}:${item?.accountId}:${item?.renderSha256}:${item?.reviewHash}`;
+      const metadataBinding = publicationMetadataSnapshot(item, 'tiktok', { requireCanonical: true });
+      const key = `${item?.episodeId}:${item?.accountId}:${item?.renderSha256}:${item?.reviewHash}:${metadataBinding.publicationMetadataSha256 ?? 'default'}`;
       if (!item || keys.has(key) || typeof item.episodeId !== 'string' || !/^[1-9]\d{0,63}$/.test(item.accountId ?? '') ||
           !/^[a-f0-9]{64}$/.test(item.renderSha256 ?? '') || !/^[a-f0-9]{64}$/.test(item.reviewHash ?? '') ||
           !validateTikTokZernioAttestationShape(item.attestation, item.renderSha256) ||
