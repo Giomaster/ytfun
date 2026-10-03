@@ -46,6 +46,15 @@ congela seleção/linhagem e as fontes são revalidadas antes do registro e da p
 Adaptar texto pelo snapshot de publicação, sem alterar a fonte compartilhada:
 `publicationMetadata={title,description,hashtags,tags}` e seu hash normalizado pelo
 `ytfun_publication_metadata_prepare`. Cada rede mantém sua utilização, conta e recibo.
-O Publisher impede reenvio da mesma mídia/composição na mesma conta; reuso entre
-redes continua permitido. Conferir exclusões humanas e uso editorial da seleção.
+O Publisher impede reenvio dos mesmos bytes e, quando a linhagem permite provar
+os intervalos usados, da mesma composição na mesma conta. Sobreposição de arquivos
+brutos sem intervalos não prova duplicidade. Reuso entre redes continua permitido.
+Conferir exclusões humanas e uso editorial da seleção.
 Testes desta API rodam somente no GitHub Actions.
+
+Esta API permanece experimental na PR6. A revisão encontrou perda de intervalos
+em fontes previamente montadas por selected-assembly v2: copiar seus assets brutos
+pode remontar outro trecho. Não ativar esta implementação antes de preservar os
+recortes até o worker ou restringir a rota a fontes de reconstrução comprovada.
+O reuso integral que devolve o próprio render não tem essa remontagem. Acervo e
+intervalos originais devem ser preservados, sem nova geração corretiva.

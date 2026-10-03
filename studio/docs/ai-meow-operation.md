@@ -5,8 +5,9 @@ TikTok e YouTube adaptam e publicam por sua própria estratégia. A instrução 
 mais recente prevalece. Este arquivo concentra decisões editoriais; outros documentos
 descrevem estado ou APIs. Histórico preserva mídia, custos e recibos, sem impor regras.
 
-Esta revisão está preparada em checkout isolado. Sua adoção pelas sessões e a troca
-de prompts, agendamentos ou runtime aguardam pedido explícito de Giovanni.
+Esta revisão está preparada em checkout isolado e foi comunicada às quatro sessões
+por pedido explícito de Giovanni em 03/10. Os patches de código continuam em validação;
+runtime e agendamentos não foram alterados. Aviso de contexto não ativa código novo.
 
 ## Objetivo, modos e autonomia
 

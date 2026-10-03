@@ -167,19 +167,24 @@ function metadataFor(episode) {
   return { title: episode.title, description: fullDescription, tags, hashtags };
 }
 
-/** Source-byte order/timing and output format identify a composition independently of copy or encoding. */
-function compositionHash(state, episode) {
-  if (!episode?.render || !episode.scenes?.length || !Array.isArray(episode.render.sceneAssets)) return null;
-  const sources = episode.scenes.map(scene => {
-    const mapping = episode.render.sceneAssets.find(item => item.sceneId === scene.id);
-    const visual = state.assets.find(item => item.id === mapping?.visualAssetId);
-    const audio = state.assets.find(item => item.id === mapping?.audioAssetId);
-    if (!/^[a-f0-9]{64}$/.test(visual?.sha256 ?? '') || (episode.audioMode !== 'silent' && !/^[a-f0-9]{64}$/.test(audio?.sha256 ?? ''))) return null;
-    return { visual: visual.sha256, audio: audio?.sha256 ?? null, durationSeconds: scene.durationSeconds };
-  });
-  if (sources.some(item => item === null)) return null;
+/** Only validated render lineage and exact intervals establish the same composition across encodings. */
+async function compositionHash(state, episode, directory, env) {
+  if (!episode?.render || !episode.scenes?.length ||
+      (episode.fragmentComposition === undefined && episode.derivation === undefined)) return null;
+  try { await validateEpisodeDerivation(state, episode, directory, { env }); }
+  catch { return null; }
+  const sources = episode.fragmentComposition
+    ? episode.fragmentComposition.sceneBindings.map(binding => ({ parentRenderSha256: binding.sourceRenderSha256,
+      startSeconds: binding.sourceRangeSeconds[0], endSeconds: binding.sourceRangeSeconds[1] }))
+    : episode.derivation.sourceTimeRanges.map(range => ({ parentRenderSha256: episode.derivation.parentRenderSha256,
+      startSeconds: range.startSeconds, endSeconds: range.endSeconds }));
+  if (sources.length !== episode.scenes.length || sources.some((source, index) =>
+      !/^[a-f0-9]{64}$/.test(source.parentRenderSha256 ?? '') || !Number.isFinite(source.startSeconds) ||
+      !Number.isFinite(source.endSeconds) || source.startSeconds < 0 || source.endSeconds <= source.startSeconds ||
+      Math.abs(source.endSeconds - source.startSeconds - episode.scenes[index].durationSeconds) > 1e-9)) return null;
   const ratio = Number.isFinite(episode.render.width / episode.render.height) ? episode.render.width / episode.render.height : null;
-  return createHash('sha256').update(JSON.stringify({ format: episode.format ?? 'short', audioMode: episode.audioMode ?? 'narrated', ratio, sources })).digest('hex');
+  return createHash('sha256').update(JSON.stringify({ schemaVersion: 2, timebase: 'exact-parent-render-scene-boundaries',
+    audioMode: episode.audioMode ?? 'narrated', ratio, sources })).digest('hex');
 }
 
 function cadenceIssues(state, project, platform, accountId, effectiveAt, { waiveFrequency = false } = {}) {
@@ -358,10 +363,17 @@ export class Publisher {
     const duplicateMedia = state.publications.find(item => item.platform === platform && (item.accountId === accountId || item.localOnly === true) &&
       item.episodeId !== episode.id && item.renderSha256 === episode.render?.sha256 && RESERVED_STATUSES.has(item.status));
     if (duplicateMedia) reasons.push('This exact media already has a publication or reservation on this account; changed episode IDs or metadata do not authorize duplication.');
-    const compositionSha256 = compositionHash(state, episode);
-    const duplicateComposition = compositionSha256 && state.publications.find(item => item.platform === platform && (item.accountId === accountId || item.localOnly === true) &&
-      item.episodeId !== episode.id && RESERVED_STATUSES.has(item.status) &&
-      (item.compositionSha256 ?? compositionHash(state, state.episodes.find(source => source.id === item.episodeId))) === compositionSha256);
+    const compositionSha256 = await compositionHash(state, episode, this.store.directory, this.env);
+    let duplicateComposition;
+    if (compositionSha256) for (const item of state.publications) {
+      if (item.platform !== platform || (item.accountId !== accountId && item.localOnly !== true) ||
+          item.episodeId === episode.id || !RESERVED_STATUSES.has(item.status)) continue;
+      // The previous raw-asset fingerprint did not prove intervals. Preserve it
+      // as history, but never promote it into this stricter factual veto.
+      const previous = item.compositionHashSchemaVersion === 2 ? item.compositionSha256
+        : await compositionHash(state, state.episodes.find(source => source.id === item.episodeId), this.store.directory, this.env);
+      if (previous === compositionSha256) { duplicateComposition = item; break; }
+    }
     if (duplicateComposition) reasons.push('This source composition already has a publication or reservation on this account; a new encoding or title does not make another work.');
     const ordinaryCadence = cadenceIssues(state, project, platform, accountId, effectiveAt);
     let exception;
@@ -411,7 +423,7 @@ export class Publisher {
     if (platform === 'tiktok' && caption.length > 2200) reasons.push('TikTok caption exceeds 2200 UTF-16 code units.');
     return {
       episodeId: episode.id, projectId: project.id, platform, accountId, reviewHash, privacy, ...metadataBinding,
-      ...(compositionSha256 ? { compositionSha256 } : {}),
+      ...(compositionSha256 ? { compositionSha256, compositionHashSchemaVersion: 2 } : {}),
       ...(platform === 'youtube' && !zernio ? { youtubeGrantId: this.youtubeGrantId } : {}),
       ...(platform === 'facebook' ? { facebookVideoKind } : {}),
       uploadPrivacy: publishAt === undefined ? privacy : 'private', effectiveAt,
@@ -623,7 +635,7 @@ export class Publisher {
       media = await facebookMediaBody(this.store.directory, file, plan.render.sha256, maxFileBytes(this.env));
       const publication = { id: randomUUID(), episodeId, projectId: plan.projectId, platform, accountId: plan.accountId,
         providerAccountId: plan.providerAccountId, bindingSha256: plan.bindingSha256, reviewHash: plan.reviewHash,
-        renderSha256: plan.render.sha256, ...(plan.compositionSha256 ? { compositionSha256: plan.compositionSha256 } : {}), ...metadataBinding, route: 'zernio', privacy: 'public', status: 'uploading',
+        renderSha256: plan.render.sha256, ...(plan.compositionSha256 ? { compositionSha256: plan.compositionSha256, compositionHashSchemaVersion: 2 } : {}), ...metadataBinding, route: 'zernio', privacy: 'public', status: 'uploading',
         effectiveAt: plan.effectiveAt, createdAt: new Date().toISOString(), ...(platform === 'youtube' ? { madeForKids } : {}),
         ...(platform === 'tiktok' ? { consentEvidence: sanitizeTikTokZernioAttestation(consent.attestation) } : {}), ...(deliveryId ? { deliveryId } : {}) };
       state.publications.push(publication);
@@ -692,7 +704,7 @@ export class Publisher {
       }
       const publication = {
         id: randomUUID(), episodeId, projectId: plan.projectId, platform: 'youtube', accountId: plan.accountId,
-        reviewHash: plan.reviewHash, renderSha256: plan.render.sha256, ...(plan.compositionSha256 ? { compositionSha256: plan.compositionSha256 } : {}), ...metadataBinding, status: 'uploading',
+        reviewHash: plan.reviewHash, renderSha256: plan.render.sha256, ...(plan.compositionSha256 ? { compositionSha256: plan.compositionSha256, compositionHashSchemaVersion: 2 } : {}), ...metadataBinding, status: 'uploading',
         effectiveAt: plan.effectiveAt, createdAt: new Date().toISOString(), privacy, madeForKids,
         apiData: youtubeApiData({ authorized: true, grantId: this.youtubeGrantId }),
         ...(publishAt !== undefined ? { publishAt: plan.effectiveAt } : {}),
@@ -805,7 +817,7 @@ export class Publisher {
       const file = await verifiedFile(this.store.directory, plan.render.path, plan.render.sha256, 8 * 1024 * 1024, { noSymlinks: true });
       media = await facebookMediaBody(this.store.directory, file, plan.render.sha256, 8 * 1024 * 1024);
       const publication = { id: randomUUID(), episodeId, projectId: plan.projectId, platform: 'tiktok', accountId: plan.accountId,
-        reviewHash: plan.reviewHash, renderSha256: plan.render.sha256, ...(plan.compositionSha256 ? { compositionSha256: plan.compositionSha256 } : {}), ...metadataBinding, status: 'uploading', privacy, route: 'experimental_session_rest',
+        reviewHash: plan.reviewHash, renderSha256: plan.render.sha256, ...(plan.compositionSha256 ? { compositionSha256: plan.compositionSha256, compositionHashSchemaVersion: 2 } : {}), ...metadataBinding, status: 'uploading', privacy, route: 'experimental_session_rest',
         effectiveAt: plan.effectiveAt, createdAt: new Date().toISOString(), ...(deliveryId ? { deliveryId } : {}) };
       state.publications.push(publication);
       return { publication, plan };
@@ -909,7 +921,7 @@ export class Publisher {
       const file = await verifiedFile(this.store.directory, plan.render.path, plan.render.sha256, maxFileBytes(this.env), { noSymlinks: true });
       media = await facebookMediaBody(this.store.directory, file, plan.render.sha256, maxFileBytes(this.env));
       if (createHash('sha256').update(media).digest('hex') !== plan.render.sha256.toLowerCase()) throw new Error('Render changed while preparing the upload.');
-      const publication = { id: randomUUID(), episodeId, projectId: plan.projectId, platform: 'facebook', facebookVideoKind: plan.facebookVideoKind, accountId: plan.accountId, reviewHash: plan.reviewHash, renderSha256: plan.render.sha256, ...(plan.compositionSha256 ? { compositionSha256: plan.compositionSha256 } : {}), ...metadataBinding, status: 'uploading', privacy, effectiveAt: plan.effectiveAt, createdAt: new Date().toISOString(), ...(deliveryId ? { deliveryId } : {}) };
+      const publication = { id: randomUUID(), episodeId, projectId: plan.projectId, platform: 'facebook', facebookVideoKind: plan.facebookVideoKind, accountId: plan.accountId, reviewHash: plan.reviewHash, renderSha256: plan.render.sha256, ...(plan.compositionSha256 ? { compositionSha256: plan.compositionSha256, compositionHashSchemaVersion: 2 } : {}), ...metadataBinding, status: 'uploading', privacy, effectiveAt: plan.effectiveAt, createdAt: new Date().toISOString(), ...(deliveryId ? { deliveryId } : {}) };
       if (cadenceExceptionId !== undefined) {
         const exception = facebookCadenceException(state, { cadenceExceptionId, deliveryId, episode: state.episodes.find(item => item.id === episodeId),
           reviewHash: plan.reviewHash, accountId: plan.accountId, platform: 'facebook', privacy }, Date.now());

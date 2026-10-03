@@ -145,9 +145,9 @@ original do worker nunca é apagado pelo registro.
 ## Shorts derivados de um master original
 
 Esta seção descreve especificamente `deriveShort`. Sua exigência de pai renderizado
-não se aplica a uma obra independente: planeje um episódio e registre/mapeie fontes
-existentes pelas APIs suportadas, com proveniência e exclusões, e monte seu próprio
-manifesto. Shorts e regulares independentes não esperam um master de 12 minutos.
+não se aplica à [composição direta de fragmentos](fragment-composition.md), que
+combina cenas completas de episódios curtos ou longos com proveniência preservada.
+Shorts e regulares independentes não esperam um master de 12 minutos.
 
 `studio.deriveShort({ parentEpisodeId, sceneIds, title, hook, synopsis,
 originalAngle, metadata, continuityNote? })`, exposto como
@@ -174,9 +174,9 @@ master horizontal volta ao padrão portrait e usa os assets originais remapeados
 Não reaproveita sinais de tendência como se fossem atuais. Fonte não renderizada, bytes/licenças
 inválidos, cenas inexistentes/reordenadas ou desfechos de geração pendentes
 impedem a operação. A mesma seleção do mesmo pai não pode ser derivada novamente,
-inclusive em chamadas concorrentes. Títulos quase iguais continuam bloqueados;
-a exceção de reutilização narrativa vale somente para o par pai–filho com
-lineage verificado. Irmãos e outros episódios mantêm as verificações globais.
+inclusive em chamadas concorrentes. Similaridade textual é aviso; título semelhante
+não prova duplicidade de mídia. Reuso e publicação seguem a política única e os
+registros da composição real por conta e rede.
 
 Renderize e revise cada short separadamente usando as mesmas APIs de manifesto,
 montagem e aprovação. Scripts, proveniência e mappings precisam continuar

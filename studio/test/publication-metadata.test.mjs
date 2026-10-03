@@ -6,6 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { episodeAssetHash, episodeReviewHash } from '../src/domain.mjs';
 import { Publisher } from '../src/publishing.mjs';
+import { FragmentComposition } from '../src/fragment-composition.mjs';
 import { DeliveryQueue } from '../src/delivery-queue.mjs';
 import { StudioStore } from '../src/store.mjs';
 import { purgeYouTubeData } from '../src/youtube-data-policy.mjs';
@@ -80,7 +81,7 @@ async function fixture(t) {
       sent.push({ platform, title: input.title, caption: input.caption, tags: input.tags, renderSha256: input.render?.sha256, synthetic: input.synthetic });
       if (platform === 'facebook') return { videoId: '123456789', status: 'processing' };
       const receipt = { route: 'zernio', publicationId: input.publicationId, accountId: ACCOUNT[platform], providerAccountId: PROVIDER,
-        renderSha256: episode.render.sha256, providerPostId: '65f1c0a9e2b5af0012ab34cd', status: 'processing', phase: 'post', confirmed: false };
+        renderSha256: input.render.sha256, providerPostId: '65f1c0a9e2b5af0012ab34cd', status: 'processing', phase: 'post', confirmed: false };
       await input.onReceipt(receipt); return receipt;
     },
   });
@@ -142,7 +143,10 @@ test('queue persists exact network metadata through recreation, rescheduling and
     const args = { ...request(f, platform, binding), dueAt: new Date(now).toISOString() };
     const queued = (await queue.enqueue(args)).delivery;
     assert.equal((await queue.enqueue(args)).duplicate, true);
-    await assert.rejects(queue.enqueue({ ...args, ...snapshot(platform, { ...metadata(platform), title: 'Changed queued copy' }) }), /different metadata/);
+    const changedCopy = snapshot(platform, { ...metadata(platform), title: 'Changed queued copy' });
+    if (platform === 'tiktok') await f.publisher.recordTikTokZernioConsent({ episodeId: f.episode.id, expectedReviewHash: f.episode.approval.reviewHash,
+      attestation: { ...f.consent, evidenceSha256: 'e'.repeat(64) }, interactionSettings: settings, ...changedCopy });
+    await assert.rejects(queue.enqueue({ ...args, ...changedCopy }), /different metadata/);
     const recreated = new DeliveryQueue(f.store, f.publisher, { now: () => now });
     const expectedClaim = Object.fromEntries(['dueAt', 'platform', 'privacy', 'madeForKids', 'reviewHash', 'renderSha256', 'accountId', 'mode', 'providerAccountId', 'bindingSha256']
       .map(key => [key, ['madeForKids', 'providerAccountId', 'bindingSha256'].includes(key) ? queued[key] ?? null : queued[key]]));
@@ -201,7 +205,7 @@ test('invalid metadata, unsupported visibility and changed hashes fail before pr
   }
 });
 
-test('same bytes or source composition cannot be reposted under another episode on the same account', async t => {
+test('exact bytes are deduplicated but raw asset overlap without intervals does not prove another encoding is the same work', async t => {
   const f = await fixture(t);
   await f.publisher.publishFacebook(request(f, 'facebook', snapshot('facebook')));
   await f.store.transaction(state => {
@@ -215,7 +219,7 @@ test('same bytes or source composition cannot be reposted under another episode 
   });
   const same = await f.publisher.preflight({ episodeId: 'another-episode', platform: 'facebook', privacy: 'public', ...snapshot('facebook') });
   assert.ok(same.reasons.some(reason => reason.includes('exact media already')));
-  assert.ok(same.reasons.some(reason => reason.includes('source composition already')));
+  assert.ok(same.reasons.every(reason => !reason.includes('source composition already')));
   const reencoded = Buffer.from('same editorial composition in a different encoding');
   await writeFile(path.join(f.directory, 'assets/reencoded.mp4'), reencoded);
   await f.store.transaction(state => {
@@ -225,8 +229,68 @@ test('same bytes or source composition cannot be reposted under another episode 
   });
   const differentBytes = await f.publisher.preflight({ episodeId: 'another-episode', platform: 'facebook', privacy: 'public', ...snapshot('facebook') });
   assert.ok(differentBytes.reasons.every(reason => !reason.includes('exact media already')));
-  assert.ok(differentBytes.reasons.some(reason => reason.includes('source composition already')));
+  assert.ok(differentBytes.reasons.every(reason => !reason.includes('source composition already')));
+  assert.equal(differentBytes.ready, true);
   assert.equal((await f.publisher.preflight({ episodeId: 'another-episode', platform: 'youtube', privacy: 'public', ...snapshot('youtube') })).ready, true);
+});
+
+test('validated equal parent intervals deduplicate across logical formats while equal-duration offsets remain distinct', async t => {
+  const f = await fixture(t);
+  await f.store.transaction(state => {
+    const parent = state.episodes[0];
+    parent.scenes.push({ ...parent.scenes[0], id: 'second-scene' });
+    const secondAssets = state.assets.map(asset => ({ ...structuredClone(asset), id: `second-${asset.id}`, sceneId: 'second-scene' }));
+    state.assets.push(...secondAssets);
+    parent.render.durationSeconds = 30;
+    parent.render.sceneAssets.push({ sceneId: 'second-scene', visualAssetId: 'second-visual', audioAssetId: 'second-audio' });
+    parent.approval.reviewHash = episodeReviewHash(parent);
+    parent.approval.assetReviewHash = episodeAssetHash(parent, state.assets);
+  });
+  const compositions = new FragmentComposition(f.store, { env: f.env });
+  const args = { projectId: 'project', sources: [{ episodeId: 'episode', expectedRenderSha256: f.episode.render.sha256, sceneIds: ['scene'] }],
+    format: 'short', renderCanvas: 'portrait', title: 'One complete original passage', hook: 'An unexpected world opens.',
+    synopsis: 'One complete source passage reaches its conclusion.', originalAngle: 'A focused original impossible-world reveal.',
+    metadata: { description: 'Original nonverbal audiovisual passage.', hashtags: ['#AIMeow'] } };
+  async function finalComposition(input) {
+    const { episode } = await compositions.plan(input);
+    const bytes = Buffer.from(`CI final composition ${episode.id}`), relativePath = `assets/${episode.id}.mp4`;
+    await writeFile(path.join(f.directory, relativePath), bytes);
+    return f.store.transaction(state => {
+      const current = state.episodes.find(item => item.id === episode.id);
+      current.render = { ...structuredClone(f.episode.render), path: relativePath, sha256: digest(bytes),
+        sceneAssets: current.fragmentComposition.sceneBindings.map(binding => ({ sceneId: binding.sceneId,
+          visualAssetId: binding.visual.assetId, audioAssetId: binding.audio.assetId })) };
+      current.status = 'approved';
+      current.approval = { ...structuredClone(f.episode.approval), reviewHash: episodeReviewHash(current), assetReviewHash: episodeAssetHash(current, state.assets) };
+      return current;
+    });
+  }
+  const first = await finalComposition(args);
+  const input = { ...request(f, 'youtube', snapshot('youtube')), episodeId: first.id, expectedReviewHash: first.approval.reviewHash };
+  const published = await f.publisher.publishYouTube(input);
+  assert.equal(published.publication.status, 'processing');
+  assert.equal(published.publication.compositionHashSchemaVersion, 2);
+  const anotherFormat = await finalComposition({ ...args, format: 'long' });
+  const sameInterval = await f.publisher.preflight({ ...input, episodeId: anotherFormat.id });
+  assert.ok(sameInterval.reasons.some(reason => reason.includes('source composition already')));
+  const shifted = await finalComposition({ ...args, sources: [{ ...args.sources[0], sceneIds: ['second-scene'] }] });
+  const differentInterval = await f.publisher.preflight({ ...input, episodeId: shifted.id });
+  assert.equal(differentInterval.ready, true);
+  assert.notEqual(differentInterval.compositionSha256, published.publication.compositionSha256);
+  await f.store.transaction(state => purgeYouTubeData(state, { all: true }));
+  const retained = (await f.store.read()).publications[0];
+  assert.equal(retained.compositionSha256, published.publication.compositionSha256);
+  assert.equal(retained.compositionHashSchemaVersion, 2);
+});
+
+test('YouTube Zernio rejects an empty final description before reserving or uploading', async t => {
+  const f = await fixture(t), input = request(f, 'youtube', snapshot('youtube', { ...metadata('youtube'), description: '', hashtags: [] }));
+  const plan = await f.publisher.preflight(input);
+  assert.equal(plan.ready, false);
+  assert.ok(plan.reasons.some(reason => reason.includes('nonempty description')));
+  await assert.rejects(f.publisher.publishYouTube(input), /nonempty description/);
+  assert.deepEqual(f.sent, []);
+  assert.deepEqual((await f.store.read()).publications, []);
 });
 
 test('caller mutation during account verification cannot replace the bound network presentation', async t => {
