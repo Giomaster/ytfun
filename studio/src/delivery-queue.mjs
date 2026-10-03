@@ -2,12 +2,21 @@ import { randomUUID } from 'node:crypto';
 import { episodeReviewHash } from './domain.mjs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { assertYouTubeConnected, youtubeApiData } from './youtube-data-policy.mjs';
+import { youtubeMetadataSnapshot, youtubeMetadataBindingsMatch } from './publishing.mjs';
 
 const PLATFORMS = ['youtube', 'facebook', 'tiktok', 'kwai'];
 const ACTIVE = new Set(['queued', 'running', 'attention']);
 
 function validTime(value) {
   return typeof value === 'string' && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
+}
+
+function deliveryYouTubeMetadata(delivery) {
+  const binding = youtubeMetadataSnapshot(delivery, { requireCanonical: true });
+  if (binding.youtubeMetadata !== undefined && (delivery.platform !== 'youtube' || delivery.mode !== 'zernio' || delivery.privacy !== 'public')) {
+    throw new Error('Persisted YouTube metadata requires its original PUBLIC YouTube Zernio delivery.');
+  }
+  return binding;
 }
 
 /** Persistent, single-attempt delivery. Provider reservations remain the authority for cadence and outcomes. */
@@ -22,7 +31,7 @@ export class DeliveryQueue {
 
   async list() { return (await this.store.read()).deliveries ?? []; }
 
-  async enqueue({ episodeId, platform, expectedReviewHash, privacy, madeForKids, dueAt }) {
+  async enqueue({ episodeId, platform, expectedReviewHash, privacy, madeForKids, dueAt, youtubeMetadata, youtubeMetadataSha256 }) {
     if (!PLATFORMS.includes(platform)) throw new Error('Unsupported delivery platform.');
     if (!/^[a-f0-9]{64}$/.test(expectedReviewHash ?? '')) throw new Error('A reviewed episode fingerprint is required.');
     if (!validTime(dueAt) || Date.parse(dueAt) < this.now() - 60_000) throw new Error('dueAt must be a current or future canonical ISO UTC timestamp.');
@@ -30,7 +39,8 @@ export class DeliveryQueue {
     if (platform === 'facebook' && privacy !== 'public') throw new Error('Facebook Reels requires explicit public visibility.');
     if (platform === 'kwai' && privacy !== 'private') throw new Error('Kwai creator exports use private package visibility.');
     if (platform === 'tiktok' && !['private', 'public'].includes(privacy)) throw new Error('TikTok uses a private export package or explicit public REST delivery.');
-    const plan = await this.publisher.preflight({ episodeId, platform, privacy }, { now: Date.parse(dueAt) });
+    const metadataBinding = youtubeMetadataSnapshot({ youtubeMetadata, youtubeMetadataSha256 });
+    const plan = await this.publisher.preflight({ episodeId, platform, privacy, ...metadataBinding }, { now: Date.parse(dueAt) });
     if (plan.reviewHash !== expectedReviewHash) throw new Error('Episode changed since review.');
     if (!plan.ready && !plan.readyToExport) throw new Error(plan.reasons.join(' '));
     return this.store.transaction(state => {
@@ -42,7 +52,9 @@ export class DeliveryQueue {
       if (existing) return { duplicate: true, delivery: existing };
       const episode = state.episodes.find(item => item.id === episodeId);
       if (!episode || episodeReviewHash(episode) !== expectedReviewHash || episode.approval?.reviewHash !== expectedReviewHash || episode.render?.sha256 !== plan.render.sha256) throw new Error('Reviewed media changed while enqueueing.');
+      if (!youtubeMetadataBindingsMatch(metadataBinding, plan)) throw new Error('YouTube metadata snapshot changed while enqueueing.');
       const delivery = { id: randomUUID(), episodeId, platform, accountId: plan.accountId, reviewHash: expectedReviewHash,
+        ...metadataBinding,
         renderSha256: plan.render.sha256, privacy, ...(platform === 'youtube' ? { madeForKids } : {}), dueAt,
         mode: plan.deliveryMode ?? (['youtube', 'facebook'].includes(platform) ? 'official_api' : platform === 'tiktok' && privacy === 'public' ? 'experimental_session_rest' : 'creator_export'),
         ...(plan.deliveryMode === 'zernio' ? { providerAccountId: plan.providerAccountId, bindingSha256: plan.bindingSha256 } : {}),
@@ -66,8 +78,9 @@ export class DeliveryQueue {
   /** Re-time an exact unstarted claim, preserving its identity and provider history. */
   async rescheduleUnstarted({ deliveryId, expectedClaim, dueAt, reason }) {
     const fields = ['dueAt', 'platform', 'privacy', 'madeForKids', 'reviewHash', 'renderSha256', 'accountId', 'mode', 'providerAccountId', 'bindingSha256'];
+    const metadataFields = ['youtubeMetadata', 'youtubeMetadataSha256'];
     if (typeof deliveryId !== 'string' || !deliveryId.trim() || !expectedClaim || typeof expectedClaim !== 'object' || Array.isArray(expectedClaim) ||
-        fields.some(key => !Object.hasOwn(expectedClaim, key)) || Object.keys(expectedClaim).some(key => !fields.includes(key)) ||
+        fields.some(key => !Object.hasOwn(expectedClaim, key)) || Object.keys(expectedClaim).some(key => !fields.includes(key) && !metadataFields.includes(key)) ||
         !validTime(expectedClaim.dueAt) || !PLATFORMS.includes(expectedClaim.platform) || !['private', 'unlisted', 'public'].includes(expectedClaim.privacy) ||
         !(expectedClaim.platform === 'youtube' ? typeof expectedClaim.madeForKids === 'boolean' : expectedClaim.madeForKids === null) ||
         !/^[a-f0-9]{64}$/.test(expectedClaim.reviewHash ?? '') || !/^[a-f0-9]{64}$/.test(expectedClaim.renderSha256 ?? '') ||
@@ -76,17 +89,22 @@ export class DeliveryQueue {
         !(expectedClaim.providerAccountId === null || typeof expectedClaim.providerAccountId === 'string' && /^[a-f0-9]{24}$/.test(expectedClaim.providerAccountId)) ||
         !(expectedClaim.bindingSha256 === null || typeof expectedClaim.bindingSha256 === 'string' && /^[a-f0-9]{64}$/.test(expectedClaim.bindingSha256)) ||
         !validTime(dueAt) || Date.parse(dueAt) < this.now() - 60_000 || typeof reason !== 'string' || !reason.trim() || reason.length > 1000) throw new Error('Exact expected delivery claim, current/future due time and rescheduling reason are required.');
+    const expectedMetadata = youtubeMetadataSnapshot(expectedClaim, { requireCanonical: true });
     return this.store.transaction(async state => {
       const item = state.deliveries?.find(entry => entry.id === deliveryId);
       if (!item || !(item.status === 'queued' || item.status === 'attention' && item.phase === 'preflight') || item.publicationId ||
           state.deliveries.some(entry => entry.status === 'running') ||
           state.publications.some(publication => publication.deliveryId === item.id || publication.episodeId === item.episodeId && publication.platform === item.platform)) throw new Error('Only a proved unstarted delivery without publication reservations can be rescheduled.');
       if (fields.some(key => (['providerAccountId', 'bindingSha256', 'madeForKids'].includes(key) ? item[key] ?? null : item[key]) !== expectedClaim[key])) throw new Error('Delivery claim changed; read its current binding before rescheduling.');
+      const metadataBinding = deliveryYouTubeMetadata(item);
+      if (!youtubeMetadataBindingsMatch(metadataBinding, expectedMetadata)) throw new Error('Delivery YouTube metadata snapshot changed before rescheduling.');
       const plan = await this.publisher.plan(state, { episodeId: item.episodeId, platform: item.platform, privacy: item.privacy,
+        ...metadataBinding,
         ...(item.cadenceExceptionId ? { cadenceExceptionId: item.cadenceExceptionId, deliveryId: item.id } : {}) }, Math.max(this.now(), Date.parse(dueAt)));
       const mode = plan.deliveryMode ?? (['youtube', 'facebook'].includes(item.platform) ? 'official_api' : item.platform === 'tiktok' && item.privacy === 'public' ? 'experimental_session_rest' : 'creator_export');
       if ((!plan.ready && !plan.readyToExport) || plan.publication || plan.accountId !== item.accountId || plan.reviewHash !== item.reviewHash ||
           plan.render?.sha256 !== item.renderSha256 || mode !== item.mode ||
+          !youtubeMetadataBindingsMatch(metadataBinding, plan) ||
           mode === 'zernio' && (plan.providerAccountId !== item.providerAccountId || plan.bindingSha256 !== item.bindingSha256)) throw new Error('Current media, account, provider or publication preflight does not permit rescheduling.');
       if (item.platform === 'youtube' && mode !== 'zernio') {
         assertYouTubeConnected(state, { YTFUN_YOUTUBE_GRANT_ID: plan.youtubeGrantId ?? 'legacy' });
@@ -140,16 +158,19 @@ export class DeliveryQueue {
       const publication = matches[0];
       if (delivery.platform === 'youtube' && delivery.mode !== 'zernio' && (delivery.apiData?.grantId ?? delivery.grantId ?? 'legacy') !== (publication?.apiData?.grantId ?? publication?.grantId ?? 'legacy')) throw new Error('Reconcile only a receipt from the same YouTube grant generation.');
       if (delivery.mode === 'zernio' && (publication?.route !== 'zernio' || publication?.providerAccountId !== delivery.providerAccountId || publication?.bindingSha256 !== delivery.bindingSha256)) throw new Error('Reconcile only the original provider account binding.');
+      if (publication && !youtubeMetadataBindingsMatch(deliveryYouTubeMetadata(delivery), publication)) throw new Error('Reconcile only the original YouTube metadata snapshot.');
       if (matches.length !== 1 || !publication || publication.episodeId !== delivery.episodeId || publication.platform !== delivery.platform || publication.accountId !== delivery.accountId || publication.reviewHash !== delivery.reviewHash || publication.renderSha256 !== delivery.renderSha256 || !['uploaded', 'processing', 'scheduled', 'published', 'exported', 'failed'].includes(publication.status)) throw new Error('Reconcile the exact provider publication first; this operation never guesses an unknown outcome or resets a task for retry.');
       Object.assign(delivery, { status: 'completed', publicationId: publication.id, outcome: publication.status, reconciledBy: confirmedBy.trim(), reconciliationEvidence: evidence.trim(), updatedAt: new Date(this.now()).toISOString() });
       return { delivery };
     });
   }
 
-  async runDue({ execute = false, platform, expectedDeliveryId, cadenceExceptionId } = {}) {
+  async runDue({ execute = false, platform, expectedDeliveryId, cadenceExceptionId, youtubeMetadata, youtubeMetadataSha256 } = {}) {
     if (typeof execute !== 'boolean') throw new Error('execute must be a boolean.');
+    if (youtubeMetadata !== undefined) throw new Error('runDue uses only the persisted YouTube metadata snapshot; supply its expected SHA256 and delivery ID.');
     if (platform !== undefined && !PLATFORMS.includes(platform)) throw new Error('Unsupported delivery platform filter.');
     if (expectedDeliveryId !== undefined && (typeof expectedDeliveryId !== 'string' || !expectedDeliveryId.trim())) throw new Error('Expected delivery ID must be nonempty.');
+    if (youtubeMetadataSha256 !== undefined && (platform !== 'youtube' || expectedDeliveryId === undefined || !/^[a-f0-9]{64}$/.test(youtubeMetadataSha256))) throw new Error('Bind the expected YouTube metadata SHA256 to its exact YouTube delivery ID.');
     if (cadenceExceptionId !== undefined && (platform !== 'facebook' || expectedDeliveryId === undefined || typeof cadenceExceptionId !== 'string' || !cadenceExceptionId.trim())) throw new Error('Bind a Facebook cadence exception to its expected delivery ID.');
     const state = await this.store.read();
     // A worker crash leaves an inspectable record. Never infer it is safe to repeat a request.
@@ -159,7 +180,10 @@ export class DeliveryQueue {
     if (!candidate) return { idle: true };
     if ((expectedDeliveryId !== undefined && candidate.id !== expectedDeliveryId) ||
         (cadenceExceptionId !== undefined && candidate.cadenceExceptionId !== cadenceExceptionId)) return { blocked: true, reason: 'The due delivery differs from the explicitly requested delivery or cadence exception; no claim was made.' };
+    const metadataBinding = deliveryYouTubeMetadata(candidate);
+    if (youtubeMetadataSha256 !== undefined && candidate.youtubeMetadataSha256 !== youtubeMetadataSha256) return { blocked: true, reason: 'The due delivery YouTube metadata differs from the expected snapshot; no claim was made.' };
     if (!execute) return { execute: false, delivery: candidate, plan: await this.publisher.preflight({ episodeId: candidate.episodeId, platform: candidate.platform, privacy: candidate.privacy,
+      ...metadataBinding,
       ...(candidate.cadenceExceptionId ? { cadenceExceptionId: candidate.cadenceExceptionId, deliveryId: candidate.id } : {}) }) };
     const selectedRoute = this.publisher.zernioSelected?.(candidate.platform) ? 'zernio' : (['youtube', 'facebook'].includes(candidate.platform) ? 'official_api' : candidate.platform === 'tiktok' && candidate.privacy === 'public' ? 'experimental_session_rest' : 'creator_export');
     if (candidate.mode !== selectedRoute) return { blocked: true, reason: 'Selected provider changed; explicitly migrate only an unstarted delivery.' };
@@ -169,6 +193,7 @@ export class DeliveryQueue {
       if (item?.status !== 'queued' || Date.parse(item.dueAt) > this.now() ||
           (expectedDeliveryId !== undefined && item.id !== expectedDeliveryId) ||
           (cadenceExceptionId !== undefined && item.cadenceExceptionId !== cadenceExceptionId)) return null;
+      if (!youtubeMetadataBindingsMatch(deliveryYouTubeMetadata(item), metadataBinding)) return null;
       if (item.platform === 'youtube' && item.mode !== 'zernio') {
         const grantId = this.publisher.youtubeGrantId ?? 'legacy';
         assertYouTubeConnected(current, { YTFUN_YOUTUBE_GRANT_ID: grantId });
@@ -186,12 +211,14 @@ export class DeliveryQueue {
     let phase = 'preflight';
     try {
       const plan = await this.publisher.preflight({ episodeId: claimed.episodeId, platform: claimed.platform, privacy: claimed.privacy,
+        ...deliveryYouTubeMetadata(claimed),
         ...(claimed.cadenceExceptionId ? { cadenceExceptionId: claimed.cadenceExceptionId, deliveryId: claimed.id } : {}) });
       if (claimed.platform === 'youtube' && claimed.mode !== 'zernio' && (claimed.apiData?.grantId ?? 'legacy') !== (plan.youtubeGrantId ?? 'legacy')) throw new Error('Delivery consent generation changed.');
       if (claimed.mode === 'zernio' && (plan.deliveryMode !== 'zernio' || plan.providerAccountId !== claimed.providerAccountId || plan.bindingSha256 !== claimed.bindingSha256)) throw new Error('Delivery provider account binding changed.');
       if (plan.accountId !== claimed.accountId || plan.reviewHash !== claimed.reviewHash || plan.render?.sha256 !== claimed.renderSha256) throw new Error('Delivery identity or reviewed content changed.');
+      if (!youtubeMetadataBindingsMatch(claimed, plan)) throw new Error('Delivery YouTube metadata snapshot changed.');
       if (!plan.ready && !plan.readyToExport && !plan.publication) throw new Error('Delivery preflight no longer permits the operation.');
-      const input = { episodeId: claimed.episodeId, expectedReviewHash: claimed.reviewHash, privacy: claimed.privacy, madeForKids: claimed.madeForKids, execute: true, deliveryId: claimed.id };
+      const input = { episodeId: claimed.episodeId, expectedReviewHash: claimed.reviewHash, privacy: claimed.privacy, madeForKids: claimed.madeForKids, execute: true, deliveryId: claimed.id, ...deliveryYouTubeMetadata(claimed) };
       if (claimed.cadenceExceptionId) input.cadenceExceptionId = claimed.cadenceExceptionId;
       phase = 'delivery';
       if (claimed.platform === 'youtube') result = await this.publisher.publishYouTube(input);
@@ -203,6 +230,11 @@ export class DeliveryQueue {
       return this.finish(claimed.id, { status: 'attention', phase, error: 'Delivery was blocked or interrupted. Inspect preflight and provider receipts; no automatic retry is made.' });
     }
     const publication = result?.publication;
+    try {
+      if (publication && !youtubeMetadataBindingsMatch(claimed, publication)) throw new Error('Publication metadata changed.');
+    } catch {
+      return this.finish(claimed.id, { status: 'attention', phase: 'preflight', error: 'The publication YouTube metadata snapshot does not match the delivery; inspect the original reservation without retry.' });
+    }
     const known = ['uploaded', 'processing', 'scheduled', 'published', 'exported'].includes(publication?.status);
     return this.finish(claimed.id, { status: known ? 'completed' : 'attention',
       ...(publication?.id ? { publicationId: publication.id, outcome: publication.status } : {}),

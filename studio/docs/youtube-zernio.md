@@ -58,6 +58,14 @@ entertainment category 24. Short classification comes from the real duration and
 aspect ratio; no synthetic Short flag is sent. The publication UUID is the stable
 `Idempotency-Key`; metadata binds the publication UUID and render digest.
 
+Signed R2 targets accept both the documented single-label endpoint and the
+Cloudflare virtual-hosted form `bucket.account-id.r2.cloudflarestorage.com`, with
+a bounded DNS bucket label and a 32-hex account ID. Virtual-hosted targets require
+the exact key as their path; path-style targets may include one bucket segment.
+Both forms require HTTPS, one valid signature, and the exact matching public
+object under `media.zernio.com`. Extra subdomains, credentials, fragments and
+mismatched object paths are rejected before transfer.
+
 `onReceipt` persists phases and the provider post ID as soon as received, including
 HTTP 207 platform failures. No raw provider errors, API keys, public media storage
 URLs or signed URLs appear in receipts. The adapter never automatically retries a
@@ -66,11 +74,17 @@ require reconciliation rather than another request. Idempotency is a provider
 duplicate safeguard, not authorization to replay uncertain mutations.
 
 `status({providerPostId, publicationId, renderSha256})` is GET only. It requires the
-exact account, target count, correlation metadata, public intent, no schedule/draft,
+exact account, target count, correlation metadata, public intent, no future schedule/draft,
 no removal marker, published platform state, exact native video ID/permalink and
 an effective publication timestamp. Native public/processed ownership is then
 observed before `confirmed:true`. Upload completion, generic provider `published`
 or a missing permalink never declares public delivery.
+
+Zernio may populate root and target `scheduledFor` with the immediate dispatch
+instant even for `publishNow:true`. Reconciliation accepts these timestamps only
+when they include a timezone, are valid, and do not exceed the post's valid
+creation time. A future schedule, missing creation evidence or malformed date
+remains unresolved. Native public/processed ownership is still required.
 
 The queue must keep native channel cadence, reservations and prior unknown attempts
 across route changes. Migration applies only to unstarted queued deliveries through
@@ -79,12 +93,70 @@ connection approval are completed by the owner. For a Brand Account the Google
 account chooser must select its Brand identity; Zernio documents no later channel
 picker. YouTube Studio-only editor permissions do not imply API ownership.
 
+## Delivery-specific metadata snapshot
+
+Shared episodes retain their original metadata, render and approval. YouTube may
+use a complete, separate presentation for one immediate PUBLIC Zernio delivery:
+
+```js
+import { normalizeYouTubeMetadata, youtubeMetadataHash } from '../src/publishing.mjs';
+
+const youtubeMetadata = normalizeYouTubeMetadata({
+  title: 'A Cat in the Light',
+  description: 'A miniature cat story with original nonverbal sound. #AIMeow',
+  tags: ['AIMeow', 'AIArt', 'MiniatureStory'],
+});
+const youtubeMetadataSha256 = youtubeMetadataHash(youtubeMetadata);
+const input = { episodeId, expectedReviewHash, privacy: 'public', madeForKids,
+  youtubeMetadata, youtubeMetadataSha256 };
+await publisher.preflight({ ...input, platform: 'youtube' });
+const { delivery } = await queue.enqueue({ ...input, platform: 'youtube', dueAt });
+await queue.runDue({ execute: true, platform: 'youtube',
+  expectedDeliveryId: delivery.id, youtubeMetadataSha256 });
+```
+
+The snapshot requires exactly `title`, `description` and an explicit `tags` array;
+it is a complete replacement, with no inherited hashtags or missing-field fallback.
+Strings are trimmed. Title is 1–100 characters on one line without angle brackets;
+description is 1–5,000 characters and UTF-8 bytes without angle brackets. Tags are
+nonempty strings of at most 100 characters each; the 500-character aggregate
+counts commas and quotes for tags containing whitespace. An empty tags array is
+valid. The hash is lowercase SHA256 over UTF-8 `JSON.stringify({ description,
+tags, title })` after normalization, preserving the tag order.
+
+`Publisher.preflight`, `publishYouTube`, `publishZernio` and `DeliveryQueue.enqueue`
+accept the snapshot/hash pair together. Persisted delivery and publication fields
+use the same names, and must already be normalized. The queue passes its stored
+snapshot into planning and reservation; it never accepts transient metadata in
+`runDue`. Its optional expected hash requires `platform:'youtube'` and the exact
+`expectedDeliveryId`, providing a compare-and-set guard before the claim. Claim,
+reservation, transport and provider receipt handling revalidate the binding.
+An unstarted reschedule requires both fields in `expectedClaim` when the delivery
+has a snapshot, alongside the existing exact claim fields. Reconciliation also
+requires the original snapshot binding.
+API-data purge/disconnection keeps the snapshot and hash as original local
+identity on both publications and deliveries; API identifiers and cached status
+still follow the existing removal rules. Retaining the snapshot never authorizes
+another upload or proves publication.
+
+Without the pair, historical behavior is unchanged. Partial, malformed, unbound
+or changed snapshots are rejected. Native Google uploads, other platforms,
+nonpublic visibility and provider scheduling do not support this override.
+The snapshot never changes `expectedReviewHash`, render/source fingerprints or
+shared approvals. Duplicate detection remains keyed to the episode and platform:
+another title, description or snapshot cannot create another publication or
+release a reserved/unknown attempt. Direct `publishYouTube`/`publishZernio` calls
+use the same pair and gates. Approval and rights, exact account binding, public
+visibility, synthetic disclosure and cadence remain required. Use a runtime
+containing this maintenance only after its exact GitHub Actions CI succeeds.
+
 Primary references consulted 2026-10-02:
 
 - [Zernio YouTube platform, fields, scopes and ownership](https://docs.zernio.com/platforms/youtube)
 - [Create post](https://docs.zernio.com/posts/create-post)
 - [Get post](https://docs.zernio.com/posts/get-post)
 - [Media uploads](https://docs.zernio.com/guides/media-uploads)
+- [Cloudflare R2 virtual-hosted endpoints](https://developers.cloudflare.com/r2/platform/release-notes/)
 - [Idempotency](https://docs.zernio.com/guides/idempotency)
 - [Public OpenAPI schemas](https://zernio.com/openapi.yaml)
 
