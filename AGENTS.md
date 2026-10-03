@@ -93,53 +93,25 @@ Quality, required checks and authorization are constraints, not token-saving opt
 - Keep a compact handoff for unfinished work. Memory changes require a direct
   user request. Do not write transient status into durable project rules.
 
-## AI Meow: one current policy
+## AI Meow: policy and specific APIs
 
-Read [the current AI Meow policy](studio/docs/ai-meow-operation.md) before media
-or release work. It is the sole editorial authority for the four local chats;
-old pilots, collection blueprints and handoffs are historical data. Do not copy
-its rules into other instructions. Technical docs describe specific API contracts,
-not universal editorial duration or publication-count requirements.
+The sole editorial contract is studio/docs/ai-meow-operation.md. Read it for
+media/release work; technical documents define only their specific API contracts.
+Load the role's relevant state selectively. History is evidence, not authority.
+Do not copy editorial decisions into other instructions or saved prompts.
 
-The owner's latest direction accepts AI imperfections without aesthetic rejection,
-discard, corrective retakes or per-video human approval. Direct future work before
-generation. Multiple distinct Shorts/regulars/compilations per cycle are authorized;
-publication uses the effective transactional channel cadence. No completed master,
-96-scene selection or 8/12-minute minimum is required to create a regular video.
-Read the policy for modes, shared generation, repetition and cadence decisions.
+Runtime records bind exact files, rights, provenance, costs, review hashes and
+account/provider identity. Never fabricate consent, playback, audition or public
+publication. Use Studio/Production/Publisher and transactional records, not manual
+canonical-store edits. Recover unknown external operations by read-only evidence,
+without blind retries, deleting reservations or migrating started deliveries.
+Generation and heavy assembly are remote; tests are exclusively GitHub Actions.
+Use fragment composition for independent packages; deriveShort and collection
+workers retain their specialized contracts without defining editorial prerequisites.
 
-## Executable Studio contracts
-
-- `studio/` is an independent Node ESM MCP package; the historical root CLI remains
-  intact. `studio/README.md` routes setup and specific implementation contracts.
-- Runtime approval remains bound to the exact content/asset hashes and truthful
-  evidence. Record owner-accepted imperfections; never invent watching/listening,
-  facts, commercial rights or human consent. If a gate cannot represent the current
-  authorized operation, request concrete maintenance, not an aesthetic retake.
-- Original/synthetic media need recorded provenance and model/input commercial
-  rights. Trend metadata is research, not permission to copy source footage.
-- Reserve paid work before external calls, preserve estimated and actual costs
-  separately, use RemoteBatch/Production for imports and recover unknown outcomes
-  without blindly repeating mutations. Never hand-edit the canonical store.
-- All AI Meow sends target PUBLIC visibility on the authorized AI Meow account
-  through the configured API. Giovanni explicitly authorized Zernio for TikTok
-  and YouTube; it is a separate opt-in provider route, not an audit override or
-  implicit fallback. Facebook stays on the owned Graph integration. No private,
-  unlisted or browser posting. Synthetic disclosure and account preflight remain required.
-- YouTube OAuth is separate from public API audit approval. Facebook targets its
-  authorized Page and verifies processing/ownership. TikTok's private session REST
-  experiment is separate from official Direct Post and Zernio; follow
-  `studio/docs/tiktok-session-rest.md`, keep cookies outside Git, stop on challenges
-  and unknown post outcomes. Kwai exports for manual use until an authorized route
-  exists; mainland Kuaishou is not evidence for international Kwai.
-- Zernio's two free connections are reserved for AI Meow TikTok and YouTube.
-  Read `studio/docs/tiktok-zernio.md` and `studio/docs/youtube-zernio.md`.
-  Preserve old attempts and explicitly migrate only proved unstarted deliveries.
-  Never assert provider-required owner preview/consent from an unobserved render.
-- Scheduled operations, exports, uploads and processing are not confirmed public
-  publications. Reconcile exact receipts, visibility and account before success.
-  Channel cadence counts all formats/projects and reservations; read/update via
-  domain APIs. A legacy worker's 96/720 contract does not constrain other routes.
-- Local chats require Mac/Codex availability. Cloud transport is documented in
-  `studio/docs/cloud-mcp.md` but does not authorize migration or duplicate writers;
-  credentials remain private and ownership must be reconciled before transfer.
+AI Meow's current technical routes: Facebook Graph; TikTok/YouTube opted-in
+Zernio; Kwai manual exports. Their specific contracts are in studio/docs/.
+Keep credentials outside source/prompts/logs. Local sessions remain on this Mac;
+cloud transport does not authorize migration or a second publishing writer.
+Changes to active chat prompts, schedules or runtimes require the owner's explicit
+request. Prepare and verify changes separately until that request is given.

@@ -113,7 +113,7 @@ test('HTTP cloud transport negotiates OAuth and isolates read/write/publish gran
   };
   const read = await clientFor('ytfun/read');
   const tools = await read.listTools();
-  assert.equal(tools.tools.length, 44);
+  assert.equal(tools.tools.length, 46);
   assert.deepEqual(tools.tools.find(x => x.name === 'ytfun_facebook_publish')._meta.securitySchemes,
     [{ type: 'oauth2', scopes: ['ytfun/publish'] }]);
   assert.deepEqual(tools.tools.find(x => x.name === 'ytfun_tiktok_publish')._meta.securitySchemes,
@@ -122,6 +122,8 @@ test('HTTP cloud transport negotiates OAuth and isolates read/write/publish gran
     assert.deepEqual(tools.tools.find(x => x.name === name)._meta.securitySchemes,
       [{ type: 'oauth2', scopes: ['ytfun/publish'] }]);
   }
+  assert.deepEqual(tools.tools.find(tool => tool.name === 'ytfun_episode_compose')._meta.securitySchemes, [{ type: 'oauth2', scopes: ['ytfun/write'] }]);
+  assert.deepEqual(tools.tools.find(tool => tool.name === 'ytfun_publication_metadata_prepare')._meta.securitySchemes, [{ type: 'oauth2', scopes: ['ytfun/read'] }]);
   const profile = await read.callTool({ name: 'ytfun_cloud_profile', arguments: {} });
   assert.ok(!profile.isError);
   assert.ok(!JSON.stringify(profile).includes('private-provider-secret'));

@@ -8,6 +8,7 @@ import { z } from 'zod';
 import { TIKTOK_PREVIEW_ACTOR_PATTERN } from './tiktok-zernio-attestation.mjs';
 import { StudioStore } from './store.mjs';
 import { Studio } from './domain.mjs';
+import { FragmentComposition } from './fragment-composition.mjs';
 import { Production, videoParametersSchema, imageParametersSchema } from './production.mjs';
 import { Publisher } from './publishing.mjs';
 import { Research } from './research.mjs';
@@ -17,6 +18,7 @@ import { YouTubeDataLifecycle } from './youtube-data.mjs';
 import { requiredToolScope, toolAuthorizationFailure } from './mcp-auth.mjs';
 import { loadPrivateEnvironment } from './private-environment.mjs';
 import { approvalReviewSchema } from './review-policy.mjs';
+import { normalizePublicationMetadata, publicationMetadataHash } from './publication-metadata.mjs';
 
 const id = z.string().uuid();
 const text = z.string().trim().min(1).max(10_000);
@@ -34,17 +36,23 @@ const tiktokPreviewAttestation = z.union([
     previewActorId: z.string().regex(TIKTOK_PREVIEW_ACTOR_PATTERN), previewMethod: z.literal('visual_playback'), authorityEvidenceSha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
 ]);
 const metadata = z.object({ description: z.string().max(5000), hashtags: z.array(z.string().trim().min(1).max(60).regex(/^#[\p{L}\p{N}_]+$/u)).max(8) });
+const publicationMetadataSchema = z.object({ title: z.string().min(1).max(100), description: z.string().max(5000),
+  hashtags: z.array(z.string().min(1).max(60)).max(8), tags: z.array(z.string().min(1).max(100)) }).strict();
+const publicationMetadataFields = { publicationMetadata: publicationMetadataSchema.optional(), publicationMetadataSha256: z.string().regex(/^[a-f0-9]{64}$/).optional() };
+const legacyYouTubeMetadataFields = { youtubeMetadata: z.object({ title: z.string().min(1).max(100), description: z.string().min(1).max(5000), tags: z.array(z.string().min(1).max(100)) }).strict().optional(),
+  youtubeMetadataSha256: z.string().regex(/^[a-f0-9]{64}$/).optional() };
 const assetProvenance = z.object({ provider: text, model: text, prompt: text, commercialLicense: license, synthetic: z.literal(true) });
 const generationSchema = {
   episodeId: id, sceneId: id, kind, model: z.string().trim().min(1).max(200), provider: z.string().trim().min(1).max(100), prompt: text.optional(), estimatedCostUsd: z.number().finite().nonnegative(), pricingSourceUrl: url, commercialLicense: license, acknowledgePaidCost: z.boolean().default(false),
   videoParameters: videoParametersSchema.optional(), imageParameters: imageParametersSchema.optional(), referenceImageAssetId: id.optional(), endReferenceImageAssetId: id.optional(), resumeReservationId: id.optional(),
 };
 
-export function createServer({ directory = process.env.YTFUN_STUDIO_DIR, env = process.env, fetchImpl = fetch, store, studio, production, publisher, research, jobs, youtubeLifecycle, startBackgroundWorkers = true, remoteAuth } = {}) {
+export function createServer({ directory = process.env.YTFUN_STUDIO_DIR, env = process.env, fetchImpl = fetch, store, studio, production, publisher, research, jobs, compositions, youtubeLifecycle, startBackgroundWorkers = true, remoteAuth } = {}) {
   if (!directory && !store) throw new Error('YTFUN_STUDIO_DIR is required; use a private persistent absolute path');
   store ??= new StudioStore(directory);
   youtubeLifecycle ??= new YouTubeDataLifecycle(store, { env, fetchImpl });
   studio ??= new Studio(store, { env });
+  compositions ??= new FragmentComposition(store, { env });
   production ??= new Production(store, { env });
   publisher ??= new Publisher(store, { env, fetchImpl: youtubeLifecycle.fetch, youtubeAuth: youtubeLifecycle.auth });
   research ??= new Research(studio, { env, fetchImpl: youtubeLifecycle.fetch, youtubeAuth: youtubeLifecycle.auth, youtubeLifecycle });
@@ -74,26 +82,32 @@ export function createServer({ directory = process.env.YTFUN_STUDIO_DIR, env = p
     });
   };
 
-  if (remoteAuth) register('ytfun_cloud_profile', 'Identify the authenticated private AI Meow studio and distinguish actual publishing integrations from export-only routes. Never returns provider credentials.', {}, () => ({
+  if (remoteAuth) register('ytfun_cloud_profile', 'Identify the authenticated private AI Meow studio and distinguish configured API integrations from export-only routes. Configuration is not live authorization or publication. Never returns provider credentials.', {}, () => {
+    const capabilities = publisher.capabilities();
+    const tiktokZernioSelected = env.YTFUN_TIKTOK_ZERNIO_PUBLISH_ENABLED === 'true';
+    const tiktokSessionSelected = !tiktokZernioSelected && env.YTFUN_TIKTOK_SESSION_PUBLISH_ENABLED === 'true';
+    return {
     name: 'AI Meow', cloudAuthenticated: true, publishing: {
       youtube: { channelId: env.YOUTUBE_CHANNEL_ID ?? null, oauthConfigured: Boolean(env.YOUTUBE_REFRESH_TOKEN || env.YOUTUBE_ACCESS_TOKEN),
+        route: env.YTFUN_YOUTUBE_ZERNIO_PUBLISH_ENABLED === 'true' ? 'zernio' : 'official_api',
         publicApiEnabled: env.YTFUN_YOUTUBE_PUBLIC_ENABLED === 'true', apiAuditConfirmed: env.YTFUN_YOUTUBE_AUDIT_CONFIRMED === 'true' },
       facebook: { pageId: env.FACEBOOK_PAGE_ID ?? null, officialApiConfigured: Boolean(env.FACEBOOK_PAGE_ACCESS_TOKEN), enabled: env.YTFUN_FACEBOOK_PUBLISH_ENABLED === 'true' },
-      tiktok: { accountId: env.TIKTOK_ACCOUNT_ID ?? null, route: env.YTFUN_TIKTOK_SESSION_PUBLISH_ENABLED === 'true' ? 'experimental_session_rest' : 'creator-export',
-        sessionRestConfigured: env.YTFUN_TIKTOK_SESSION_PUBLISH_ENABLED === 'true', remoteAuthorizationVerified: false, automaticPosting: false },
+      tiktok: { accountId: env.TIKTOK_ACCOUNT_ID ?? null, route: tiktokZernioSelected ? 'zernio' : tiktokSessionSelected ? 'experimental_session_rest' : 'creator-export',
+        sessionRestConfigured: tiktokSessionSelected, remoteAuthorizationVerified: false,
+        automaticPosting: Boolean(tiktokZernioSelected ? capabilities.tiktokZernio?.ready : tiktokSessionSelected && capabilities.tiktokSession?.ready) },
     }, backgroundDeliveryWorker: false,
-  }), { readOnly: true });
+  }; }, { readOnly: true });
 
   register('ytfun_overview', 'Read studio projects, production and publication states. Uploaded, scheduled, exported and published are distinct.', {}, async () => {
     const state = await store.read();
-    return { schemaVersion: state.schemaVersion, projects: state.projects, episodes: state.episodes.map(episode => ({ id: episode.id, projectId: episode.projectId, title: episode.title, status: episode.status, format: episode.format ?? 'short', durationSeconds: episode.scenes.reduce((sum, scene) => sum + scene.durationSeconds, 0), ...(episode.derivation ? { derivation: episode.derivation } : {}), render: episode.render, approval: episode.approval })), publications: state.publications, deliveries: state.deliveries ?? [], spending: state.spending, constraints: ['Only original synthetic source media', 'Free-first; cost estimates are not invoices', 'TikTok and Kwai export packages require creator publication', 'No guarantee of views, distribution or revenue'] };
+    return { schemaVersion: state.schemaVersion, projects: state.projects, episodes: state.episodes.map(episode => ({ id: episode.id, projectId: episode.projectId, title: episode.title, status: episode.status, format: episode.format ?? 'short', durationSeconds: episode.scenes.reduce((sum, scene) => sum + scene.durationSeconds, 0), ...(episode.derivation ? { derivation: episode.derivation } : {}), render: episode.render, approval: episode.approval })), publications: state.publications, deliveries: state.deliveries ?? [], spending: state.spending, distribution: publisher.capabilities(), constraints: ['Only original synthetic source media', 'Optimize total cost per reused output; estimates are not invoices', 'Configured API routes require exact-account preflight and confirmed public receipts; exports are not publications', 'No guarantee of views, distribution or revenue'] };
   }, { readOnly: true });
-  register('ytfun_project_create', 'Persist an agreed original AI series: premise, audience, continuity and editorial cadence. Do not create an approved project before the user agrees to the concept.', {
+  register('ytfun_project_create', 'Persist an original AI series within the current owner-authorized scope: premise, audience, continuity and editorial cadence. Follow the active operation policy for delegated concept decisions.', {
     title: z.string().trim().min(1).max(160), premise: text, audience: text, language: z.string().min(2).max(30), continuity: text.optional(), mode: z.enum(['fiction', 'factual']).default('fiction'),
     cadence: cadence.optional(),
     budgetMonthlyUsd: z.number().finite().nonnegative().nullable().optional(),
   }, input => studio.createProject(input));
-  register('ytfun_project_list', 'Read agreed series before proposing episodes. No automatically invented projects.', {}, () => studio.listProjects(), { readOnly: true });
+  register('ytfun_project_list', 'Read registered series and current scope before planning original episodes or new authorized concepts.', {}, () => studio.listProjects(), { readOnly: true });
   register('ytfun_project_cadence_update', 'Change an authorized editorial cadence experiment with a recorded reason and expected previous policy. Existing uploads, reservations and account-wide cadence checks remain intact.', {
     projectId: id,
     cadence, expectedCadence: cadence,
@@ -109,9 +123,14 @@ export function createServer({ directory = process.env.YTFUN_STUDIO_DIR, env = p
     scenes: z.array(z.object({ durationSeconds: z.number().min(1).max(60), narration: z.string().trim().max(10_000).default(''), visualPrompt: text })).min(1).max(120), metadata,
     trendIds: z.array(id).max(20).optional(), factualSources: z.array(z.object({ claim: text, url })).max(40).optional(),
   }, input => studio.planEpisode(input));
-  register('ytfun_episode_derive_short', 'Create a planned, unapproved short from 1–12 unique scenes of a valid rendered long episode, in source order and at most 180 seconds. Copies/remaps original synthetic asset records with provenance, lineage and planned source time ranges; does not render, crop the master, approve or publish. Select a complete standalone story and supply distinct metadata. Duplicate source selections and unrelated near duplicates remain blocked.', {
+  register('ytfun_episode_derive_short', 'Specialized legacy derivation from 1–12 unique scenes of a valid rendered long episode, in source order and at most 180 seconds. Use ytfun_episode_compose to combine existing short or long audiovisual fragments without requiring a master. Copies/remaps original synthetic asset records with provenance, lineage and planned source time ranges; does not render, crop the master, approve or publish. Select a complete standalone story and supply distinct metadata. Exact repeated source selections remain blocked; textual similarity is advisory.', {
     parentEpisodeId: id, sceneIds: z.array(id).min(1).max(12), title: z.string().trim().min(1).max(100), hook: text, synopsis: text, originalAngle: text, continuityNote: text.optional(), metadata,
   }, input => studio.deriveShort(input));
+  register('ytfun_episode_compose', 'Plan a reusable composition from complete existing nonverbal audiovisual scenes, including short or long sources. Preserves exact hashes, original audio, commercial rights and ordered source lineage. No master, new inference, render, approval or publication occurs; complete scene selection only. A repeated exact definition reuses its canonical episode.', {
+    projectId: id, sources: z.array(z.object({ episodeId: id, expectedRenderSha256: z.string().regex(/^[a-f0-9]{64}$/), sceneIds: z.array(id).min(1).max(120) }).strict()).min(1).max(120),
+    format: z.enum(['short', 'long']).default('short'), renderCanvas: z.enum(['portrait', 'landscape']).default('portrait'),
+    title: z.string().trim().min(1).max(100), hook: text, synopsis: text, originalAngle: text, continuityNote: text.optional(), metadata,
+  }, input => compositions.plan(input));
   register('ytfun_episode_get', 'Read full episode, scene IDs and linked asset provenance before producing or reviewing.', { episodeId: id }, async ({ episodeId }) => ({ episode: await studio.getEpisode(episodeId), assets: (await store.read()).assets.filter(asset => asset.episodeId === episodeId) }), { readOnly: true });
   register('ytfun_episode_review', 'Run structural editorial checks; this cannot watch a render or establish originality or monetization eligibility.', { episodeId: id }, ({ episodeId }) => studio.editorialReview(episodeId), { readOnly: true });
   register('ytfun_asset_generate', 'Generate one original image, speech or video with remote Hugging Face inference. imageParameters controls bounded image dimensions, steps and seed. referenceImageAssetId animates a synthetic image from the same episode and scene with imageToVideo. endReferenceImageAssetId supplies a validated final image only for fal-ai Wan2.2-I2V-A14B with an initial reference; both images retain license, hash, snapshot and lineage. FILM requires one interpolated frame and adjust_fps_for_interpolation=true to preserve duration. Requires model/provider/license/pricing evidence. A zero estimate does not establish free usage. Paid calls require per-call acknowledgment and a runtime enable flag. resumeReservationId retrieves an existing fal-ai video receipt with GET only, matching original inputs; pending does not create an asset. Prefer ytfun_production_job_start for slow generations.', generationSchema, input => production.generateAsset(input), { external: true });
@@ -129,31 +148,32 @@ export function createServer({ directory = process.env.YTFUN_STUDIO_DIR, env = p
   register('ytfun_episode_approve', 'Bind truthful review to this exact render and metadata. Watched review is the default. Explicit owner_accepted_technical mode may record renderWatched=false with structured owner acceptance and technical checks only when its runtime flag is enabled. Originality, facts, licenses, files and provider gates remain mandatory; never invent watching or consent.', {
     episodeId: id, review: approvalReviewSchema,
   }, input => studio.approveEpisode(input));
-  register('ytfun_publish_plan', 'Read readiness, review hash, channel-wide cadence and release blockers without uploading. Choose privacy explicitly. Scheduling public release requires audit/release flags.', { episodeId: id, platform, privacy: z.enum(['private', 'unlisted', 'public']), publishAt: z.iso.datetime().optional() }, input => publisher.preflight(input), { readOnly: true });
-  register('ytfun_youtube_publish', 'Upload the exact reviewed synthetic video through the selected YouTube API provider. Zernio is immediate public-only; own OAuth audit gates remain on the own-app route. Unknown outcomes stay reserved, with GET-only reconciliation.', { episodeId: id, privacy: z.enum(['private', 'unlisted', 'public']), publishAt: z.iso.datetime().optional(), expectedReviewHash: z.string().regex(/^[a-f0-9]{64}$/), madeForKids: z.boolean(), execute: z.boolean().default(false) }, input => publisher.publishYouTube(input), { external: true });
+  register('ytfun_publication_metadata_prepare', 'Normalize complete per-network presentation and return its exact SHA256. Does not change shared episodes, approve media or post. Include this snapshot in the network preview/claim and publish call.', { platform: z.enum(['youtube', 'facebook', 'tiktok']), publicationMetadata: publicationMetadataSchema }, ({ platform, publicationMetadata }) => { const normalized = normalizePublicationMetadata(publicationMetadata, platform); return { publicationMetadata: normalized, publicationMetadataSha256: publicationMetadataHash(normalized, platform) }; }, { readOnly: true });
+  register('ytfun_publish_plan', 'Read readiness, review hash, channel-wide cadence and release blockers without uploading. Choose privacy explicitly. Scheduling public release requires audit/release flags.', { episodeId: id, platform, privacy: z.enum(['private', 'unlisted', 'public']), publishAt: z.iso.datetime().optional(), ...publicationMetadataFields, ...legacyYouTubeMetadataFields }, input => publisher.preflight(input), { readOnly: true });
+  register('ytfun_youtube_publish', 'Upload the exact reviewed synthetic video through the selected YouTube API provider. Zernio is immediate public-only; own OAuth audit gates remain on the own-app route. Unknown outcomes stay reserved, with GET-only reconciliation.', { episodeId: id, privacy: z.enum(['private', 'unlisted', 'public']), publishAt: z.iso.datetime().optional(), expectedReviewHash: z.string().regex(/^[a-f0-9]{64}$/), madeForKids: z.boolean(), execute: z.boolean().default(false), ...publicationMetadataFields, ...legacyYouTubeMetadataFields }, input => publisher.publishYouTube(input), { external: true });
   register('ytfun_youtube_publication_sync', 'Verify an owned uploaded video through YouTube before declaring it published. Public privacy plus processed upload are required. Does not retry uploads or guess a receipt for unknown attempts.', { publicationId: id }, input => publisher.syncPublication(input), { external: true });
   register('ytfun_youtube_data_maintenance', 'Preview or execute removal of expired YouTube API snapshots. Preserves original media and local dedupe blocks; never resets an upload or deletes a YouTube video.', { execute: z.boolean().default(false) }, input => youtubeLifecycle.maintenance(input));
   register('ytfun_youtube_disconnect', 'Preview personal-account disconnect and data deletion. execute=true requires the exact channel ID, revokes every Google OAuth scope for this project, removes stored YouTube data/tokens, cancels unstarted deliveries and preserves local upload blocks. Backups/AI host transcripts require separate deletion; existing YouTube videos remain.', { execute: z.boolean().default(false), expectedChannelId: z.string().min(1).max(100).optional() }, input => youtubeLifecycle.disconnect(input), { external: true });
   register('ytfun_tiktok_export', 'Export the reviewed vertical video, caption/hashtags, disclosure and subtitles for posting through a permitted TikTok workflow. Exported is not posted. No Direct Post bypass.', { episodeId: id, expectedReviewHash: z.string().regex(/^[a-f0-9]{64}$/) }, input => publisher.exportTikTok(input));
-  register('ytfun_tiktok_publish', 'Publish exact reviewed media through the explicitly selected TikTok API provider. Zernio additionally requires actual owner preview and express consent. Public only, identity/cadence required, no automatic retry. Upload receipts are not public posts.', { episodeId: id, expectedReviewHash: z.string().regex(/^[a-f0-9]{64}$/), privacy: z.literal('public'), execute: z.boolean().default(false) }, input => publisher.publishTikTok(input), { external: true });
+  register('ytfun_tiktok_publish', 'Publish exact reviewed media through the explicitly selected TikTok API provider. Zernio additionally requires a real exact-render preview by the owner or an explicitly authorized agent and truthful owner-authorized consent; standing authority does not establish playback. Public only, identity/cadence required, no automatic retry. Upload receipts are not public posts.', { episodeId: id, expectedReviewHash: z.string().regex(/^[a-f0-9]{64}$/), privacy: z.literal('public'), execute: z.boolean().default(false), ...publicationMetadataFields }, input => publisher.publishTikTok(input), { external: true });
   register('ytfun_tiktok_publication_sync', 'Reconcile an existing TikTok REST receipt using GET only. Requires actual owned public item evidence; never repeats an upload or post.', { publicationId: id }, input => publisher.syncTikTok(input), { external: true });
   register('ytfun_distribution_capabilities', 'Read implemented delivery modes, configuration gaps and official platform constraints. Does not reveal tokens or confirm live authorization.', {}, () => publisher.capabilities(), { readOnly: true });
-  register('ytfun_facebook_publish', 'Publish a reviewed synthetic Page video through official Meta APIs. Explicit long episodes use Page Video; short/default episodes retain Reels 4–60s. Explicit public privacy and execute=true are required. Processing is not confirmed publication.', { episodeId: id, expectedReviewHash: z.string().regex(/^[a-f0-9]{64}$/), privacy: z.literal('public'), execute: z.boolean().default(false) }, input => publisher.publishFacebook(input), { external: true });
+  register('ytfun_facebook_publish', 'Publish a reviewed synthetic Page video through official Meta APIs. Explicit long episodes use Page Video; short/default episodes retain Reels 4–60s. Explicit public privacy and execute=true are required. Processing is not confirmed publication.', { episodeId: id, expectedReviewHash: z.string().regex(/^[a-f0-9]{64}$/), privacy: z.literal('public'), execute: z.boolean().default(false), ...publicationMetadataFields }, input => publisher.publishFacebook(input), { external: true });
   register('ytfun_facebook_publication_sync', 'Check a Facebook receipt through its original upload route, Page ownership and completed processing. Long Page Video also requires an official returned permalink. Does not repeat uploads.', { publicationId: id }, input => publisher.syncFacebook(input), { external: true });
   register('ytfun_kwai_export', 'Export the reviewed video, metadata and AI disclosure guidance for international Kwai. A Kuaishou API is not evidence of international Kwai support; export is not publication.', { episodeId: id, expectedReviewHash: z.string().regex(/^[a-f0-9]{64}$/) }, input => publisher.exportPackage({ ...input, platform: 'kwai' }));
-  register('ytfun_delivery_enqueue', 'Authorize one reviewed delivery for a selected account and due time. Uses the explicitly configured provider, exact account binding and cadence. Zernio is public-only; exports are not publications. Queue time is not provider scheduling. Call separately for each distinct eligible work.', { episodeId: id, platform, expectedReviewHash: z.string().regex(/^[a-f0-9]{64}$/), privacy: z.enum(['private', 'unlisted', 'public']), madeForKids: z.boolean().optional(), dueAt: z.iso.datetime() }, input => deliveries.enqueue(input));
+  register('ytfun_delivery_enqueue', 'Authorize one reviewed delivery for a selected account and due time. Uses the explicitly configured provider, exact account binding and cadence. Zernio is public-only; exports are not publications. Queue time is not provider scheduling. Call separately for each distinct eligible work.', { episodeId: id, platform, expectedReviewHash: z.string().regex(/^[a-f0-9]{64}$/), privacy: z.enum(['private', 'unlisted', 'public']), madeForKids: z.boolean().optional(), dueAt: z.iso.datetime(), ...publicationMetadataFields, ...legacyYouTubeMetadataFields }, input => deliveries.enqueue(input));
   register('ytfun_zernio_delivery_migrate', 'Explicitly move only a proved unstarted public YouTube/TikTok claim to the authorized Zernio account. Preserves due time and media hashes. Rejects all provider reservations, running claims and unknown attempts.', { deliveryId: id, expectedMode: z.enum(['official_api', 'experimental_session_rest']), expectedReviewHash: z.string().regex(/^[a-f0-9]{64}$/), reason: z.string().min(1).max(1000) }, input => deliveries.migrateUnstartedToZernio(input), { external: true });
   register('ytfun_tiktok_zernio_consent_record', 'Record a real exact-render TikTok preview by the owner or an authorized Codex delegate. Delegated playback requires the explicitly enabled standing-authority hash and real observation evidence. Never claim the owner watched or infer playback from technical approval.', { episodeId: id, expectedReviewHash: z.string().regex(/^[a-f0-9]{64}$/),
-    attestation: tiktokPreviewAttestation,
+    ...publicationMetadataFields, attestation: tiktokPreviewAttestation,
     interactionSettings: z.object({ allow_comment: z.boolean(), allow_duet: z.boolean(), allow_stitch: z.boolean() }) }, input => publisher.recordTikTokZernioConsent(input));
   register('ytfun_delivery_list', 'Read persistent queued, running, completed and attention deliveries. Interrupted attempts are never replayed automatically.', {}, () => deliveries.list(), { readOnly: true });
-  register('ytfun_delivery_run_due', 'Preview or execute one due delivery. Per-platform workers must select their platform. API uploads have external effects; creator exports remain distinct from public posts.', { execute: z.boolean().default(false), platform: platform.optional() }, input => deliveries.runDue(input), { external: true });
+  register('ytfun_delivery_run_due', 'Preview or execute one due delivery. Per-platform workers must select their platform. API uploads have external effects; creator exports remain distinct from public posts.', { execute: z.boolean().default(false), platform: platform.optional(), expectedDeliveryId: id.optional(), publicationMetadataSha256: z.string().regex(/^[a-f0-9]{64}$/).optional() }, input => deliveries.runDue(input), { external: true });
   register('ytfun_delivery_cancel', 'Cancel an unstarted queued delivery; never cancels or deletes provider media.', { deliveryId: id }, input => deliveries.cancel(input));
   register('ytfun_delivery_reschedule', 'Re-time an exact unstarted delivery after current media/account/provider preflight. Preserves its ID and history; never resets an unknown or reserved provider attempt. Separate from publishing and provider scheduling.', {
     deliveryId: id, expectedClaim: z.object({ dueAt: z.iso.datetime(), platform, privacy: z.enum(['private', 'unlisted', 'public']), madeForKids: z.boolean().nullable(),
       reviewHash: z.string().regex(/^[a-f0-9]{64}$/), renderSha256: z.string().regex(/^[a-f0-9]{64}$/),
       accountId: z.string().trim().min(1).max(128), mode: z.enum(['official_api', 'experimental_session_rest', 'creator_export', 'zernio']),
-      providerAccountId: z.string().regex(/^[a-f0-9]{24}$/).nullable(), bindingSha256: z.string().regex(/^[a-f0-9]{64}$/).nullable() }).strict(),
+      providerAccountId: z.string().regex(/^[a-f0-9]{24}$/).nullable(), bindingSha256: z.string().regex(/^[a-f0-9]{64}$/).nullable(), ...publicationMetadataFields, ...legacyYouTubeMetadataFields }).strict(),
     dueAt: z.iso.datetime(), reason: z.string().trim().min(1).max(1000),
   }, input => deliveries.rescheduleUnstarted(input));
   register('ytfun_delivery_reconcile', 'Close an interrupted delivery only after its exact publication receipt is reconciled and the operator verifies the original worker is stopped. Never resets unknown attempts for retry.', { deliveryId: id, workerStopped: z.literal(true), confirmedBy: text, evidence: text }, input => deliveries.reconcile(input));
