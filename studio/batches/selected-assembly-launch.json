@@ -1,7 +1,7 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "type": "selected-assembly",
-  "batchId": "d70e5819-8710-483b-a46c-ac1642fc62e5",
-  "episodeId": "7e044944-a023-4a50-b2a0-7d1373b92c0a",
-  "packetSha256": "57ef9112798727c49d640e11b09350db56594c2a03b54114f71126e709d37c1f"
+  "batchId": "bec7086f-e58a-4d19-a938-b53f3009e910",
+  "episodeId": "81433e27-bd51-41f8-b170-98de9fddcf3d",
+  "packetSha256": "e4b8f9eccc72185abf127af07bc40e431fb24c287cee81b835c3022f0b79509c"
 }
