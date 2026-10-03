@@ -10,6 +10,11 @@ const TARGET_PEAK = 0.76;
 const TEXTURE_PEAK = 0.18;
 const TAU = 2 * Math.PI;
 const REFERENCE_DURATION = 7.5;
+const SHARED_TEXTURES = {
+  'warm-room': { low: 45, color: 520, width: 0.16, texture: 'Quiet warm room texture with a soft onset and settled ending, without timed or synchronized effects.' },
+  'wax-road': { low: 180, color: 2400, width: 0.14, texture: 'Fine dry wax and paper texture with a soft onset and settled ending, without timed or synchronized effects.' },
+  'wood-room': { low: 90, color: 1100, width: 0.12, texture: 'Soft wooden miniature room texture with a soft onset and settled ending, without timed or synchronized effects.' },
+};
 const PROFILES = {
   elemental: { contact: 740, body: 72, modes: [181, 307, 491], reveal: [146, 220, 293, 440], roughness: 0.95, cutoff: 1650, particles: 8, particleFrequency: 1250, sweep: -35, width: 0.18 },
   cosmic: { contact: 410, body: 47, modes: [83, 139, 227], reveal: [98, 147, 196, 294], roughness: 0.36, cutoff: 760, particles: 5, particleFrequency: 1640, sweep: 55, width: 0.42 },
@@ -37,7 +42,7 @@ function normalized(input) {
   const { durationSeconds, seed, audioProfile } = input;
   if (!Number.isFinite(durationSeconds) || durationSeconds < 3 || durationSeconds > 30) throw new Error('durationSeconds must be finite and between 3 and 30 seconds');
   if (!Number.isInteger(seed) || seed < 0 || seed > 0xffffffff) throw new Error('seed must be an unsigned 32-bit integer');
-  if (audioProfile !== undefined && !['cloth-rest', 'quiet-water'].includes(audioProfile)) throw new Error('audioProfile must be cloth-rest or quiet-water when supplied');
+  if (audioProfile !== undefined && !['cloth-rest', 'quiet-water', ...Object.keys(SHARED_TEXTURES)].includes(audioProfile)) throw new Error('audioProfile must be a supported original texture when supplied');
   return { durationSeconds, seed, genre: text(input.genre, 'genre', 160), title: text(input.title, 'title', 300),
     ...(audioProfile ? { audioProfile } : {}) };
 }
@@ -62,9 +67,9 @@ export function describeSphereAudio(input) {
     sampleRate: SAMPLE_RATE, channels: CHANNELS, bitsPerSample: BITS_PER_SAMPLE,
     peakLimit: TEXTURE_PEAK, originalProcedural: true,
     construction: { recordedSamples: false, speechSynthesis: false, textAudio: false, modelCalls: false, synchronizedEffects: false },
-    texture: profile === 'quiet-water'
+    texture: SHARED_TEXTURES[profile]?.texture ?? (profile === 'quiet-water'
       ? 'Continuous gently drifting water and wind texture, soft onset and calm ending; no contact, fracture or reveal accents.'
-      : 'Continuous soft filtered noise, gentle onset and a calm fade into rest; no contact, fracture or reveal accents.',
+      : 'Continuous soft filtered noise, gentle onset and a calm fade into rest; no contact, fracture or reveal accents.'),
   };
   const scale = options.durationSeconds / REFERENCE_DURATION;
   return {
@@ -126,8 +131,9 @@ function continuousTextureAudio(options, digest) {
   const random = randomSource((options.seed ^ digest.readUInt32LE(0)) >>> 0);
   const left = new Float64Array(frames); const right = new Float64Array(frames);
   const water = options.audioProfile === 'quiet-water';
-  const lowCoefficient = 1 - Math.exp(-TAU * (water ? 120 : 70) / SAMPLE_RATE);
-  const colorCoefficient = 1 - Math.exp(-TAU * (water ? 1650 : 850) / SAMPLE_RATE);
+  const texture = SHARED_TEXTURES[options.audioProfile];
+  const lowCoefficient = 1 - Math.exp(-TAU * (texture?.low ?? (water ? 120 : 70)) / SAMPLE_RATE);
+  const colorCoefficient = 1 - Math.exp(-TAU * (texture?.color ?? (water ? 1650 : 850)) / SAMPLE_RATE);
   const tailSilence = 0.025;
   const envelope = frame => {
     const time = frame / SAMPLE_RATE;
@@ -144,7 +150,7 @@ function continuousTextureAudio(options, digest) {
     colorShared += colorCoefficient * (commonNoise - colorShared);
     lowLeft += lowCoefficient * (leftNoise - lowLeft); colorLeft += colorCoefficient * (leftNoise - colorLeft);
     lowRight += lowCoefficient * (rightNoise - lowRight); colorRight += colorCoefficient * (rightNoise - colorRight);
-    const width = water ? 0.28 : 0.2;
+    const width = texture?.width ?? (water ? 0.28 : 0.2);
     const drift = water ? 0.9 + 0.1 * Math.sin(TAU * 0.35 * frame / SAMPLE_RATE) : 1;
     const shared = (colorShared - lowShared) * (1 - width);
     left[frame] = (shared + (colorLeft - lowLeft) * width) * drift;

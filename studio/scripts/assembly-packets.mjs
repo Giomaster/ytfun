@@ -22,7 +22,7 @@ const remoteRequest = z.object({
 
 const audioSchema = z.object({
   schemaVersion: z.literal(1), type: z.literal('audio'), id: uuid, episodeId: uuid,
-  scenes: z.array(z.object({ index: z.number().int().min(1).max(SCENE_COUNT), sceneId: uuid, title: label(160), genre: label(80), seed: z.number().int().min(0).max(0xffffffff), durationSeconds: z.literal(SCENE_SECONDS), audioProfile: z.enum(['cloth-rest', 'quiet-water']).optional() }).strict()).min(1).max(SCENE_COUNT),
+  scenes: z.array(z.object({ index: z.number().int().min(1).max(SCENE_COUNT), sceneId: uuid, title: label(160), genre: label(80), seed: z.number().int().min(0).max(0xffffffff), durationSeconds: z.literal(SCENE_SECONDS), audioProfile: z.enum(['cloth-rest', 'quiet-water', 'warm-room', 'wax-road', 'wood-room']).optional() }).strict()).min(1).max(SCENE_COUNT),
 }).strict();
 const manifestSchema = z.object({
   schemaVersion: z.literal(1), episodeId: uuid, format: z.literal('long'), audioMode: z.literal('nonverbal'),

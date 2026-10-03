@@ -213,3 +213,36 @@ automaticamente um regular de nove cenas/67,5 segundos. Essa seleção menor usa
 o fluxo de montagem externa acima com o manifesto próprio; não preencher com
 cenas repetidas para satisfazer o packet legado. Este limite pertence somente
 àquele packet; use uma rota compatível com a seleção, sem financiar cenas extras.
+
+## Montagem compartilhada com origens independentes
+
+O packet `selected-assembly` v2 mantém o manifesto canônico v1 exportado por
+`Production.exportRenderManifest`. Ele aceita as cenas e durações reais desse
+manifesto dentro dos limites do formato, com intervalos visuais e sonoros
+explícitos de mesma duração. O packet v1 e seus fingerprints permanecem válidos.
+
+Cada fonte registra o asset, episódio e cena visuais originais, além do target
+do manifesto. `audioInputId`, `audioSourceSceneId` e o índice original selecionam
+uma pista de um `audioInput` separado, que conserva episódio, artifact, run,
+commit, receipt e todos os bindings do arquivo de áudio original. Uma seleção
+pode reunir vários artifacts; origem visual e sonora podem ser diferentes.
+O builder deve obter essas identidades do acervo real, sem relabelar um episódio.
+
+O worker recupera vídeo apenas por GET e verifica os hashes; baixa e valida cada
+artifact de áudio inteiro em sua própria pasta. Mede os streams remotamente,
+rejeita intervalos que excedem a fonte, corta vídeo e áudio e concatena os
+segmentos já montados. Não usa loops, congelamento ou preenchimento de tempo.
+O receipt v2 preserva as duas origens, intervalos, hashes, probes e `masterProbe`.
+Registrar esse render pelo domínio continua exigindo manifesto e fontes exatos.
+
+Para o lote compartilhado vigente, dois planos de121frames/16fps podem fornecer
+os intervalos `[0.0625, 7.5625]`, preservando seu estado final e entregando15s
+nominais com duas pistas de7.5s. Esse exemplo não limita outras seleções.
+As pistas já existentes são reaproveitadas com sua prova original. Para pistas
+ausentes, a rota de áudio procedural também aceita `warm-room`, `wax-road` e
+`wood-room`: texturas originais não verbais, com início suave e encerramento
+calmo. Não atestam sincronismo observado nem introduzem amostras ou inferência.
+Somente a Mestre finaliza essa base; as redes recebem os arquivos comuns.
+
+Os testes de integração com FFmpeg, cortes sonoros e múltiplos artifacts rodam
+exclusivamente no GitHub Actions. Não executar esses testes nem a montagem no Mac.
