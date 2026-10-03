@@ -30,7 +30,7 @@ const schema = z.object({ schemaVersion: z.literal(1), type: z.literal('selected
   episodeId: uuid, sourceEpisodeId: uuid, manifest: manifestSchema,
   sources: z.array(z.object({ assetId: uuid, sha256: sha, sourceSceneId: uuid,
     sourceIndex: z.number().int().min(1).max(SCENE_COUNT), remoteRequest: request }).strict()).min(1).max(SCENE_COUNT),
-  audioBindings: z.array(z.object({ sceneId: uuid, audio: z.object({ sha256: sha }).strict() }).strict()).length(SCENE_COUNT),
+  audioBindings: z.array(z.object({ sceneId: uuid, audio: z.object({ sha256: sha }).strict() }).strict()).min(1).max(SCENE_COUNT),
   audioArtifact: z.object({ artifactId: z.number().int().positive(), runId: z.number().int().positive(),
     repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/), commitSha: z.string().regex(/^[a-f0-9]{40,64}$/),
     batchId: uuid, packetSha256: sha, manifestSha256: sha }).strict(),
@@ -42,7 +42,7 @@ const distinct = values => { if (new Set(values).size !== values.length) throw n
 /** A new exact manifest with explicit bindings to existing video requests and original WAVs. */
 export function validateSelectedAssemblyPacket(value) {
   const packet = schema.parse(value);
-  if (packet.episodeId !== packet.manifest.episodeId || packet.episodeId === packet.sourceEpisodeId || packet.sources.length !== packet.manifest.scenes.length) throw new Error('Selected assembly requires its own exact episode/manifest');
+  if (packet.episodeId !== packet.manifest.episodeId || packet.sources.length !== packet.manifest.scenes.length) throw new Error('Selected assembly requires its own exact episode/manifest');
   for (const values of [packet.manifest.scenes.map(scene => scene.sceneId), packet.manifest.scenes.map(scene => scene.visual.assetId),
     packet.manifest.scenes.map(scene => scene.audio.assetId), packet.audioBindings.map(binding => binding.sceneId),
     ...['assetId', 'sha256', 'sourceSceneId', 'sourceIndex'].map(field => packet.sources.map(source => source[field])),
@@ -50,8 +50,13 @@ export function validateSelectedAssemblyPacket(value) {
   for (const scene of packet.manifest.scenes) {
     const source = packet.sources.find(item => item.assetId === scene.visual.assetId);
     const audio = source && packet.audioBindings[source.sourceIndex - 1];
-    if (!source || source.sha256 !== scene.visual.sha256 || audio.sceneId !== source.sourceSceneId || audio.audio.sha256 !== scene.audio.sha256) throw new Error('Selected source does not match its exact visual and original audio binding');
+    if (!source || !audio || source.sha256 !== scene.visual.sha256 || audio.sceneId !== source.sourceSceneId || audio.audio.sha256 !== scene.audio.sha256) throw new Error('Selected source does not match its exact visual and original audio binding');
   }
+  if (packet.episodeId === packet.sourceEpisodeId && (packet.audioBindings.length !== packet.manifest.scenes.length ||
+      packet.manifest.scenes.some((scene, index) => {
+        const source = packet.sources.find(item => item.assetId === scene.visual.assetId);
+        return source.sourceSceneId !== scene.sceneId || source.sourceIndex !== index + 1;
+      }))) throw new Error('Direct finalization requires every original scene and audio binding in exact episode order');
   return packet;
 }
 

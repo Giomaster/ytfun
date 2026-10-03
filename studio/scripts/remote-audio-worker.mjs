@@ -17,7 +17,8 @@ export async function runAudioWorker({ env = process.env, artifact = new Default
     const receipt = { schemaVersion: 1, type: 'original-audio', batchId: packet.id, episodeId: packet.episodeId, packetSha256: packetHash(packet), ...context, spec: { encoding: 'PCM', sampleRate: 48000, channels: 2, bitsPerSample: 16 }, scenes: [] };
     const files = [];
     for (const scene of packet.scenes) {
-      const options = { durationSeconds: scene.durationSeconds, seed: scene.seed, genre: scene.genre, title: scene.title };
+      const options = { durationSeconds: scene.durationSeconds, seed: scene.seed, genre: scene.genre, title: scene.title,
+        ...(scene.audioProfile ? { audioProfile: scene.audioProfile } : {}) };
       const bytes = synthesize(options);
       if (!Buffer.isBuffer(bytes) || bytes.length !== 44 + 48000 * scene.durationSeconds * 4 || bytes.toString('ascii', 0, 4) !== 'RIFF' || bytes.toString('ascii', 8, 12) !== 'WAVE') throw new Error('Original sound did not produce its exact WAV contract');
       const path = audioReceiptPath(scene.index);

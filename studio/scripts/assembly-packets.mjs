@@ -22,7 +22,7 @@ const remoteRequest = z.object({
 
 const audioSchema = z.object({
   schemaVersion: z.literal(1), type: z.literal('audio'), id: uuid, episodeId: uuid,
-  scenes: z.array(z.object({ index: z.number().int().min(1).max(SCENE_COUNT), sceneId: uuid, title: label(160), genre: label(80), seed: z.number().int().min(0).max(0xffffffff), durationSeconds: z.literal(SCENE_SECONDS) }).strict()).length(SCENE_COUNT),
+  scenes: z.array(z.object({ index: z.number().int().min(1).max(SCENE_COUNT), sceneId: uuid, title: label(160), genre: label(80), seed: z.number().int().min(0).max(0xffffffff), durationSeconds: z.literal(SCENE_SECONDS), audioProfile: z.enum(['cloth-rest', 'quiet-water']).optional() }).strict()).min(1).max(SCENE_COUNT),
 }).strict();
 const manifestSchema = z.object({
   schemaVersion: z.literal(1), episodeId: uuid, format: z.literal('long'), audioMode: z.literal('nonverbal'),
@@ -49,7 +49,7 @@ const unique = (values, name) => { if (new Set(values).size !== values.length) t
 export function validateAudioPacket(value) {
   const packet = audioSchema.parse(value);
   unique(packet.scenes.map(scene => scene.sceneId), 'Audio scene IDs');
-  if (packet.scenes.some((scene, index) => scene.index !== index + 1)) throw new Error('Audio scenes must be in exact 1–96 order');
+  if (packet.scenes.some((scene, index) => scene.index !== index + 1)) throw new Error('Audio scenes must be contiguous in exact order beginning at 1');
   return packet;
 }
 
@@ -97,7 +97,7 @@ export function remoteContext(env) {
 export function audioReceiptPath(index) { return `audio/${String(index).padStart(3, '0')}.wav`; }
 export function validateAudioReceipt(value, packet) {
   const expected = packet.audioArtifact;
-  if (!value || value.schemaVersion !== 1 || value.type !== 'original-audio' || value.batchId !== expected.batchId || value.episodeId !== packet.episodeId || value.packetSha256 !== expected.packetSha256 || value.repository !== expected.repository || value.runId !== expected.runId || value.commitSha !== expected.commitSha || packetHash(value) !== expected.manifestSha256 || !Array.isArray(value.scenes) || value.scenes.length !== SCENE_COUNT) throw new Error('Original audio receipt differs from the authorized artifact');
+  if (!value || value.schemaVersion !== 1 || value.type !== 'original-audio' || value.batchId !== expected.batchId || value.episodeId !== packet.episodeId || value.packetSha256 !== expected.packetSha256 || value.repository !== expected.repository || value.runId !== expected.runId || value.commitSha !== expected.commitSha || packetHash(value) !== expected.manifestSha256 || !Array.isArray(value.scenes) || value.scenes.length !== packet.manifest.scenes.length) throw new Error('Original audio receipt differs from the authorized artifact');
   for (const [index, scene] of packet.manifest.scenes.entries()) {
     const audio = value.scenes[index];
     if (audio.index !== index + 1 || audio.sceneId !== scene.sceneId || audio.path !== audioReceiptPath(index + 1) || audio.durationSeconds !== SCENE_SECONDS || audio.sha256 !== scene.audio.sha256 || audio.sizeBytes !== 44 + 48000 * SCENE_SECONDS * 4) throw new Error('Original audio does not match its imported scene/hash');

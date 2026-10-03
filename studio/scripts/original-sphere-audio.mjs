@@ -7,6 +7,7 @@ const SAMPLE_RATE = 48000;
 const CHANNELS = 2;
 const BITS_PER_SAMPLE = 16;
 const TARGET_PEAK = 0.76;
+const TEXTURE_PEAK = 0.18;
 const TAU = 2 * Math.PI;
 const REFERENCE_DURATION = 7.5;
 const PROFILES = {
@@ -33,15 +34,18 @@ function text(value, name, maximum) {
 
 function normalized(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Audio options are required');
-  const { durationSeconds, seed } = input;
+  const { durationSeconds, seed, audioProfile } = input;
   if (!Number.isFinite(durationSeconds) || durationSeconds < 3 || durationSeconds > 30) throw new Error('durationSeconds must be finite and between 3 and 30 seconds');
   if (!Number.isInteger(seed) || seed < 0 || seed > 0xffffffff) throw new Error('seed must be an unsigned 32-bit integer');
-  return { durationSeconds, seed, genre: text(input.genre, 'genre', 160), title: text(input.title, 'title', 300) };
+  if (audioProfile !== undefined && !['cloth-rest', 'quiet-water'].includes(audioProfile)) throw new Error('audioProfile must be cloth-rest or quiet-water when supplied');
+  return { durationSeconds, seed, genre: text(input.genre, 'genre', 160), title: text(input.title, 'title', 300),
+    ...(audioProfile ? { audioProfile } : {}) };
 }
 
 function identity(input) {
   const options = normalized(input);
   const digest = createHash('sha256').update(JSON.stringify(options)).digest();
+  if (options.audioProfile) return { options, digest, profile: options.audioProfile };
   const folded = value => value.normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase();
   const names = Object.keys(PROFILES);
   const profile = names.find(name => PROFILE_WORDS[name].test(folded(options.genre)))
@@ -52,6 +56,16 @@ function identity(input) {
 
 export function describeSphereAudio(input) {
   const { options, digest, profile } = identity(input);
+  if (options.audioProfile) return {
+    algorithm: `original-${profile}-audio-v1`, profile, seed: options.seed,
+    inputSha256: digest.toString('hex'), durationSeconds: options.durationSeconds,
+    sampleRate: SAMPLE_RATE, channels: CHANNELS, bitsPerSample: BITS_PER_SAMPLE,
+    peakLimit: TEXTURE_PEAK, originalProcedural: true,
+    construction: { recordedSamples: false, speechSynthesis: false, textAudio: false, modelCalls: false, synchronizedEffects: false },
+    texture: profile === 'quiet-water'
+      ? 'Continuous gently drifting water and wind texture, soft onset and calm ending; no contact, fracture or reveal accents.'
+      : 'Continuous soft filtered noise, gentle onset and a calm fade into rest; no contact, fracture or reveal accents.',
+  };
   const scale = options.durationSeconds / REFERENCE_DURATION;
   return {
     algorithm: 'original-sphere-audio-v1', profile, seed: options.seed,
@@ -107,8 +121,65 @@ function eventsFor(profile, random, scale, detune) {
   return events;
 }
 
+function continuousTextureAudio(options, digest) {
+  const frames = Math.round(options.durationSeconds * SAMPLE_RATE);
+  const random = randomSource((options.seed ^ digest.readUInt32LE(0)) >>> 0);
+  const left = new Float64Array(frames); const right = new Float64Array(frames);
+  const water = options.audioProfile === 'quiet-water';
+  const lowCoefficient = 1 - Math.exp(-TAU * (water ? 120 : 70) / SAMPLE_RATE);
+  const colorCoefficient = 1 - Math.exp(-TAU * (water ? 1650 : 850) / SAMPLE_RATE);
+  const tailSilence = 0.025;
+  const envelope = frame => {
+    const time = frame / SAMPLE_RATE;
+    return smooth(time / 0.6) * smooth((options.durationSeconds - tailSilence - time) / 1.4);
+  };
+  let lowShared = 0, colorShared = 0, lowLeft = 0, colorLeft = 0, lowRight = 0, colorRight = 0;
+  let leftSum = 0, rightSum = 0, envelopeSum = 0;
+  // A continuous texture rather than timed effects: no material impacts,
+  // pitched reveal, speech, samples or claim of synchronization with the video.
+  for (let frame = 0; frame < frames; frame += 1) {
+    const commonNoise = random() * 2 - 1;
+    const leftNoise = random() * 2 - 1; const rightNoise = random() * 2 - 1;
+    lowShared += lowCoefficient * (commonNoise - lowShared);
+    colorShared += colorCoefficient * (commonNoise - colorShared);
+    lowLeft += lowCoefficient * (leftNoise - lowLeft); colorLeft += colorCoefficient * (leftNoise - colorLeft);
+    lowRight += lowCoefficient * (rightNoise - lowRight); colorRight += colorCoefficient * (rightNoise - colorRight);
+    const width = water ? 0.28 : 0.2;
+    const drift = water ? 0.9 + 0.1 * Math.sin(TAU * 0.35 * frame / SAMPLE_RATE) : 1;
+    const shared = (colorShared - lowShared) * (1 - width);
+    left[frame] = (shared + (colorLeft - lowLeft) * width) * drift;
+    right[frame] = (shared + (colorRight - lowRight) * width) * drift;
+    const window = envelope(frame);
+    leftSum += left[frame] * window; rightSum += right[frame] * window; envelopeSum += window;
+  }
+  const leftOffset = leftSum / envelopeSum; const rightOffset = rightSum / envelopeSum;
+  let peak = 0;
+  for (let frame = 0; frame < frames; frame += 1) {
+    const window = envelope(frame);
+    left[frame] = (left[frame] - leftOffset) * window;
+    right[frame] = (right[frame] - rightOffset) * window;
+    peak = Math.max(peak, Math.abs(left[frame]), Math.abs(right[frame]));
+  }
+  if (!Number.isFinite(peak) || peak <= 0) throw new Error('Procedural continuous texture produced no finite signal');
+  const gain = TEXTURE_PEAK / peak;
+  const dataBytes = frames * CHANNELS * (BITS_PER_SAMPLE / 8);
+  const wav = Buffer.alloc(44 + dataBytes);
+  wav.write('RIFF', 0, 'ascii'); wav.writeUInt32LE(36 + dataBytes, 4); wav.write('WAVE', 8, 'ascii');
+  wav.write('fmt ', 12, 'ascii'); wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20);
+  wav.writeUInt16LE(CHANNELS, 22); wav.writeUInt32LE(SAMPLE_RATE, 24);
+  wav.writeUInt32LE(SAMPLE_RATE * CHANNELS * BITS_PER_SAMPLE / 8, 28);
+  wav.writeUInt16LE(CHANNELS * BITS_PER_SAMPLE / 8, 32); wav.writeUInt16LE(BITS_PER_SAMPLE, 34);
+  wav.write('data', 36, 'ascii'); wav.writeUInt32LE(dataBytes, 40);
+  for (let frame = 0; frame < frames; frame += 1) {
+    wav.writeInt16LE(Math.round(Math.max(-TEXTURE_PEAK, Math.min(TEXTURE_PEAK, left[frame] * gain)) * 32767), 44 + frame * 4);
+    wav.writeInt16LE(Math.round(Math.max(-TEXTURE_PEAK, Math.min(TEXTURE_PEAK, right[frame] * gain)) * 32767), 46 + frame * 4);
+  }
+  return wav;
+}
+
 export function synthesizeSphereAudio(input) {
   const { options, digest, profile: name } = identity(input);
+  if (options.audioProfile) return continuousTextureAudio(options, digest);
   const profile = PROFILES[name];
   const scale = options.durationSeconds / REFERENCE_DURATION;
   const frames = Math.round(options.durationSeconds * SAMPLE_RATE);

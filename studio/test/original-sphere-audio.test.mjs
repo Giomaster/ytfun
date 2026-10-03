@@ -128,8 +128,47 @@ test('bounded duration scales the editorial cues and the number of PCM frames in
   assert.equal(samples(wav).frames, 3.75 * 48000);
 });
 
+test('continuous cloth and water originals are reproducible quiet stereo WAVs without timeline accents', () => {
+  const hashes = new Set();
+  for (const audioProfile of ['cloth-rest', 'quiet-water']) {
+    const input = { ...options, audioProfile };
+    const metadata = describeSphereAudio(input);
+    const wav = synthesizeSphereAudio(input);
+    assert.deepEqual(synthesizeSphereAudio(input), wav);
+    assert.equal(metadata.profile, audioProfile);
+    assert.equal(metadata.construction.synchronizedEffects, false);
+    assert.equal(metadata.cuesSeconds, undefined);
+    assert.equal(metadata.peakLimit, 0.18);
+    assert.equal(wav.toString('ascii', 0, 4), 'RIFF');
+    assert.equal(wav.toString('ascii', 8, 12), 'WAVE');
+    assert.equal(wav.readUInt16LE(20), 1); assert.equal(wav.readUInt16LE(22), 2);
+    assert.equal(wav.readUInt32LE(24), 48000); assert.equal(wav.readUInt16LE(34), 16);
+    assert.equal(wav.length, 44 + 7.5 * 192000);
+    assert.equal(wav.readUInt32LE(40), 7.5 * 192000);
+    const { left, right, frames } = samples(wav);
+    for (const channel of [left, right]) {
+      assert.equal(channel[0], 0);
+      assert.ok(channel.subarray(frames - 1200).every(sample => sample === 0));
+      let peak = 0, sum = 0;
+      for (const sample of channel) { peak = Math.max(peak, Math.abs(sample)); sum += sample; }
+      assert.ok(peak <= Math.ceil(metadata.peakLimit * 32767));
+      assert.ok(peak > 0.1 * 32767);
+      assert.ok(Math.abs(sum / frames) < 1);
+      const levels = [1, 2, 3, 4, 5].map(second => rms(channel, second * 48000, (second + 0.5) * 48000));
+      assert.ok(Math.min(...levels) > 10);
+      assert.ok(Math.max(...levels) < Math.min(...levels) * 2, 'The steady texture must not contain a fixed impact or reveal burst');
+      assert.ok(rms(channel, 7.25 * 48000, 7.475 * 48000) < levels[0] * 0.1);
+    }
+    assert.notDeepEqual(left, right);
+    hashes.add(createHash('sha256').update(wav).digest('hex'));
+    assert.notEqual(createHash('sha256').update(synthesizeSphereAudio({ ...input, seed: input.seed + 1 })).digest('hex'), createHash('sha256').update(wav).digest('hex'));
+  }
+  assert.equal(hashes.size, 2);
+  assert.ok(!hashes.has(createHash('sha256').update(fixture()).digest('hex')), 'Explicit continuous profiles must not reuse the legacy sphere signal');
+});
+
 test('invalid/unbounded inputs are rejected and unsigned seed endpoints remain valid metadata', () => {
-  for (const mutation of [{ durationSeconds: 0 }, { durationSeconds: 31 }, { durationSeconds: NaN }, { durationSeconds: Infinity }, { durationSeconds: '7.5' }, { seed: -1 }, { seed: 4294967296 }, { seed: 0.5 }, { seed: '123' }, { genre: '' }, { title: '' }, { title: 'x'.repeat(301) }]) {
+  for (const mutation of [{ durationSeconds: 0 }, { durationSeconds: 31 }, { durationSeconds: NaN }, { durationSeconds: Infinity }, { durationSeconds: '7.5' }, { seed: -1 }, { seed: 4294967296 }, { seed: 0.5 }, { seed: '123' }, { genre: '' }, { title: '' }, { title: 'x'.repeat(301) }, { audioProfile: 'unknown' }]) {
     assert.throws(() => synthesizeSphereAudio({ ...options, ...mutation }));
     assert.throws(() => describeSphereAudio({ ...options, ...mutation }));
   }

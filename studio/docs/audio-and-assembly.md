@@ -41,12 +41,20 @@ Exporte seu manifesto inteiro por `Production.exportRenderManifest`.
 
 O packet privado tem `schemaVersion: 1`, `type: "selected-assembly"`, `id`,
 `episodeId` de destino, `sourceEpisodeId` do áudio original, `manifest`,
-`audioBindings` com as 96 cenas/hashes originais, `audioArtifact` no formato abaixo
+`audioBindings` com todas as 1 a 96 cenas/hashes do artifact original, `audioArtifact` no formato abaixo
 e `sources`: `{ assetId, sha256, sourceSceneId, sourceIndex, remoteRequest }`.
 `assetId` aponta ao visual do novo manifesto; cena/índice apontam ao WAV original.
 A ordem final é exclusivamente a ordem do manifesto, podendo diferir da origem.
 Fontes, hashes, requests e índices repetidos são recusados. Cada WAV precisa
 corresponder ao hash exato do áudio selecionado para a cena de destino.
+
+Para finalizar o próprio episódio bruto, `episodeId` pode ser igual a
+`sourceEpisodeId` somente quando todos os bindings/cenas estão presentes e
+cada fonte mantém `sourceSceneId` igual à cena do manifesto e `sourceIndex`
+igual à sua posição a partir de 1. Isso permite uma cena inteira com seu áudio
+próprio, sem planejar um episódio equivalente nem exigir um master. Qualquer
+vínculo ausente, alterado ou reordenado nesse modo é recusado. A composição
+entre episódios continua preservando os índices e hashes originais.
 
 Use `packSelectedAssemblyPacket` para guardar o valor `encoded` no secret
 `AI_MEOW_SELECTED_ASSEMBLY_PACKET`. O launch público contém somente
@@ -61,8 +69,13 @@ encaixa cada fonte inteira no canvas do manifesto e concatena os WAVs na nova
 ordem. Não há loop, alongamento, inferência ou revisão estética. Produz somente
 `master.mp4` e `render-manifest.json`, no artifact
 `ai-meow-selected-assembly-<id>` com retenção de sete dias. O recibo inclui nova
-cena, cena/índice originais, hashes e intervalos de origem/saída. Nenhum artifact
-confirma aprovação ou publicação. Expiração ou falha de GET exige recuperar o
+cena, cena/índice originais, hashes e intervalos de origem/saída.
+O recibo também conserva `sourceProbe` e `measuredOriginalDurationSeconds` de
+cada bruto e o `masterProbe` integral obtido por ffprobe no runner remoto. O
+probe do master é validado contra o manifesto entre duas leituras do hash do
+arquivo, vinculando streams e SHA aos mesmos bytes. Esses dados são medições
+técnicas, sem atestar playback, sincronismo ou revisão estética.
+Nenhum artifact confirma aprovação ou publicação. Expiração ou falha de GET exige recuperar o
 material preservado; não autoriza nova síntese/inferência nem rerun automático.
 
 Verifique run/artifact/recibo/hashes e registre por `Production.registerRemoteRender`
@@ -114,10 +127,11 @@ arquivos públicos; ele é o valor do secret `AI_MEOW_AUDIO_PACKET`.
 ```js
 const packet = {
   schemaVersion: 1, type: "audio", id: "<UUID do lote de áudio>",
-  episodeId: "<UUID do master>",
-  scenes: [ // exatamente 96, na ordem 1–96
+  episodeId: "<UUID do episódio de origem>",
+  scenes: [ // de 1 a 96, índices contíguos a partir de 1
     { index: 1, sceneId: "<UUID da cena>", title: "Original scene title",
-      genre: "elemental", seed: 20261001, durationSeconds: 7.5 },
+      genre: "textile", seed: 20261001, durationSeconds: 7.5,
+      audioProfile: "cloth-rest" }, // opcional; "quiet-water" também é aceito
   ],
 };
 const { encoded, packetSha256 } = packAssemblyPacket(packet);
@@ -127,7 +141,9 @@ const launch = { schemaVersion: 1, type: "audio", batchId: packet.id,
 
 O controller instala o secret e faz push de `studio/batches/audio-launch.json`
 com esse `launch`. `AI Meow Original Audio` gera WAVs estéreo PCM16, 48 kHz,
-exatos 7,5 s, em `audio/001.wav`…`audio/096.wav`. Síntese é procedural, determinística
+exatos 7,5 s, em `audio/001.wav` até o último índice autorizado. Uma cena gera
+somente seu WAV e o recibo, sem síntese de 95 cenas adicionais. Essa duração é
+o contrato nativo desta rota, não um piso editorial. Síntese é procedural, determinística
 por seed/título/gênero, sem samples externos, voz, modelos ou downloads. Seis
 famílias variam contato, resistência, fratura/impacto, revelação e assentamento;
 picos são limitados, DC corrigido e o final termina em silêncio. Os cues são uma
@@ -135,9 +151,20 @@ direção inicial. Uma alegação de inspeção de sincronismo, prazer sonoro ou
 semântica de fala exige observar os arquivos reais. O aceite técnico de resultados
 não assistidos registra essa ausência de observação sem impor uma refação.
 
-Artifact: `ai-meow-audio-<packet.id>`, retenção de sete dias, com os 96 WAVs e
+Sem `audioProfile`, os seis perfis legados e suas receitas continuam como antes.
+`cloth-rest` cria uma textura contínua suave para tecido e repouso;
+`quiet-water` usa outro timbre contínuo para água/vento leves. Ambos têm pico
+limitado a 0,18, entrada e encerramento suaves, estéreo e DC corrigido, sem
+efeitos pontuais, contato, fratura ou revelação sincronizados, samples, fala ou
+inferência. O perfil explícito integra a identidade/hash do pedido e o recibo.
+Isso registra a intenção da construção; não afirma que alguém ouviu o resultado.
+
+Artifact: `ai-meow-audio-<packet.id>`, retenção de sete dias, com os WAVs autorizados e
 `audio-manifest.json`: identidade de lote/episódio/packet, repository/run/commit,
 spec e cada sceneId/index/título/gênero/seed/duração/path/SHA/tamanho/síntese.
+O verificador exige exatamente a contagem completa de bindings fornecida,
+além de todos os hashes e da identidade do run/artifact; não aceitar recibo
+truncado ou acrescentado para fazer uma seleção pequena passar.
 O retorno do worker informa artifactId e hash canônico desse recibo. Os campos
 são dados autorais do conteúdo; nenhum token, prompt ou dado de conta é incluído.
 

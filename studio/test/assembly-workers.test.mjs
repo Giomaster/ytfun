@@ -10,7 +10,7 @@ import { runRenderWorker, shortCommand, verifiedProbe, ownedAudioArtifact } from
 
 const sha = input => hash(String(input));
 const launch = packet => ({ schemaVersion: 1, type: packet.type, batchId: packet.id, episodeId: packet.episodeId, packetSha256: packetHash(packet) });
-const audioPacket = () => ({ schemaVersion: 1, type: 'audio', id: randomUUID(), episodeId: randomUUID(), scenes: Array.from({ length: 96 }, (_, i) => ({ index: i + 1, sceneId: randomUUID(), title: `Original world ${i + 1}`, genre: 'cosmic', seed: 1000 + i, durationSeconds: 7.5 })) });
+const audioPacket = (count = 96) => ({ schemaVersion: 1, type: 'audio', id: randomUUID(), episodeId: randomUUID(), scenes: Array.from({ length: count }, (_, i) => ({ index: i + 1, sceneId: randomUUID(), title: `Original world ${i + 1}`, genre: 'cosmic', seed: 1000 + i, durationSeconds: 7.5 })) });
 const mockWav = () => {
   const bytes = Buffer.alloc(44 + 48000 * 7.5 * 4);
   bytes.write('RIFF'); bytes.writeUInt32LE(bytes.length - 8, 4); bytes.write('WAVEfmt ', 8); bytes.writeUInt32LE(16, 16); bytes.writeUInt16LE(1, 20); bytes.writeUInt16LE(2, 22); bytes.writeUInt32LE(48000, 24); bytes.writeUInt32LE(192000, 28); bytes.writeUInt16LE(4, 32); bytes.writeUInt16LE(16, 34); bytes.write('data', 36); bytes.writeUInt32LE(bytes.length - 44, 40);
@@ -90,6 +90,37 @@ test('audio worker uploads only originals/receipt and refuses invalid launch bef
   assert.equal(synthesized, 0); assert.equal(uploaded, 0);
   const result = await runAudioWorker({ env: c.env, artifact, synthesize: () => { synthesized++; return mockWav(); }, describe: () => ({ algorithm: 'fixture' }) });
   assert.equal(result.scenes, 96); assert.equal(synthesized, 96); assert.equal(uploaded, 1);
+});
+
+for (const audioProfile of ['cloth-rest', 'quiet-water']) test(`single-scene ${audioProfile} audio retains exact launch, WAV and artifact evidence without 96-scene padding`, async t => {
+  const c = await context(t); const packet = audioPacket(1);
+  packet.scenes[0].audioProfile = audioProfile;
+  const packed = packAssemblyPacket(packet);
+  assert.deepEqual(unpackAssemblyPacket(packed.encoded, launch(packet), 'audio'), packet);
+  for (const changed of [
+    { ...packet, scenes: [] }, { ...packet, scenes: Array.from({ length: 97 }, () => packet.scenes[0]) },
+    { ...packet, scenes: [{ ...packet.scenes[0], index: 2 }] },
+    { ...packet, scenes: [{ ...packet.scenes[0], audioProfile: 'unbounded-effects' }] },
+  ]) assert.throws(() => packAssemblyPacket(changed));
+  assert.throws(() => packAssemblyPacket({ ...packet, type: 'render' }), undefined, 'A small audio packet must not relax the legacy render contract');
+  await writeFile(join(c.directory, 'studio/batches/audio-launch.json'), JSON.stringify(launch(packet)));
+  c.env.AI_MEOW_AUDIO_PACKET = packed.encoded;
+  let uploads = 0;
+  const result = await runAudioWorker({ env: c.env, artifact: { uploadArtifact: async (name, files, root) => {
+    uploads++;
+    assert.equal(name, `ai-meow-audio-${packet.id}`); assert.equal(files.length, 2);
+    const receipt = JSON.parse(await readFile(join(root, 'audio-manifest.json')));
+    const wav = await readFile(join(root, 'audio/001.wav'));
+    assert.equal(receipt.scenes.length, 1);
+    assert.equal(receipt.scenes[0].sceneId, packet.scenes[0].sceneId);
+    assert.equal(receipt.scenes[0].sha256, hash(wav));
+    assert.equal(receipt.scenes[0].sizeBytes, 44 + 7.5 * 192000);
+    assert.equal(receipt.scenes[0].synthesis.profile, audioProfile);
+    assert.equal(receipt.scenes[0].synthesis.construction.synchronizedEffects, false);
+    assert.equal(receipt.scenes[0].synthesis.cuesSeconds, undefined);
+    return { id: 21 };
+  } } });
+  assert.equal(result.scenes, 1); assert.equal(uploads, 1);
 });
 
 test('render profile requires 30fps/full-duration original stereo audio, strips metadata and never loops', () => {

@@ -36,9 +36,9 @@ function wavHash(index) {
   return wavHashes.get(index);
 }
 
-function fixture(indices = SOURCE_INDICES, profile = LANDSCAPE, format = 'long') {
+function fixture(indices = SOURCE_INDICES, profile = LANDSCAPE, format = 'long', audioCount = 96) {
   const sourceEpisodeId = randomUUID(); const episodeId = randomUUID();
-  const audioBindings = Array.from({ length: 96 }, (_, offset) => ({ sceneId: randomUUID(), audio: { sha256: wavHash(offset + 1) } }));
+  const audioBindings = Array.from({ length: audioCount }, (_, offset) => ({ sceneId: randomUUID(), audio: { sha256: wavHash(offset + 1) } }));
   const audioBatchId = randomUUID(); const audioPacketSha256 = hash('fixture-original-audio-packet');
   const audioReceipt = { schemaVersion: 1, type: 'original-audio', batchId: audioBatchId, episodeId: sourceEpisodeId,
     packetSha256: audioPacketSha256, repository: 'Giomaster/ytfun', runId: 11, commitSha: 'b'.repeat(40),
@@ -59,6 +59,15 @@ function fixture(indices = SOURCE_INDICES, profile = LANDSCAPE, format = 'long')
     sources, audioBindings, audioArtifact: { artifactId: 21, runId: 11, repository: 'Giomaster/ytfun', commitSha: 'b'.repeat(40),
       batchId: audioBatchId, packetSha256: audioPacketSha256, manifestSha256: packetHash(audioReceipt) } };
   return { packet, audioReceipt };
+}
+
+function finalizeOriginal(packet) {
+  packet.episodeId = packet.sourceEpisodeId; packet.manifest.episodeId = packet.episodeId;
+  for (const scene of packet.manifest.scenes) {
+    const source = packet.sources.find(item => item.assetId === scene.visual.assetId);
+    scene.sceneId = source.sourceSceneId;
+  }
+  return packet;
 }
 
 async function context(t, packet) {
@@ -84,12 +93,14 @@ function assertReceipt(receipt, packet) {
   assert.equal(receipt.episodeId, packet.episodeId); assert.equal(receipt.sourceEpisodeId, packet.sourceEpisodeId);
   assert.equal(receipt.packetSha256, packetHash(packet)); assert.equal(receipt.sourceManifestSha256, packetHash(packet.manifest));
   assert.equal(receipt.approved, false); assert.equal(receipt.published, false); assert.equal(receipt.inferenceSubmitted, false);
-  assert.deepEqual(receipt.sourceScenes, packet.manifest.scenes.map((scene, offset) => {
+  assert.deepEqual(receipt.sourceScenes.map(({ sourceProbe, measuredOriginalDurationSeconds, ...binding }) => binding), packet.manifest.scenes.map((scene, offset) => {
     const source = packet.sources.find(item => item.assetId === scene.visual.assetId);
     return { order: offset + 1, sceneId: scene.sceneId, sourceSceneId: source.sourceSceneId, sourceIndex: source.sourceIndex,
       visualAssetId: scene.visual.assetId, visualSha256: scene.visual.sha256, audioAssetId: scene.audio.assetId,
       audioSha256: scene.audio.sha256, sourceRangeSeconds: [0, 7.5], outputRangeSeconds: [offset * 7.5, (offset + 1) * 7.5] };
   }));
+  assert.ok(receipt.sourceScenes.every(scene => scene.measuredOriginalDurationSeconds === 7.5625 && Number(scene.sourceProbe.format.duration) === 7.5625));
+  assert.deepEqual(receipt.masterProbe, finalProbe(packet.manifest.durationSeconds, packet.manifest));
   assert.equal(receipt.master.durationSeconds, packet.manifest.durationSeconds);
   assert.equal(receipt.master.width, packet.manifest.width); assert.equal(receipt.master.height, packet.manifest.height);
   assert.equal(receipt.master.framesPerSecond, 30); assert.equal(receipt.master.audioMode, 'nonverbal');
@@ -134,7 +145,7 @@ function harness(packet, audioReceipt, options = {}) {
       assert.equal(optionsForDownload.expectedHash, `sha256:${hash('fixture-original-audio-archive')}`);
       await mkdir(join(optionsForDownload.path, 'audio'));
       await writeFile(join(optionsForDownload.path, 'audio-manifest.json'), JSON.stringify(audioReceipt));
-      for (let index = 1; index <= 96; index++) {
+      for (let index = 1; index <= audioReceipt.scenes.length; index++) {
         const wav = mockWav(index); if (options.corruptWavIndex === index) wav[44] ^= 1;
         await writeFile(join(optionsForDownload.path, audioReceiptPath(index)), wav);
       }
@@ -154,10 +165,10 @@ function harness(packet, audioReceipt, options = {}) {
   const retrieveAudio = async (projection, workerOptions) => {
     calls.audio++;
     assert.equal(projection.episodeId, packet.sourceEpisodeId);
-    assert.notEqual(projection.episodeId, packet.episodeId);
+    assert.equal(projection.episodeId === packet.episodeId, packet.episodeId === packet.sourceEpisodeId);
     assert.deepEqual(projection.audioArtifact, packet.audioArtifact);
     assert.deepEqual(projection.manifest.scenes, packet.audioBindings);
-    assert.equal(projection.manifest.scenes.length, 96, 'Verify the complete parent audio artifact before selecting original WAV indices');
+    assert.equal(projection.manifest.scenes.length, packet.audioBindings.length, 'Preserve the complete supplied audio binding set for artifact verification');
     if (options.mockAudio) {
       await mkdir(join(workerOptions.directory, 'audio'));
       for (const source of packet.sources) await writeFile(join(workerOptions.directory, audioReceiptPath(source.sourceIndex)), mockWav(source.sourceIndex));
@@ -274,7 +285,7 @@ test('selected packets reject clones, mismatched mappings, unsafe retrieval and 
     p => { p.sources[0].sourceSceneId = randomUUID(); }, p => { p.sources[0].sourceIndex = 96; },
     p => { p.manifest.scenes[0].audio.sha256 = p.audioBindings[95].audio.sha256; },
     p => { [p.audioBindings[81], p.audioBindings[0]] = [p.audioBindings[0], p.audioBindings[81]]; },
-    p => { p.audioBindings[95].sceneId = p.audioBindings[0].sceneId; }, p => { p.audioBindings.pop(); },
+    p => { p.audioBindings[95].sceneId = p.audioBindings[0].sceneId; }, p => { p.audioBindings.length = 80; },
     p => { p.sources[0].sourceIndex = 0; }, p => { p.sources[0].sourceIndex = 97; },
     p => { p.sources[0].remoteRequest.responsePath += '?token=private'; },
     p => { p.sources[0].remoteRequest.responsePath = '/fal-ai/../../requests/request-17/response'; },
@@ -296,6 +307,46 @@ test('selected packets reject clones, mismatched mappings, unsafe retrieval and 
     assert.throws(() => validateSelectedAssemblyPacket(changed), undefined, `Mutation ${index} must not become an authorized assembly`);
     assert.throws(() => packSelectedAssemblyPacket(changed));
   }
+});
+
+test('direct finalization binds a single original episode and rejects absent or changed original scene/audio mappings', () => {
+  const { packet } = fixture([1], PORTRAIT, 'short', 1); finalizeOriginal(packet);
+  const packed = packSelectedAssemblyPacket(packet);
+  assert.deepEqual(unpackSelectedAssemblyPacket(packed.encoded, launch(packet)), packet);
+  for (const mutate of [
+    value => { const unrelated = randomUUID(); value.sources[0].sourceSceneId = unrelated; value.audioBindings[0].sceneId = unrelated; },
+    value => { value.audioBindings[0].audio.sha256 = hash('changed-original-audio'); },
+    value => { value.audioBindings.push({ sceneId: randomUUID(), audio: { sha256: wavHash(2) } }); },
+  ]) {
+    const changed = structuredClone(packet); mutate(changed);
+    assert.throws(() => packSelectedAssemblyPacket(changed));
+  }
+  const missing = structuredClone(packet); missing.sources[0].sourceIndex = 2;
+  assert.throws(() => validateSelectedAssemblyPacket(missing), error => error instanceof Error && !(error instanceof TypeError) && /original audio binding/.test(error.message));
+});
+
+test('a single original is finalized remotely with its own complete owned audio artifact and measured probe receipt', async t => {
+  const { packet, audioReceipt } = fixture([1], PORTRAIT, 'short', 1); finalizeOriginal(packet);
+  const c = await context(t, packet); const h = harness(packet, audioReceipt);
+  const result = await runSelectedAssemblyWorker({ env: c.env, ...h });
+  assert.equal(result.status, 'completed'); assert.equal(result.scenes, 1);
+  assert.equal(h.calls.download, 1); assert.equal(h.calls.upload, 1);
+  assert.deepEqual(h.calls.recover, ['request-1']);
+  assert.equal(h.receipt.master.durationSeconds, 7.5);
+  assert.equal(h.receipt.sourceScenes[0].sourceSceneId, h.receipt.sourceScenes[0].sceneId);
+  assert.equal(h.receipt.sourceScenes[0].measuredOriginalDurationSeconds, 7.5625);
+  assert.equal(verifiedProbe(h.receipt.masterProbe, 7.5, PORTRAIT).hasAudio, true);
+  assert.equal(h.receipt.master.sha256, result.masterSha256);
+});
+
+test('single-source assembly rejects a changed complete audio receipt count before touching its video', async t => {
+  const { packet, audioReceipt } = fixture([1], PORTRAIT, 'short', 1); finalizeOriginal(packet);
+  audioReceipt.scenes.push({ ...audioReceipt.scenes[0], index: 2, sceneId: randomUUID(), path: audioReceiptPath(2), sha256: wavHash(2) });
+  packet.audioArtifact.manifestSha256 = packetHash(audioReceipt);
+  const c = await context(t, packet); const h = harness(packet, audioReceipt);
+  await assert.rejects(runSelectedAssemblyWorker({ env: c.env, ...h }), /\[audio-verification\]/);
+  assert.equal(h.calls.download, 1); assert.equal(h.calls.recover.length, 0);
+  assert.equal(h.calls.commands.length, 0); assert.equal(h.calls.upload, 0);
 });
 
 test('invalid packets, changed launch hashes and nonfresh Actions contexts fail before any external I/O', async t => {
@@ -379,13 +430,15 @@ for (const outcome of ['unownedAudio', 'corruptWavIndex']) {
 }
 
 // The owner's machine never executes media checks. Only GitHub Actions runs this integration.
-for (const { title, indices, profile, format } of [
+for (const { title, indices, profile, format, direct = false } of [
   { title: 'nine complete originals into a 67.5-second landscape master', indices: SOURCE_INDICES, profile: LANDSCAPE, format: 'long' },
   { title: 'seven native short originals into a 52.5-second portrait master', indices: SHORT_SOURCE_INDICES, profile: PORTRAIT, format: 'short' },
+  { title: 'one original in its own 7.5-second portrait episode', indices: [1], profile: PORTRAIT, format: 'short', direct: true },
 ]) {
   test(`CI FFmpeg assembles ${title} with full AAC audio`,
     { skip: process.env.GITHUB_ACTIONS !== 'true', timeout: 480000 }, async t => {
-      const { packet } = fixture(indices, profile, format); const c = await context(t, packet);
+      const { packet } = fixture(indices, profile, format, direct ? 1 : 96); if (direct) finalizeOriginal(packet);
+      const c = await context(t, packet);
       const originals = new Map(); const generated = join(c.directory, 'ci-originals'); await mkdir(generated);
       const colors = ['red', 'green', 'blue', 'yellow', 'magenta', 'cyan', 'orange', 'purple', 'lime'];
       for (const [offset, scene] of packet.manifest.scenes.entries()) {
@@ -424,11 +477,13 @@ for (const { title, indices, profile, format } of [
       const master = join(outputDirectory, 'master.mp4');
       const probe = JSON.parse((await mediaCommand('ffprobe', ['-v', 'error', '-show_format', '-show_streams', '-of', 'json', master])).stdout);
       const verified = verifiedProbe(probe, packet.manifest.durationSeconds, profile);
+      assert.deepEqual(uploadedReceipt.masterProbe, probe);
       assert.ok(Math.abs(verified.durationSeconds - packet.manifest.durationSeconds) < 0.1);
       assert.ok(Math.abs(Number(probe.streams.find(stream => stream.codec_type === 'audio').duration) - packet.manifest.durationSeconds) < 0.1);
       assert.ok(uploadedReceipt.master.sizeBytes <= episodeLimits(format).maxRenderBytes);
       assert.equal(uploadedReceipt.master.sha256, hash(await readFile(master)));
       assert.deepEqual(uploadedReceipt.sourceScenes.map(scene => scene.sourceIndex), indices);
+      assert.ok(uploadedReceipt.sourceScenes.every(scene => scene.sourceProbe.streams.find(stream => stream.codec_type === 'video').width === 72));
       assert.equal(uploadedReceipt.approved, false); assert.equal(uploadedReceipt.published, false);
       await mediaCommand('ffmpeg', ['-nostdin', '-v', 'error', '-i', master, '-f', 'null', '-']);
     });

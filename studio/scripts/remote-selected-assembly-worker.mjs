@@ -62,7 +62,8 @@ export async function runSelectedAssemblyWorker({ env = process.env, artifact = 
       receipt.sourceScenes.push({ order: offset + 1, sceneId: scene.sceneId, sourceSceneId: source.sourceSceneId,
         sourceIndex: source.sourceIndex, visualAssetId: scene.visual.assetId, visualSha256: scene.visual.sha256,
         audioAssetId: scene.audio.assetId, audioSha256: scene.audio.sha256,
-        sourceRangeSeconds: [0, SCENE_SECONDS], outputRangeSeconds: [offset * SCENE_SECONDS, (offset + 1) * SCENE_SECONDS] });
+        sourceRangeSeconds: [0, SCENE_SECONDS], outputRangeSeconds: [offset * SCENE_SECONDS, (offset + 1) * SCENE_SECONDS],
+        measuredOriginalDurationSeconds: seconds, sourceProbe: probe });
     }
     stage = 'assembly-encoding';
     const videos = join(directory, 'videos.list'); const audios = join(directory, 'audios.list');
@@ -75,7 +76,10 @@ export async function runSelectedAssemblyWorker({ env = process.env, artifact = 
       '-t', String(packet.manifest.durationSeconds), '-movflags', '+faststart', '-n', master]);
     receipt.timing.assemblyEncodingMs = Date.now() - assemblyStartedAt;
     stage = 'master-verification';
-    receipt.master = await outputRecord(master, 'master.mp4', packet.manifest.durationSeconds, Math.min(MASTER_MAX_BYTES, packet.manifest.maxRenderBytes), runner, packet.manifest);
+    const { probe: masterProbe, ...masterRecord } = await outputRecord(master, 'master.mp4', packet.manifest.durationSeconds,
+      Math.min(MASTER_MAX_BYTES, packet.manifest.maxRenderBytes), runner, packet.manifest, { includeProbe: true });
+    receipt.master = masterRecord;
+    receipt.masterProbe = masterProbe;
     receipt.timing.workerElapsedBeforeUploadMs = Date.now() - startedAt;
     const receiptFile = join(outputDirectory, 'render-manifest.json');
     await writeFile(receiptFile, JSON.stringify(receipt), { flag: 'wx', mode: 0o600 });
