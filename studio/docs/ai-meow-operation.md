@@ -126,15 +126,31 @@ extras, repetir imagens ou esperar aquele master para contornar esse worker.
 
 ## Produção única e acervo modular
 
-Somente a MESTRE solicita geração paga. As especialistas selecionam, ordenam,
-cortam, montam, finalizam e publicam o acervo comum; não geram uma versão paga
-independente por rede. Necessidades de novas cenas retornam à MESTRE.
+Somente a MESTRE solicita geração paga. Ela dirige, gera e finaliza a base
+audiovisual compartilhada: vídeo, áudio original não verbal e montagem dos
+fragmentos. As especialistas selecionam, cortam, concatenam, adaptam o formato
+e publicam esse acervo; não criam uma geração ou uma trilha-base independente
+por rede. Necessidades de material novo retornam à MESTRE.
 
-Escolha a duração e quantidade de fragmentos conforme demanda, custo, material,
-experiência completa e durações nativas da rota. Uma unidade editorial tem ação
-legível, recompensa e encerramento próprios e pode reunir um ou mais planos.
-Não existe duração fixa de fragmento nem lote mínimo. Não use repetição,
-congelamento ou câmera lenta sem função para preencher um número arbitrário.
+A unidade compartilhada é um fragmento editorial completo de 15 segundos,
+com ação legível, recompensa, encerramento e áudio-base. Essa é a arquitetura
+combinada pelo dono, não uma exigência histórica descartável. Um fragmento pode
+reunir um ou mais planos. Planos nativos menores gerados pelo modelo são
+intermediários: não entregá-los às redes como fragmentos concluídos.
+Planeje planos e duração da rota antes da chamada para completar a unidade
+sem repetição, congelamento ou câmera lenta usados só para preencher tempo.
+Não há lote mínimo nem exigência de master/coleção completa. Os 15 segundos
+se aplicam à nova entrega compartilhada, não constituem piso universal dos
+posts das redes nem exigem refazer o acervo legado ou retirar publicações.
+
+Se o modelo devolver vídeo silencioso, a MESTRE cria e incorpora a camada
+sonora uma vez, preferindo a rota econômica adequada, inclusive efeitos
+procedurais originais. Geração e montagem pesada permanecem remotas. Preserve
+fontes e pistas separadas, composição, duração medida, hashes, custos e recibos
+do fragmento final. Marque vídeo sem áudio ou plano ainda não montado como
+intermediário; não anuncie uma entrega audiovisual pronta. Aproveite os
+intermediários já produzidos na montagem, sem retakes ou nova inferência
+corretiva. Coordene workers e artefatos existentes para evitar trabalho duplicado.
 
 Planeje famílias de fragmentos compatíveis por tema, estilo, progressão e som.
 Cada um deve funcionar sozinho; juntos devem formar uma sequência com variedade
@@ -305,12 +321,16 @@ cena. Efeitos devem acompanhar o acontecimento realmente observado no vídeo,
 não somente a marca de tempo pretendida no roteiro. Preserve dinâmica confortável
 e compatibilidade entre fragmentos.
 
-Use áudio original ou com direitos comerciais comprovados. Preserve vídeo fonte
+Use áudio original ou com direitos comerciais comprovados. A MESTRE é responsável
+pelo áudio-base da entrega compartilhada e por sua incorporação no fragmento
+final de 15 segundos, mesmo quando a API de vídeo não gerar som. Preserve vídeo fonte
 e pistas sonoras separadas para as montagens. Não embuta legendas, chamadas ou
 marcas específicas de uma rede no bruto compartilhado. Verifique a capacidade
 real da rota: pedir som no texto não cria áudio num modelo sem áudio, e um perfil
 silencioso pode removê-lo. Se usar geração separada, posicione a pista na montagem
-planejada; aceite imperfeições de sincronismo sem uma rodada corretiva.
+planejada; aceite imperfeições de sincronismo sem uma rodada corretiva. As redes
+podem ajustar ganhos, transições e ritmo na sua montagem, reaproveitando essa
+base; não recebem a criação do som como pendência rotineira da MESTRE.
 
 ### 9. Aproveite integralmente os resultados, sem refações
 
@@ -340,8 +360,9 @@ que não ocorreu.
 
 ## Adaptação, publicação e operação
 
-Cada especialista escolhe fragmentos, ordenação, ritmo, duração, transições, som,
-título, descrição, capa e identificação de IA conforme sua rede e modo.
+Cada especialista escolhe fragmentos já finalizados pela MESTRE, ordenação, ritmo,
+duração, enquadramento, transições, ajustes da base sonora, título, descrição,
+capa e identificação de IA conforme sua rede e modo.
 Giovanni autoriza produzir, montar e enfileirar VÁRIAS obras distintas por ciclo,
 incluindo múltiplos Shorts, regulares e compilações quando úteis. Não existe teto
 editorial de uma obra, um formato ou uma publicação por sessão/ciclo/dia.
