@@ -139,7 +139,9 @@ reunir um ou mais planos. Planos nativos menores gerados pelo modelo são
 intermediários: não entregá-los às redes como fragmentos concluídos.
 Planeje planos e duração da rota antes da chamada para completar a unidade
 sem repetição, congelamento ou câmera lenta usados só para preencher tempo.
-Não há lote mínimo nem exigência de master/coleção completa. Os 15 segundos
+Cada lote de produção da MESTRE reúne quatro fragmentos de 15 segundos,
+totalizando 1 minuto de base audiovisual compartilhada. Este lote é a unidade
+de produção vigente, sem exigir master ou coleção histórica completa. Os 15 segundos
 se aplicam à nova entrega compartilhada, não constituem piso universal dos
 posts das redes nem exigem refazer o acervo legado ou retirar publicações.
 
@@ -154,13 +156,22 @@ corretiva. Coordene workers e artefatos existentes para evitar trabalho duplicad
 
 Planeje famílias de fragmentos compatíveis por tema, estilo, progressão e som.
 Cada um deve funcionar sozinho; juntos devem formar uma sequência com variedade
-e desenvolvimento. Número de fragmentos não substitui os requisitos reais do
-formato ou programa escolhido.
+e desenvolvimento. Cada fragmento é um vídeo curto completo que termina
+graciosamente, com sua recompensa e resolução perceptíveis; não acabar no meio
+da ação nem depender do próximo fragmento para funcionar. Os quatro podem ser
+capítulos de uma história maior, com progressão planejada e continuidade entre
+capítulos quando pertinente, facilitando vídeos regulares. Também podem ser
+obras independentes de uma família coerente. Não fingir continuidade entre
+planos que mostram histórias independentes. Número de fragmentos não substitui
+os requisitos reais do formato ou programa escolhido.
 
-Dimensione cada lote pela demanda real das redes, estoque e custo. ENGAJAMENTO
-e MONETIZAÇÃO orientam a finalidade e os requisitos reais de cada programa;
-não criam um mínimo universal de material bruto. Reutilize o acervo existente
-antes de financiar material novo. Cada fragmento acrescentado
+Planeje o lote de 1 minuto pela demanda real das redes, estoque e custo.
+ENGAJAMENTO e MONETIZAÇÃO orientam a finalidade e os requisitos reais de cada
+programa; a duração publicada pode ser menor ou reunir vários lotes conforme a
+estratégia da rede. Um despertar não obriga nova geração paga quando há acervo
+útil. Reutilize o material produzido, complete o lote com conceitos novos quando
+necessário e preserve todos os planos; não refaça tentativas para corrigir
+imperfeições nem repita imagens só para completar esse minuto. Cada fragmento acrescentado
 deve trazer uma nova recompensa, informação ou avanço da sequência.
 
 ## Pesquisa, ciclos e retorno das redes
