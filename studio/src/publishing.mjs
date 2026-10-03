@@ -24,6 +24,52 @@ function nonempty(value) {
   return typeof value === 'string' && value.trim().length > 0;
 }
 
+/** Complete, network-specific presentation; never changes shared editorial evidence. */
+export function normalizeYouTubeMetadata(snapshot) {
+  const keys = ['title', 'description', 'tags'];
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot) ||
+      ![Object.prototype, null].includes(Object.getPrototypeOf(snapshot)) ||
+      keys.some(key => !Object.hasOwn(snapshot, key)) || Reflect.ownKeys(snapshot).some(key => !keys.includes(key)) ||
+      typeof snapshot.title !== 'string' || typeof snapshot.description !== 'string' || !Array.isArray(snapshot.tags) ||
+      Array.from(snapshot.tags).some(tag => typeof tag !== 'string')) throw new Error('YouTube metadata requires exactly title, description and tags.');
+  const title = snapshot.title.trim();
+  const description = snapshot.description.trim();
+  const tags = snapshot.tags.map(tag => tag.trim());
+  if (!title || title.length > 100 || /[<>\r\n]/.test(title)) throw new Error('YouTube metadata title must contain 1 to 100 characters on one line without angle brackets.');
+  if (!description || description.length > 5000 || Buffer.byteLength(description, 'utf8') > 5000 || /[<>]/.test(description)) throw new Error('YouTube metadata description must contain 1 to 5000 characters/UTF-8 bytes without angle brackets.');
+  const tagCost = tags.reduce((total, tag) => total + tag.length + (/\s/.test(tag) ? 2 : 0), Math.max(0, tags.length - 1));
+  if (tags.some(tag => !tag || tag.length > 100) || tagCost > 500) throw new Error('YouTube metadata tags require nonempty strings up to 100 characters and an aggregate limit of 500.');
+  return { title, description, tags };
+}
+
+export function youtubeMetadataHash(snapshot) {
+  const { title, description, tags } = normalizeYouTubeMetadata(snapshot);
+  return createHash('sha256').update(JSON.stringify({ description, tags, title })).digest('hex');
+}
+
+/** Validate the explicit binding; persisted snapshots must already be canonical. */
+export function youtubeMetadataSnapshot({ youtubeMetadata, youtubeMetadataSha256 } = {}, { requireCanonical = false } = {}) {
+  if (youtubeMetadata === undefined && youtubeMetadataSha256 === undefined) return {};
+  if (youtubeMetadata === undefined || typeof youtubeMetadataSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(youtubeMetadataSha256)) throw new Error('YouTube metadata snapshot requires its exact SHA256 binding.');
+  const normalized = normalizeYouTubeMetadata(youtubeMetadata);
+  if (youtubeMetadataHash(normalized) !== youtubeMetadataSha256) throw new Error('YouTube metadata snapshot SHA256 does not match.');
+  if (requireCanonical && (normalized.title !== youtubeMetadata.title || normalized.description !== youtubeMetadata.description ||
+      normalized.tags.some((tag, index) => tag !== youtubeMetadata.tags[index]))) throw new Error('Persisted YouTube metadata snapshot is not normalized.');
+  return { youtubeMetadata: normalized, youtubeMetadataSha256 };
+}
+
+function requireYouTubeMetadataRoute(binding, { platform, privacy, publishAt, zernio }) {
+  if (binding.youtubeMetadata !== undefined && (platform !== 'youtube' || !zernio || privacy !== 'public' || publishAt !== undefined)) {
+    throw new Error('YouTube metadata snapshots are supported only for immediate PUBLIC YouTube Zernio delivery.');
+  }
+}
+
+export function youtubeMetadataBindingsMatch(left, right) {
+  const a = youtubeMetadataSnapshot(left, { requireCanonical: true });
+  const b = youtubeMetadataSnapshot(right, { requireCanonical: true });
+  return a.youtubeMetadataSha256 === b.youtubeMetadataSha256;
+}
+
 function verifyDeliveryClaim(state, deliveryId, plan, { privacy, madeForKids } = {}) {
   if (deliveryId === undefined) return;
   const delivery = state.deliveries?.find(item => item.id === deliveryId && item.status === 'running');
@@ -39,6 +85,7 @@ function verifyDeliveryClaim(state, deliveryId, plan, { privacy, madeForKids } =
       (plan.deliveryMode === 'zernio' && (delivery.providerAccountId !== plan.providerAccountId || delivery.bindingSha256 !== plan.bindingSha256))) {
     throw new Error('Delivery provider or account binding changed; explicitly migrate an unstarted claim.');
   }
+  if (!youtubeMetadataBindingsMatch(delivery, plan)) throw new Error('Delivery YouTube metadata snapshot changed.');
 }
 
 function providerBinding(env, platform) {
@@ -249,7 +296,7 @@ export class Publisher {
     return { platforms: distributionCapabilities(this.env), youtubeAuth: this.youtubeAuth.readiness(), facebook: this.facebook.readiness(), facebookPageVideo: this.facebookPageVideo.readiness(), tiktokSession: this.tiktok.readiness(), tiktokZernio: this.tiktokZernio.readiness(), youtubeZernio: this.youtubeZernio.readiness() };
   }
 
-  async plan(state, { episodeId, platform, privacy = 'private', publishAt, cadenceExceptionId, deliveryId }, now = Date.now()) {
+  async plan(state, { episodeId, platform, privacy = 'private', publishAt, cadenceExceptionId, deliveryId, youtubeMetadata, youtubeMetadataSha256 }, now = Date.now()) {
     if (!['youtube', 'facebook', 'tiktok', 'kwai'].includes(platform)) throw new Error('Platform must be youtube, facebook, tiktok, or kwai.');
     if (!['private', 'unlisted', 'public'].includes(privacy)) throw new Error('Privacy must be private, unlisted, or public.');
     const episode = state.episodes.find((item) => item.id === episodeId);
@@ -258,6 +305,8 @@ export class Publisher {
     if (!project) throw new Error('Episode project not found.');
     const reasons = [];
     const zernio = this.zernioSelected(platform);
+    const metadataBinding = youtubeMetadataSnapshot({ youtubeMetadata, youtubeMetadataSha256 });
+    requireYouTubeMetadataRoute(metadataBinding, { platform, privacy, publishAt, zernio });
     const providerReadiness = zernio ? this.zernioAdapter(platform).readiness() : null;
     if (platform === 'youtube' && !zernio && youtubeBlocked(state, { YTFUN_YOUTUBE_GRANT_ID: this.youtubeGrantId })) reasons.push('YouTube is disconnected; obtain fresh consent and restart the MCP.');
     if (project.status !== 'active') reasons.push('The episode project must be active before publishing or exporting.');
@@ -323,7 +372,8 @@ export class Publisher {
       }
     }
     let metadata;
-    try { metadata = metadataFor(episode); } catch (error) { reasons.push(error.message); }
+    try { metadata = metadataBinding.youtubeMetadata ? { ...metadataBinding.youtubeMetadata, hashtags: [] } : metadataFor(episode); }
+    catch (error) { reasons.push(error.message); }
     let effectiveAt = new Date(now).toISOString();
     if (publishAt !== undefined) {
       const scheduled = Date.parse(publishAt);
@@ -381,6 +431,7 @@ export class Publisher {
     if (platform === 'tiktok' && caption.length > 2200) reasons.push('TikTok caption exceeds 2200 UTF-16 code units.');
     return {
       episodeId: episode.id, projectId: project.id, platform, accountId, reviewHash, privacy,
+      ...metadataBinding,
       ...(platform === 'youtube' && !zernio ? { youtubeGrantId: this.youtubeGrantId } : {}),
       ...(platform === 'facebook' ? { facebookVideoKind } : {}),
       uploadPrivacy: publishAt === undefined ? privacy : 'private', effectiveAt,
@@ -514,11 +565,14 @@ export class Publisher {
       videoId, channelId: item?.snippet?.channelId ?? null, privacyStatus: item?.status?.privacyStatus ?? null, uploadStatus: item?.status?.uploadStatus ?? null };
   }
 
-  async zernioReceipt(publicationId, receipt) {
+  async zernioReceipt(publicationId, receipt, expectedMetadataBinding) {
     return this.store.transaction(state => {
       const item = state.publications.find(p => p.id === publicationId && p.route === 'zernio');
       if (!item || receipt?.route !== 'zernio' || receipt.publicationId !== item.id || receipt.accountId !== item.accountId ||
           receipt.providerAccountId !== item.providerAccountId || receipt.renderSha256 !== item.renderSha256) throw new Error('Zernio receipt does not match the exact reserved publication.');
+      const metadataBinding = youtubeMetadataSnapshot(item, { requireCanonical: true });
+      requireYouTubeMetadataRoute(metadataBinding, { platform: item.platform, privacy: item.privacy, publishAt: item.publishAt, zernio: true });
+      if (expectedMetadataBinding !== undefined && !youtubeMetadataBindingsMatch(metadataBinding, expectedMetadataBinding)) throw new Error('Reserved YouTube metadata snapshot changed before the provider receipt.');
       if (item.providerPostId && receipt.providerPostId && item.providerPostId !== receipt.providerPostId) throw new Error('Provider post receipt changed.');
       if (receipt.providerPostId !== undefined && !/^[a-f0-9]{24}$/.test(receipt.providerPostId)) throw new Error('Invalid provider post ID.');
       const published = receipt.status === 'published' && receipt.confirmed === true && receipt.privacy === 'public' && Number.isFinite(Date.parse(receipt.publishedAt));
@@ -553,10 +607,12 @@ export class Publisher {
     });
   }
 
-  async publishZernio({ episodeId, platform, privacy, publishAt, expectedReviewHash, madeForKids, execute = false, deliveryId }) {
+  async publishZernio({ episodeId, platform, privacy, publishAt, expectedReviewHash, madeForKids, execute = false, deliveryId, youtubeMetadata, youtubeMetadataSha256 }) {
     if (!this.zernioSelected(platform) || privacy !== 'public' || publishAt !== undefined || typeof execute !== 'boolean' ||
         (platform === 'youtube' && typeof madeForKids !== 'boolean')) throw new Error('Zernio requires the selected public route and explicit audience/execute choices.');
-    const initial = await this.preflight({ episodeId, platform, privacy });
+    const metadataBinding = youtubeMetadataSnapshot({ youtubeMetadata, youtubeMetadataSha256 });
+    requireYouTubeMetadataRoute(metadataBinding, { platform, privacy, publishAt, zernio: this.zernioSelected(platform) });
+    const initial = await this.preflight({ episodeId, platform, privacy, ...metadataBinding });
     if (expectedReviewHash !== initial.reviewHash) throw new Error('Reviewed media changed.');
     if (!execute) return { ...initial, execute: false };
     if (initial.publication) return { duplicate: true, publication: initial.publication };
@@ -566,7 +622,7 @@ export class Publisher {
     if (identity.accountId !== initial.accountId || identity.providerAccountId !== initial.providerAccountId || !Number.isFinite(identity.maxDurationSeconds) || initial.render.durationSeconds > identity.maxDurationSeconds) throw new Error('Zernio account identity or duration is not permitted.');
     let media, consent;
     const reserved = await this.store.transaction(async state => {
-      const plan = await this.plan(state, { episodeId, platform, privacy });
+      const plan = await this.plan(state, { episodeId, platform, privacy, ...metadataBinding });
       if (plan.publication) return { duplicate: true, publication: plan.publication };
       if (!plan.ready || plan.reviewHash !== expectedReviewHash || plan.accountId !== identity.accountId || plan.providerAccountId !== identity.providerAccountId) throw new Error('Zernio reviewed identity or cadence changed.');
       verifyDeliveryClaim(state, deliveryId, plan, { privacy, madeForKids });
@@ -578,6 +634,7 @@ export class Publisher {
       media = await facebookMediaBody(this.store.directory, file, plan.render.sha256, maxFileBytes(this.env));
       const publication = { id: randomUUID(), episodeId, projectId: plan.projectId, platform, accountId: plan.accountId,
         providerAccountId: plan.providerAccountId, bindingSha256: plan.bindingSha256, reviewHash: plan.reviewHash,
+        ...metadataBinding,
         renderSha256: plan.render.sha256, route: 'zernio', privacy: 'public', status: 'uploading',
         effectiveAt: plan.effectiveAt, createdAt: new Date().toISOString(), ...(platform === 'youtube' ? { madeForKids } : {}),
         ...(platform === 'tiktok' ? { consentEvidence: sanitizeTikTokZernioAttestation(consent.attestation) } : {}), ...(deliveryId ? { deliveryId } : {}) };
@@ -588,11 +645,17 @@ export class Publisher {
     if (reserved.duplicate) return reserved;
     const { publication, plan } = reserved;
     try {
+      if (metadataBinding.youtubeMetadata !== undefined) {
+        const current = await this.store.read();
+        const persisted = current.publications.find(item => item.id === publication.id);
+        if (!persisted || !youtubeMetadataBindingsMatch(persisted, metadataBinding)) throw new Error('Reserved YouTube metadata snapshot changed before transport.');
+        verifyDeliveryClaim(current, deliveryId, plan, { privacy, madeForKids });
+      }
       const receipt = await adapter.upload({ media, caption: platform === 'youtube' ? plan.metadata.description : plan.caption,
         title: plan.metadata.title, tags: plan.metadata.tags, madeForKids, render: { ...plan.render, format: 'mp4' }, publicationId: publication.id,
         ...(platform === 'tiktok' ? { attestation: consent.attestation, interactionSettings: consent.interactionSettings } : {}),
-        onReceipt: r => this.zernioReceipt(publication.id, r) });
-      return { publication: await this.zernioReceipt(publication.id, receipt) };
+        onReceipt: r => this.zernioReceipt(publication.id, r, metadataBinding.youtubeMetadata === undefined ? undefined : metadataBinding) });
+      return { publication: await this.zernioReceipt(publication.id, receipt, metadataBinding.youtubeMetadata === undefined ? undefined : metadataBinding) };
     } catch {
       return { publication: await this.updatePublication(publication.id, { status: 'unknown', error: 'Zernio outcome requires GET-only reconciliation; no automatic retry.' }) };
     }
@@ -601,16 +664,20 @@ export class Publisher {
   async syncZernio({ publicationId }) {
     const publication = (await this.store.read()).publications.find(p => p.id === publicationId && p.route === 'zernio');
     if (!publication?.providerPostId || !['youtube', 'tiktok'].includes(publication.platform)) throw new Error('Original Zernio provider post receipt is required; no mutation is retried.');
+    const metadataBinding = youtubeMetadataSnapshot(publication, { requireCanonical: true });
+    requireYouTubeMetadataRoute(metadataBinding, { platform: publication.platform, privacy: publication.privacy, publishAt: publication.publishAt, zernio: true });
     const adapter = this.zernioAdapter(publication.platform), readiness = adapter.readiness();
     if (readiness.accountId !== publication.accountId || readiness.providerAccountId !== publication.providerAccountId ||
         providerBinding(this.env, publication.platform)?.evidenceSha256 !== publication.bindingSha256) throw new Error('Reconcile with the original provider account binding.');
     const receipt = await adapter.status({ providerPostId: publication.providerPostId, publicationId: publication.id, renderSha256: publication.renderSha256,
       ...(publication.postId ? { postId: publication.postId } : {}) });
-    return { verified: receipt.confirmed === true && receipt.status === 'published', publication: await this.zernioReceipt(publication.id, receipt) };
+    return { verified: receipt.confirmed === true && receipt.status === 'published', publication: await this.zernioReceipt(publication.id, receipt, metadataBinding) };
   }
 
-  async publishYouTube({ episodeId, privacy = 'private', publishAt, expectedReviewHash, madeForKids, execute = false, deliveryId }) {
-    if (this.zernioSelected('youtube')) return this.publishZernio({ episodeId, platform: 'youtube', privacy, publishAt, expectedReviewHash, madeForKids, execute, deliveryId });
+  async publishYouTube({ episodeId, privacy = 'private', publishAt, expectedReviewHash, madeForKids, execute = false, deliveryId, youtubeMetadata, youtubeMetadataSha256 }) {
+    const metadataBinding = youtubeMetadataSnapshot({ youtubeMetadata, youtubeMetadataSha256 });
+    requireYouTubeMetadataRoute(metadataBinding, { platform: 'youtube', privacy, publishAt, zernio: this.zernioSelected('youtube') });
+    if (this.zernioSelected('youtube')) return this.publishZernio({ episodeId, platform: 'youtube', privacy, publishAt, expectedReviewHash, madeForKids, execute, deliveryId, ...metadataBinding });
     if (typeof madeForKids !== 'boolean') throw new Error('madeForKids must be explicitly selected as a boolean.');
     if (typeof execute !== 'boolean') throw new Error('execute must be a boolean.');
     const initial = await this.preflight({ episodeId, platform: 'youtube', privacy, publishAt });

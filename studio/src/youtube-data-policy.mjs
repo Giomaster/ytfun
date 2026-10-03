@@ -45,7 +45,7 @@ function expired(record, now, fallback) {
 }
 
 function localPublication(record, removedAt) {
-  const local = Object.fromEntries(['id', 'episodeId', 'projectId', 'platform', 'reviewHash', 'renderSha256', 'createdAt', 'effectiveAt', 'privacy', 'madeForKids', 'publishAt', 'deliveryId']
+  const local = Object.fromEntries(['id', 'episodeId', 'projectId', 'platform', 'reviewHash', 'renderSha256', 'youtubeMetadata', 'youtubeMetadataSha256', 'createdAt', 'effectiveAt', 'privacy', 'madeForKids', 'publishAt', 'deliveryId']
     .filter(key => record[key] !== undefined).map(key => [key, record[key]]));
   return { ...local, grantId: record.apiData?.grantId ?? 'legacy', status: 'unknown', localOnly: true, blockReason: 'youtube_api_data_removed', apiDataRemovedAt: removedAt };
 }
@@ -82,7 +82,7 @@ export function purgeYouTubeData(state, { now = Date.now(), all = false, authori
   if (state.deliveries) state.deliveries = state.deliveries.map(record => {
     if (!belongs(record) || record.platform !== 'youtube' || record.localOnly || !(all || removedPublications.has(record.publicationId) || expired(record, now, record.createdAt))) return record;
     counts.deliveries++;
-    const local = Object.fromEntries(['id', 'episodeId', 'platform', 'reviewHash', 'renderSha256', 'privacy', 'madeForKids', 'dueAt', 'mode', 'createdAt', 'startedAt', 'publicationId']
+    const local = Object.fromEntries(['id', 'episodeId', 'platform', 'reviewHash', 'renderSha256', 'youtubeMetadata', 'youtubeMetadataSha256', 'privacy', 'madeForKids', 'dueAt', 'mode', 'createdAt', 'startedAt', 'publicationId']
       .filter(key => record[key] !== undefined).map(key => [key, record[key]]));
     const unstarted = record.status === 'queued' || (record.status === 'attention' && record.phase === 'preflight');
     const status = unstarted || record.status === 'cancelled' ? 'cancelled' : 'attention';

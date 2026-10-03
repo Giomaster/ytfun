@@ -56,14 +56,37 @@ function uploadUrls(data) {
       !Number.isInteger(data.expiresIn) || data.expiresIn < 1 || data.expiresIn > 3600) return null;
   const target = httpsUrl(data.uploadUrl);
   const publicUrl = httpsUrl(data.publicUrl);
-  const objectPaths = target ? [`/${data.key}`, ...(/^\/[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}\//.test(target.pathname) ?
+  // R2 also returns virtual-hosted bucket/account URLs. In that form the
+  // bucket is already in the hostname, so the path must be the exact key.
+  const virtualBucket = target && /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.[a-f0-9]{32}\.r2\.cloudflarestorage\.com$/.test(target.hostname);
+  const singleLabel = target && /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.r2\.cloudflarestorage\.com$/.test(target.hostname);
+  const objectPaths = target ? [`/${data.key}`, ...(!virtualBucket && /^\/[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}\//.test(target.pathname) ?
     [`/${target.pathname.split('/')[1]}/${data.key}`] : [])] : [];
-  if (!target || !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.r2\.cloudflarestorage\.com$/.test(target.hostname) ||
+  if (!target || (!singleLabel && !virtualBucket) ||
       !/^[a-f0-9]{64}$/i.test(target.searchParams.get('X-Amz-Signature') ?? '') ||
       target.searchParams.getAll('X-Amz-Signature').length !== 1 ||
       !publicUrl || publicUrl.hostname !== 'media.zernio.com' || publicUrl.search || publicUrl.pathname !== `/${data.key}` ||
       !objectPaths.includes(target.pathname)) return null;
   return { uploadUrl: target.href, publicUrl: publicUrl.href };
+}
+
+function immediatePostDates(post, target) {
+  // publishNow responses normalize the dispatch instant into scheduledFor.
+  // A future schedule remains invalid; presence alone does not imply scheduling.
+  const schedules = [post?.scheduledFor, target?.scheduledFor].filter(value => value !== undefined && value !== null);
+  if (!schedules.length) return true;
+  const instant = value => {
+    const parts = typeof value === 'string' && value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/);
+    if (!parts) return NaN;
+    const [year, month, day, hour, minute, second] = parts.slice(1).map(Number);
+    const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+    const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    if (month < 1 || month > 12 || day < 1 || day > days[month - 1] || hour > 23 || minute > 59 || second > 59) return NaN;
+    return Date.parse(value);
+  };
+  const createdAt = instant(post?.createdAt);
+  return Number.isFinite(createdAt) && createdAt <= Date.now() + 60_000 &&
+    schedules.every(value => Number.isFinite(instant(value)) && instant(value) <= createdAt);
 }
 
 async function boundedJson(response) {
@@ -231,7 +254,7 @@ export class YouTubeZernio {
       post.metadata?.ytfunRenderSha256 === renderSha256 && Array.isArray(post.platforms) && post.platforms.length === 1 &&
       target?.platform === 'youtube' && targetId === this.#binding.providerAccountId &&
       target.platformSpecificData?.visibility === 'public' && target.platformSpecificData?.containsSyntheticMedia === true &&
-      !post.scheduledFor && !target.scheduledFor && !target.removedFromPlatformAt && post.status !== 'draft' && post.status !== 'cancelled';
+      immediatePostDates(post, target) && !target.removedFromPlatformAt && post.status !== 'draft' && post.status !== 'cancelled';
   }
 
   async status({ providerPostId, publicationId, renderSha256 } = {}) {
