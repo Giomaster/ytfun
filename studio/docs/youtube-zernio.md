@@ -93,6 +93,63 @@ connection approval are completed by the owner. For a Brand Account the Google
 account chooser must select its Brand identity; Zernio documents no later channel
 picker. YouTube Studio-only editor permissions do not imply API ownership.
 
+## Delivery-specific metadata snapshot
+
+Shared episodes retain their original metadata, render and approval. YouTube may
+use a complete, separate presentation for one immediate PUBLIC Zernio delivery:
+
+```js
+import { normalizeYouTubeMetadata, youtubeMetadataHash } from '../src/publishing.mjs';
+
+const youtubeMetadata = normalizeYouTubeMetadata({
+  title: 'A Cat in the Light',
+  description: 'A miniature cat story with original nonverbal sound. #AIMeow',
+  tags: ['AIMeow', 'AIArt', 'MiniatureStory'],
+});
+const youtubeMetadataSha256 = youtubeMetadataHash(youtubeMetadata);
+const input = { episodeId, expectedReviewHash, privacy: 'public', madeForKids,
+  youtubeMetadata, youtubeMetadataSha256 };
+await publisher.preflight({ ...input, platform: 'youtube' });
+const { delivery } = await queue.enqueue({ ...input, platform: 'youtube', dueAt });
+await queue.runDue({ execute: true, platform: 'youtube',
+  expectedDeliveryId: delivery.id, youtubeMetadataSha256 });
+```
+
+The snapshot requires exactly `title`, `description` and an explicit `tags` array;
+it is a complete replacement, with no inherited hashtags or missing-field fallback.
+Strings are trimmed. Title is 1–100 characters on one line without angle brackets;
+description is 1–5,000 characters and UTF-8 bytes without angle brackets. Tags are
+nonempty strings of at most 100 characters each; the 500-character aggregate
+counts commas and quotes for tags containing whitespace. An empty tags array is
+valid. The hash is lowercase SHA256 over UTF-8 `JSON.stringify({ description,
+tags, title })` after normalization, preserving the tag order.
+
+`Publisher.preflight`, `publishYouTube`, `publishZernio` and `DeliveryQueue.enqueue`
+accept the snapshot/hash pair together. Persisted delivery and publication fields
+use the same names, and must already be normalized. The queue passes its stored
+snapshot into planning and reservation; it never accepts transient metadata in
+`runDue`. Its optional expected hash requires `platform:'youtube'` and the exact
+`expectedDeliveryId`, providing a compare-and-set guard before the claim. Claim,
+reservation, transport and provider receipt handling revalidate the binding.
+An unstarted reschedule requires both fields in `expectedClaim` when the delivery
+has a snapshot, alongside the existing exact claim fields. Reconciliation also
+requires the original snapshot binding.
+API-data purge/disconnection keeps the snapshot and hash as original local
+identity on both publications and deliveries; API identifiers and cached status
+still follow the existing removal rules. Retaining the snapshot never authorizes
+another upload or proves publication.
+
+Without the pair, historical behavior is unchanged. Partial, malformed, unbound
+or changed snapshots are rejected. Native Google uploads, other platforms,
+nonpublic visibility and provider scheduling do not support this override.
+The snapshot never changes `expectedReviewHash`, render/source fingerprints or
+shared approvals. Duplicate detection remains keyed to the episode and platform:
+another title, description or snapshot cannot create another publication or
+release a reserved/unknown attempt. Direct `publishYouTube`/`publishZernio` calls
+use the same pair and gates. Approval and rights, exact account binding, public
+visibility, synthetic disclosure and cadence remain required. Use a runtime
+containing this maintenance only after its exact GitHub Actions CI succeeds.
+
 Primary references consulted 2026-10-02:
 
 - [Zernio YouTube platform, fields, scopes and ownership](https://docs.zernio.com/platforms/youtube)
