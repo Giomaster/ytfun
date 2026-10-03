@@ -49,18 +49,20 @@ attention checkpoints without diagnostics cannot be retroactively reclassified.
 
 Before import, verify the Actions run and commit through GitHub, bind that identity
 with `RemoteBatch.bindRun`, and pass the exact artifact to `RemoteBatch.accept`.
-The implemented `rejectAsset` mechanism preserves a rejected asset in the
-cost/history ledger. That rejected asset cannot enter rendering, manifest export,
-editorial approval, derivation or publication/export. Rejection participates in the asset review hash; selection
-stops on the rejected current asset instead of falling back to older footage.
+The implemented `rejectAsset` mechanism preserves its review in the cost/history
+ledger and asset review hash. Without owner-accepted technical operation, a rejected
+selected asset is blocked rather than replaced silently with older footage. With
+`YTFUN_OWNER_ACCEPTED_TECHNICAL_REVIEW_ENABLED=true`, historical aesthetic rejection
+does not veto assembly, approval, derivation or publication. File integrity,
+synthetic provenance, license evidence and exact review hashes still apply.
 Import verifies batch, scene, source, reference, run, commit and MP4 hash before
 committing a synthetic asset and completing the matching spending reservation.
 It does not approve media or publish anything. Hash-bound approval, remote assembly
 registration and platform publication remain separate stages. These mechanisms
 do not authorize new aesthetic rejection under the active AI Meow policy. Existing
-historical rejections remain evidence; authorized reuse of the existing bytes must
-use supported asset-registration APIs with truthful lineage/owner acceptance,
-without erasing old records or generating a replacement to bypass the rejection.
+historical rejections remain evidence; authorized reuse keeps the existing bytes
+and records. There is no need to clone an asset record solely to bypass aesthetic
+rejection, erase a review or generate a replacement.
 
 A terminal owned Actions job can release an unsubmitted reservation only when the
 verified provider step was skipped (`releaseUnsubmitted`). Failed or interrupted

@@ -93,12 +93,12 @@ function number(value, name, minimum, maximum = Infinity) {
   return value;
 }
 
-/** null removes the editorial count cap; only absent fields get legacy defaults. */
+/** Absent editorial limits are unrestricted; explicit limits remain authoritative. */
 export function normalizeProjectCadence(value, { defaults = false, prefix = 'cadence' } = {}) {
   if (value === undefined && defaults) value = {};
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${prefix} must be an object`);
-  const min = defaults && !Object.hasOwn(value, 'minHoursBetweenPosts') ? 24 : value.minHoursBetweenPosts;
-  const max = defaults && !Object.hasOwn(value, 'maxPostsPerRollingDay') ? 1 : value.maxPostsPerRollingDay;
+  const min = defaults && !Object.hasOwn(value, 'minHoursBetweenPosts') ? 0 : value.minHoursBetweenPosts;
+  const max = defaults && !Object.hasOwn(value, 'maxPostsPerRollingDay') ? null : value.maxPostsPerRollingDay;
   number(min, `${prefix}.minHoursBetweenPosts`, 0);
   if (max !== null && (!Number.isSafeInteger(max) || max < 1)) throw new Error(`${prefix}.maxPostsPerRollingDay must be a positive safe integer or null`);
   return { minHoursBetweenPosts: min, maxPostsPerRollingDay: max };
@@ -154,6 +154,7 @@ export function episodeReviewHash(episode) {
     ...(episode.format === undefined ? {} : { format: episode.format }),
     ...(episode.renderCanvas === undefined ? {} : { renderCanvas: episode.renderCanvas }),
     ...(episode.derivation === undefined ? {} : { derivation: episode.derivation }),
+    ...(episode.fragmentComposition === undefined ? {} : { fragmentComposition: episode.fragmentComposition }),
     continuityNote: episode.continuityNote, originalAngle: episode.originalAngle,
     factualSources: episode.factualSources ?? [], scenes: episode.scenes,
     metadata: episode.metadata, trendIds: episode.trendIds,
@@ -177,7 +178,13 @@ export function episodeAssetHash(episode, assets) {
     const asset = assets.find((entry) => entry.id === id);
     return asset ? { id, episodeId: asset.episodeId, sceneId: asset.sceneId, kind: asset.kind, path: asset.path, sha256: asset.sha256, synthetic: asset.synthetic, provenance: asset.provenance, ...(asset.lineage === undefined ? {} : { lineage: asset.lineage }), ...(asset.qualityReview === undefined ? {} : { qualityReview: asset.qualityReview }) } : { id, missing: true };
   });
-  return createHash('sha256').update(canonicalJson(manifest)).digest('hex');
+  const snapshot = episode.fragmentComposition === undefined ? manifest : { assets: manifest, fragmentComposition: episode.fragmentComposition };
+  return createHash('sha256').update(canonicalJson(snapshot)).digest('hex');
+}
+
+/** Historical aesthetic reviews remain evidence, without vetoing the opted-in operation. */
+export function assetQualityRejectionBlocks(asset, env = {}) {
+  return asset?.qualityReview?.decision === 'rejected' && env.YTFUN_OWNER_ACCEPTED_TECHNICAL_REVIEW_ENABLED !== 'true';
 }
 
 export async function studioArtifactPath(directory, relativePath) {
@@ -225,7 +232,7 @@ function sourceRanges(parent, sceneIds, scenes) {
   return sceneIds.map((id, index) => ({ ...ranges.get(id), sceneId: scenes[index].id }));
 }
 
-function derivationSource(state, episode) {
+function derivationSource(state, episode, env = {}) {
   const lineage = episode.derivation;
   if (!lineage || episodeLimits(episode).format !== 'short') throw new Error('Derived episodes must be short and retain their lineage');
   const parent = requireEpisode(state, lineage.parentEpisodeId);
@@ -254,7 +261,7 @@ function derivationSource(state, episode) {
       const record = lineage.assets?.find(asset => asset.sourceAssetId === original?.id && asset.sceneId === scene.id);
       const copied = state.assets.find(asset => asset.id === record?.assetId);
       if (!original || original.episodeId !== parent.id || original.sceneId !== id || !copied || copied.episodeId !== episode.id || copied.sceneId !== scene.id || copiedIds.has(copied.id)) throw new Error('Derived scene assets must be copied and remapped from their original source');
-      if (original.qualityReview?.decision === 'rejected' || copied.qualityReview?.decision === 'rejected') throw new Error('Rejected assets cannot be used as original or copied derivation sources');
+      if (assetQualityRejectionBlocks(original, env) || assetQualityRejectionBlocks(copied, env)) throw new Error('Rejected assets cannot be used as original or copied derivation sources without owner-accepted technical operation');
       copiedIds.add(copied.id);
       const expected = { sourceEpisodeId: parent.id, sourceSceneId: id, sourceAssetId: original.id, sourceSha256: original.sha256, parentRenderSha256: parent.render.sha256 };
       if (record.sourceSceneId !== id || record.sha256 !== original.sha256 || canonicalJson(copied.lineage) !== canonicalJson(expected) || copied.kind !== original.kind || copied.path !== original.path || copied.sha256 !== original.sha256 || copied.synthetic !== true || canonicalJson(copied.provenance) !== canonicalJson(original.provenance)) throw new Error('Derived assets must preserve original bytes, generation provenance and lineage');
@@ -266,23 +273,41 @@ function derivationSource(state, episode) {
   return { parent, references };
 }
 
-function sourceParentPair(state, left, right) {
+function sourceParentPair(state, left, right, env = {}) {
   const child = left.derivation?.parentEpisodeId === right.id ? left : right.derivation?.parentEpisodeId === left.id ? right : null;
   if (!child) return false;
-  try { derivationSource(state, child); return true; } catch { return false; }
+  try { derivationSource(state, child, env); return true; } catch { return false; }
 }
 
-async function validateDerivation(state, episode, directory) {
-  const { parent, references } = derivationSource(state, episode);
+async function validateDerivation(state, episode, directory, env = {}) {
+  const { parent, references } = derivationSource(state, episode, env);
   await validateArtifactFile(directory, parent.render, episodeLimits(parent).maxRenderBytes);
   for (const asset of references) { licenseEvidence(asset); await validateArtifactFile(directory, asset, sourceAssetMaximumBytes); }
 }
 
-export async function validateEpisodeDerivation(state, episode, directory) {
-  if (episode.derivation !== undefined) await validateDerivation(state, episode, directory);
+export async function validateEpisodeDerivation(state, episode, directory, { env = {}, compositionAncestors = new Set() } = {}) {
+  if (episode.derivation !== undefined && episode.fragmentComposition !== undefined) throw new Error('An episode cannot combine legacy derivation and direct fragment composition');
+  if (episode.derivation !== undefined) await validateDerivation(state, episode, directory, env);
+  if (episode.fragmentComposition !== undefined) {
+    const { validateFragmentComposition } = await import('./fragment-composition.mjs');
+    await validateFragmentComposition(state, episode, directory, { env, ancestors: compositionAncestors });
+  }
 }
 
-async function episodeFindings(state, episode, directory) {
+/** Read-only source validation shared by composition planning and later approval/delivery. */
+export async function validateEpisodeCompositionSource(state, episode, directory, { env = {}, compositionAncestors = new Set() } = {}) {
+  const findings = (await episodeFindings(state, episode, directory, env, compositionAncestors)).filter(entry => entry.code !== 'episode_busy');
+  if (findings.length) throw new Error(`Fragment source ${episode.id} is invalid: ${findings.map(entry => entry.message).join('; ')}`);
+}
+
+function originalityAdvisories(state, episode, env) {
+  return state.episodes.filter(other => other.id !== episode.id &&
+    (tokenOverlap(other.title, episode.title) > 0.85 || (!sourceParentPair(state, other, episode, env) && repeatedStory(other, episode))))
+    .map(other => ({ severity: 'advisory', code: 'text_similarity', relatedEpisodeId: other.id,
+      message: `Text resembles episode ${other.id}; compare the actual concept and media history. Text overlap alone does not establish duplicate content.` }));
+}
+
+async function episodeFindings(state, episode, directory, env = {}, compositionAncestors = new Set()) {
   const findings = [];
   const add = (code, message) => findings.push({ severity: 'blocker', code, message });
   const project = state.projects.find((entry) => entry.id === episode.projectId);
@@ -303,15 +328,14 @@ async function episodeFindings(state, episode, directory) {
     for (const scene of episode.scenes) { text(scene.id, 'scene.id', 100); number(scene.durationSeconds, 'durationSeconds', 1, 60); sceneNarration(scene.narration, mode); text(scene.visualPrompt, 'visualPrompt'); }
     if (episode.scenes.reduce((sum, scene) => sum + scene.durationSeconds, 0) > limits.maxDurationSeconds) throw new Error(`Episode duration cannot exceed ${limits.maxDurationSeconds} seconds`);
   } catch (error) { add('scene_script_invalid', error.message); }
-  if (episode.derivation !== undefined) {
-    try { await validateDerivation(state, episode, directory); } catch (error) { add('derivation_invalid', error.message); }
+  if (episode.derivation !== undefined || episode.fragmentComposition !== undefined) {
+    try { await validateEpisodeDerivation(state, episode, directory, { env, compositionAncestors }); }
+    catch (error) { add(episode.fragmentComposition === undefined ? 'derivation_invalid' : 'composition_invalid', error.message); }
   }
-  const duplicates = state.episodes.filter((other) => other.id !== episode.id && (tokenOverlap(other.title, episode.title) > 0.85 || (!sourceParentPair(state, other, episode) && repeatedStory(other, episode))));
-  if (duplicates.length) add('duplicate_episode', `Near duplicate episodes: ${duplicates.map((entry) => entry.id).join(', ')}`);
   if (!episode.originalAngle?.trim()) add('original_angle_missing', 'Describe the original narrative angle.');
   if (['rendering', 'publishing', 'processing', 'uploaded', 'scheduled', 'published'].includes(episode.status) || state.publications.some((publication) => publication.episodeId === episode.id && ['reserved', 'uploading', 'sending', 'unknown', 'processing', 'uploaded', 'scheduled', 'published'].includes(publication.status))) add('episode_busy', 'Publication has reserved or frozen this episode; approval cannot change until its outcome is reconciled.');
   if (!episode.render) {
-    add('render_missing', 'Generate and watch the final render before approval.');
+    add('render_missing', 'Register the final render before approval.');
     return findings;
   }
   if (episode.render.synthetic !== true) add('render_not_synthetic', 'The render must identify the content as AI generated.');
@@ -339,7 +363,7 @@ async function episodeFindings(state, episode, directory) {
     for (const [field, allowed] of fields) {
       const asset = state.assets.find((entry) => entry.id === linked?.[field]);
       if (!asset || asset.episodeId !== episode.id || asset.sceneId !== scene.id || !allowed.includes(asset.kind)) { add('scene_asset_invalid', `${scene.id}: ${field} needs a linked AI-generated ${allowed.join('/')} asset.`); continue; }
-      if (asset.qualityReview?.decision === 'rejected') { add('asset_rejected', `Asset ${asset.id} was rejected by quality review; replace it explicitly before approval or derivation.`); continue; }
+      if (assetQualityRejectionBlocks(asset, env)) { add('asset_rejected', `Asset ${asset.id} was rejected by quality review; owner-accepted technical operation is required to retain it.`); continue; }
       try { licenseEvidence(asset); await validateArtifactFile(directory, asset, sourceAssetMaximumBytes); } catch (error) { add('asset_invalid', error.message); }
     }
   }
@@ -433,9 +457,6 @@ export class Studio {
         const observedAt = Date.parse(trend.observedAt);
         if (!Number.isFinite(observedAt) || observedAt > Date.now() + futureToleranceMs || Date.now() - observedAt > maximumTrendAgeMs) throw new Error(`Trend evidence is stale or invalid (maximum age 7 days): ${id}`);
       }
-      for (const previous of state.episodes) {
-        if (tokenOverlap(previous.title, episode.title) > 0.85 || repeatedStory(previous, episode)) throw new Error(`Near duplicate episode ${previous.id}: title or ${mode === 'narrated' ? 'narration' : 'visual story'} token overlap exceeds 0.85`);
-      }
       state.episodes.push(episode);
       return episode;
     });
@@ -455,7 +476,7 @@ export class Studio {
       if (episodeLimits(parent).format !== 'long' || parent.derivation !== undefined || !parent.render || !['rendered', 'approved', 'publishing', 'processing', 'uploaded', 'scheduled', 'published'].includes(parent.status)) throw new Error('Derivation requires an original rendered long episode');
       if (state.spending.some(entry => entry.episodeId === parent.id && ['reserved', 'unknown'].includes(entry.status))) throw new Error('Resolve pending source generation outcomes before derivation');
       if (state.episodes.some(entry => entry.derivation?.parentEpisodeId === parent.id && canonicalJson(entry.derivation.sourceSceneIds) === canonicalJson(ids))) throw new Error('This source scene selection has already been derived');
-      const findings = (await episodeFindings(state, parent, this.store.directory)).filter(entry => entry.code !== 'episode_busy');
+      const findings = (await episodeFindings(state, parent, this.store.directory, this.env)).filter(entry => entry.code !== 'episode_busy');
       if (findings.length) throw new Error(`Derivation source is invalid: ${findings.map(entry => entry.message).join('; ')}`);
       let previous = -1;
       const scenes = ids.map((id) => {
@@ -481,10 +502,7 @@ export class Studio {
         }
       }
       state.assets.push(...copied);
-      await validateDerivation(state, episode, this.store.directory);
-      for (const previousEpisode of state.episodes) {
-        if (tokenOverlap(previousEpisode.title, episode.title) > 0.85 || (!sourceParentPair(state, previousEpisode, episode) && repeatedStory(previousEpisode, episode))) throw new Error(`Near duplicate episode ${previousEpisode.id}: title or visual story/narration token overlap exceeds 0.85`);
-      }
+      await validateDerivation(state, episode, this.store.directory, this.env);
       state.episodes.push(episode);
       return episode;
     });
@@ -520,13 +538,14 @@ export class Studio {
   async editorialReview(id) {
     const state = await this.store.read();
     const episode = requireEpisode(state, id);
-    const findings = await episodeFindings(state, episode, this.store.directory);
+    const findings = await episodeFindings(state, episode, this.store.directory, this.env);
     let limits;
     try { limits = episodeLimits(episode); } catch { limits = { format: episode.format }; }
     return {
       episodeId: episode.id, readyForApproval: findings.length === 0, findings,
+      advisories: originalityAdvisories(state, episode, this.env),
       reviewHash: episodeReviewHash(episode),
-      limits: { format: limits.format, maximumScenes: limits.maxScenes, maximumDurationSeconds: limits.maxDurationSeconds, maximumRenderBytes: limits.maxRenderBytes, maximumTrendAgeDays: 7, duplicateTokenOverlapThreshold: 0.85, cadenceIsEditorialHypothesis: true, monetization: 'Platform eligibility and revenue require platform decisions and observed results; no views or income are promised.' },
+      limits: { format: limits.format, maximumScenes: limits.maxScenes, maximumDurationSeconds: limits.maxDurationSeconds, maximumRenderBytes: limits.maxRenderBytes, maximumTrendAgeDays: 7, textSimilarityAdvisoryThreshold: 0.85, textSimilarityIsAdvisory: true, cadenceIsEditorialHypothesis: true, monetization: 'Platform eligibility and revenue require platform decisions and observed results; no views or income are promised.' },
     };
   }
 
@@ -534,7 +553,7 @@ export class Studio {
     return this.store.transaction(async (state) => {
       const episode = requireEpisode(state, input.episodeId);
       const review = normalizeApprovalReview(input.review, { env: this.env, render: episode.render });
-      const findings = await episodeFindings(state, episode, this.store.directory);
+      const findings = await episodeFindings(state, episode, this.store.directory, this.env);
       if (findings.length) throw new Error(`Episode is not ready for approval: ${findings.map((entry) => entry.message).join('; ')}`);
       episode.approval = { reviewHash: episodeReviewHash(episode), assetReviewHash: episodeAssetHash(episode, state.assets), approvedAt: new Date().toISOString(), review };
       episode.status = 'approved';

@@ -55,15 +55,21 @@ exportação TikTok em publicação.
 8. Métricas observadas e estimativas de custo orientam o próximo experimento.
    Métricas das plataformas ficam separadas; ausência de dado não vira zero.
 
+Para composição independente, use [FragmentComposition.plan / ytfun_episode_compose](docs/fragment-composition.md):
+combina cenas completas de fragmentos curtos ou longos com áudio, sem master prévio.
+Metadados específicos de rede usam `publicationMetadata` e seu hash por publicação,
+preservando episódio, render e aprovação compartilhados. O helper read-only
+`ytfun_publication_metadata_prepare` normaliza o snapshot e calcula o binding.
+
 Na API específica `deriveShort`, um short é derivado de cenas escolhidas de um
 pai longo válido e já renderizado. Essa exigência pertence somente àquela API;
 uma obra independente pode ser planejada e montada com fontes existentes sem
 esperar um master. A operação `deriveShort` copia/remapeia os assets originais e
 preserva proveniência, hashes, lineage e intervalos da timeline planejada; não
 corta o MP4, não inventa uma nova geração e não aprova o resultado. O short fica
-`planned`, precisa de render e revisão próprios. Nesta API, cenas repetidas,
-títulos repetidos e outras histórias quase iguais continuam bloqueados; a exceção
-de reutilização narrativa é documentada entre pai e filho. Mudanças no pai invalidam a derivação
+`planned`, precisa de render e revisão próprios. Nesta API, uma seleção exata já
+derivada permanece protegida contra criação duplicada. Similaridade textual é
+apenas aviso para conferir ideias e mídia. Mudanças no pai invalidam a derivação
 para revisão e entrega. A seleção deve ter hook, desenvolvimento e final completo.
 
 ### Registro verdadeiro de aceite técnico
@@ -134,7 +140,8 @@ worker vivo e ajustar o timeout do cliente.
 | Projetos | `ytfun_project_create`, `ytfun_project_insights` |
 | Pesquisa de audiência | `ytfun_trend_discover` (YouTube oficial), `ytfun_trend_record` (outros conectores/evidência) |
 | Ferramentas de produção | `ytfun_production_models` (catálogo Hugging Face; sem sinal de audiência) |
-| Roteiro | `ytfun_episode_plan`, `ytfun_episode_get`, `ytfun_episode_derive_short` |
+| Roteiro e composição | `ytfun_episode_plan`, `ytfun_episode_get`, `ytfun_episode_compose`, `ytfun_episode_derive_short` |
+| Metadados por rede | `ytfun_publication_metadata_prepare` |
 | Assets e edição | `ytfun_asset_generate`, `ytfun_asset_import`, `ytfun_episode_render`, `ytfun_episode_render_manifest`, `ytfun_episode_render_register` |
 | Produção demorada | `ytfun_production_job_start`, `ytfun_production_job_get`, `ytfun_production_job_reconcile` |
 | Revisão | `ytfun_episode_review`, `ytfun_episode_approve` |
@@ -204,8 +211,8 @@ fatura. Uma estimativa zero não prova que a inferência é gratuita. Confirme o
 saldo/crédito e termos do provider antes de usar modelos. Não há modelo fixo,
 tarifa presumida, promessa de crédito suficiente ou migração automática para pago.
 
-Projetos sem configuração de cadência mantêm o padrão legado de 24 horas/uma
-publicação. A configuração explícita aceita intervalo não negativo e contagem
+Projetos sem configuração de cadência usam `0/null`, sem cooldown ou teto editorial
+oculto. A configuração explícita aceita intervalo não negativo e contagem
 positiva inteira ou `null` (sem teto editorial de quantidade). `0/null` permite
 que as especialistas escolham a frequência conforme rede, modo e estratégia.
 O publisher aplica políticas numéricas mais restritivas de projetos que compartilham
